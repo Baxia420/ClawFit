@@ -1,0 +1,36 @@
+{
+  "name": "clawfit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @clawfit/api --filter @clawfit/web dev",
+    "build": "pnpm -r build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "oxlint .",
+    "typecheck": "tsc -p tsconfig.scripts.json --noEmit && pnpm -r typecheck",
+    "db:generate": "pnpm --filter @clawfit/db generate",
+    "db:migrate": "pnpm --filter @clawfit/db migrate",
+    "db:studio": "pnpm --filter @clawfit/db studio",
+    "models:smoke": "tsx scripts/models-smoke.ts",
+    "models:configure": "tsx scripts/configure-openclaw.ts",
+    "openclaw:setup": "pnpm openclaw:plugin:build && tsx scripts/setup-openclaw.ts",
+    "openclaw:plugin:build": "pnpm --filter @clawfit/openclaw-health build",
+    "openclaw:plugin:validate": "pnpm --filter @clawfit/openclaw-health validate",
+    "nutrition:manual": "tsx scripts/manual-nutrition-test.ts"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "latest",
+    "@types/node": "latest",
+    "dotenv": "latest",
+    "oxlint": "latest",
+    "tsx": "latest",
+    "typescript": "latest",
+    "vitest": "latest"
+  }
+}

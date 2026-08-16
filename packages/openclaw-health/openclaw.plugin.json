@@ -1,0 +1,45 @@
+{
+  "id": "clawfit-health",
+  "name": "ClawFit Health",
+  "description": "Authenticated domain tools for nutrition and workout tracking.",
+  "skills": [
+    "./skills"
+  ],
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "apiUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:4000"
+      }
+    },
+    "additionalProperties": false
+  },
+  "version": "0.1.0",
+  "contracts": {
+    "tools": [
+      "estimate_nutrition",
+      "log_meal",
+      "get_meal",
+      "get_recent_meals",
+      "update_meal",
+      "delete_meal",
+      "get_daily_nutrition",
+      "save_food_preset",
+      "find_food_preset",
+      "update_food_preset",
+      "delete_food_preset",
+      "start_workout",
+      "get_active_workout",
+      "add_workout_set",
+      "update_workout_set",
+      "delete_workout_set",
+      "finish_workout",
+      "get_previous_exercise_performance",
+      "get_workout_history"
+    ]
+  }
+}
