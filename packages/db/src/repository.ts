@@ -1,7 +1,19 @@
-import { and, asc, desc, eq, gte, ilike, lt, sql } from "drizzle-orm";
-import { estimatedOneRepMax, sumNutrition, workoutVolume, type MealInput, type MealPatch, type WorkoutSetInput, type WorkoutSetPatch } from "@clawfit/health-core";
+import { and, asc, desc, eq, gt, gte, ilike, isNull, lt, sql } from "drizzle-orm";
+import {
+  estimatedOneRepMax,
+  sumNutrition,
+  workoutVolume,
+  type MealInput,
+  type MealPatch,
+  type NotificationPreferenceInput,
+  type PendingMealInput,
+  type PendingMealPatch,
+  type SettingsPatch,
+  type WorkoutSetInput,
+  type WorkoutSetPatch,
+} from "@clawfit/health-core";
 import type { HealthDatabase } from "./client.js";
-import { exercises, foodPresets, mealItems, meals, workouts, workoutSets } from "./schema.js";
+import { exercises, foodPresets, mealItems, meals, notificationPreferences, pendingMealEstimates, userSettings, workouts, workoutSets } from "./schema.js";
 
 export class NotFoundError extends Error {
   override name = "NotFoundError";
@@ -41,9 +53,166 @@ export class HealthRepository {
       if (input.items.length > 0) {
         await tx.insert(mealItems).values(input.items.map((item) => ({ mealId: created.id, name: item.name, portionDescription: item.portionDescription })));
       }
+      await tx
+        .update(pendingMealEstimates)
+        .set({ confirmed: true, confirmedAt: new Date(), mealId: created.id, updatedAt: new Date() })
+        .where(eq(pendingMealEstimates.idempotencyKey, input.idempotencyKey));
       return this.getMealWith(tx, created.id);
     });
   }
+
+  async createPendingMeal(input: PendingMealInput) {
+    const existing = await this.db.query.pendingMealEstimates.findFirst({
+      where: eq(pendingMealEstimates.idempotencyKey, input.idempotencyKey),
+    });
+    if (existing) return existing;
+    const expiresAt = new Date(Date.now() + (input.expiresInSeconds ?? 7_200) * 1000);
+    const [created] = await this.db
+      .insert(pendingMealEstimates)
+      .values({
+        label: input.label,
+        items: input.items,
+        caloriesBest: input.calories.best,
+        caloriesLow: input.calories.low,
+        caloriesHigh: input.calories.high,
+        proteinG: input.macros.proteinG,
+        carbsG: input.macros.carbsG,
+        fatG: input.macros.fatG,
+        fiberG: input.macros.fiberG,
+        confidence: input.confidence,
+        uncertaintyReasons: input.uncertaintyReasons,
+        source: input.source,
+        rawUserText: input.rawUserText ?? null,
+        occurredAt: input.occurredAt,
+        idempotencyKey: input.idempotencyKey,
+        confirmed: false,
+        expiresAt,
+      })
+      .returning();
+    if (!created) throw new Error("Pending meal insert returned no record");
+    return created;
+  }
+
+  async getPendingMeal(id: string) {
+    const pending = await this.db.query.pendingMealEstimates.findFirst({
+      where: eq(pendingMealEstimates.id, id),
+    });
+    if (!pending) throw new NotFoundError("Pending meal estimate not found");
+    return pending;
+  }
+
+  async getLatestPendingMeal(now = new Date()) {
+    const pending = await this.db.query.pendingMealEstimates.findFirst({
+      where: and(
+        eq(pendingMealEstimates.confirmed, false),
+        isNull(pendingMealEstimates.cancelledAt),
+        gt(pendingMealEstimates.expiresAt, now),
+      ),
+      orderBy: desc(pendingMealEstimates.createdAt),
+    });
+    return pending ?? null;
+  }
+
+  async updatePendingMeal(id: string, patch: PendingMealPatch) {
+    const current = await this.getPendingMeal(id);
+    if (current.confirmed) throw new ConflictError("A confirmed meal draft cannot be edited");
+    if (current.cancelledAt) throw new ConflictError("A cancelled meal draft cannot be edited");
+    const nextLow = patch.caloriesLow ?? current.caloriesLow;
+    const nextBest = patch.caloriesBest ?? current.caloriesBest;
+    const nextHigh = patch.caloriesHigh ?? current.caloriesHigh;
+    if (nextLow > nextBest || nextBest > nextHigh) {
+      throw new ConflictError("Calorie range must satisfy low <= best <= high");
+    }
+    const [updated] = await this.db
+      .update(pendingMealEstimates)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(pendingMealEstimates.id, id))
+      .returning();
+    if (!updated) throw new NotFoundError("Pending meal estimate not found");
+    return updated;
+  }
+
+  async cancelPendingMeal(id: string) {
+    const current = await this.getPendingMeal(id);
+    if (current.confirmed) throw new ConflictError("A confirmed meal draft cannot be cancelled");
+    if (current.cancelledAt) return current;
+    const [cancelled] = await this.db
+      .update(pendingMealEstimates)
+      .set({ cancelledAt: new Date(), updatedAt: new Date() })
+      .where(eq(pendingMealEstimates.id, id))
+      .returning();
+    if (!cancelled) throw new NotFoundError("Pending meal estimate not found");
+    return cancelled;
+  }
+
+  async confirmPendingMeal(id: string, options: { occurredAt?: Date | undefined; idempotencyKey?: string | undefined } = {}) {
+
+    return this.db.transaction(async (tx) => {
+      const pending = await tx.query.pendingMealEstimates.findFirst({
+        where: eq(pendingMealEstimates.id, id),
+      });
+      if (!pending) throw new NotFoundError("Pending meal estimate not found");
+      if (pending.cancelledAt) throw new ConflictError("A cancelled meal draft cannot be confirmed");
+      if (pending.confirmed && pending.mealId) {
+        const existingMeal = await this.getMealWith(tx, pending.mealId);
+        if (existingMeal) return existingMeal;
+      }
+      const mealIdempotencyKey = options.idempotencyKey ?? `confirmed_${pending.idempotencyKey}`;
+      const existingByUq = await tx.query.meals.findFirst({
+        where: eq(meals.idempotencyKey, mealIdempotencyKey),
+      });
+      if (existingByUq) {
+        await tx
+          .update(pendingMealEstimates)
+          .set({ confirmed: true, confirmedAt: new Date(), mealId: existingByUq.id, updatedAt: new Date() })
+          .where(eq(pendingMealEstimates.id, id));
+        return this.getMealWith(tx, existingByUq.id);
+      }
+
+      const [created] = await tx
+        .insert(meals)
+        .values({
+          occurredAt: options.occurredAt ?? pending.occurredAt,
+          label: pending.label,
+          caloriesBest: pending.caloriesBest,
+          caloriesLow: pending.caloriesLow,
+          caloriesHigh: pending.caloriesHigh,
+          proteinG: pending.proteinG,
+          carbsG: pending.carbsG,
+          fatG: pending.fatG,
+          fiberG: pending.fiberG,
+          confidence: pending.confidence,
+          uncertaintyReasons: pending.uncertaintyReasons,
+          source: pending.source,
+          rawUserText: pending.rawUserText,
+          idempotencyKey: mealIdempotencyKey,
+        })
+        .onConflictDoNothing({ target: meals.idempotencyKey })
+        .returning();
+
+      const persisted = created ?? await tx.query.meals.findFirst({ where: eq(meals.idempotencyKey, mealIdempotencyKey) });
+      if (!persisted) throw new Error("Confirmed meal could not be resolved");
+
+      const items = Array.isArray(pending.items) ? pending.items : [];
+      if (created && items.length > 0) {
+        await tx.insert(mealItems).values(
+          items.map((item) => ({
+            mealId: persisted.id,
+            name: item.name,
+            portionDescription: item.portionDescription,
+          })),
+        );
+      }
+
+      await tx
+        .update(pendingMealEstimates)
+        .set({ confirmed: true, confirmedAt: new Date(), mealId: persisted.id, updatedAt: new Date() })
+        .where(eq(pendingMealEstimates.id, id));
+
+      return this.getMealWith(tx, persisted.id);
+    });
+  }
+
 
   async getMeal(id: string) {
     const result = await this.getMealWith(this.db, id);
@@ -269,6 +438,40 @@ export class HealthRepository {
       .orderBy(desc(workoutSets.occurredAt))
       .limit(limit);
     return rows.map(({ set, workout }) => ({ ...set, workoutName: workout.name, workoutId: workout.id, estimatedOneRepMax: estimatedOneRepMax(set.weightKg, set.reps) }));
+  }
+
+  async getSettings() {
+    const existing = await this.db.query.userSettings.findFirst({ where: eq(userSettings.id, "default") });
+    if (existing) return existing;
+    await this.db.insert(userSettings).values({ id: "default" }).onConflictDoNothing();
+    const created = await this.db.query.userSettings.findFirst({ where: eq(userSettings.id, "default") });
+    if (!created) throw new Error("Settings insert returned no record");
+    return created;
+  }
+
+  async updateSettings(patch: SettingsPatch) {
+    await this.db
+      .insert(userSettings)
+      .values({ id: "default", ...patch })
+      .onConflictDoUpdate({ target: userSettings.id, set: { ...patch, updatedAt: new Date() } });
+    return this.getSettings();
+  }
+
+  async listNotificationPreferences() {
+    return this.db.select().from(notificationPreferences).orderBy(asc(notificationPreferences.type));
+  }
+
+  async upsertNotificationPreference(input: NotificationPreferenceInput) {
+    const [saved] = await this.db
+      .insert(notificationPreferences)
+      .values(input)
+      .onConflictDoUpdate({
+        target: notificationPreferences.type,
+        set: { ...input, updatedAt: new Date() },
+      })
+      .returning();
+    if (!saved) throw new Error("Notification preference upsert returned no record");
+    return saved;
   }
 
   async checkReady() {

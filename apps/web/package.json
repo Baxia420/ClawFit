@@ -12,11 +12,11 @@
     "next": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "recharts": "latest"
+    "recharts": "latest",
+    "zod": "latest"
   },
   "devDependencies": {
     "@types/react": "latest",
     "@types/react-dom": "latest"
   }
 }
-

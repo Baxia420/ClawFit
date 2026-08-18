@@ -1,4 +1,4 @@
-import { index, integer, jsonb, pgEnum, pgTable, real, text, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
+import { boolean, index, integer, jsonb, pgEnum, pgTable, real, text, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
 
 export const confidenceEnum = pgEnum("confidence", ["high", "medium", "low"]);
 export const mealSourceEnum = pgEnum("meal_source", ["text", "photo", "preset", "manual"]);
@@ -26,6 +26,67 @@ export const meals = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [uniqueIndex("meals_idempotency_key_uq").on(table.idempotencyKey), index("meals_occurred_at_idx").on(table.occurredAt)],
+);
+
+export const pendingMealEstimates = pgTable(
+  "pending_meal_estimates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    label: varchar("label", { length: 300 }).notNull(),
+    items: jsonb("items").$type<{ name: string; portionDescription: string }[]>().notNull().default([]),
+    caloriesBest: integer("calories_best").notNull(),
+    caloriesLow: integer("calories_low").notNull(),
+    caloriesHigh: integer("calories_high").notNull(),
+    proteinG: real("protein_g").notNull(),
+    carbsG: real("carbs_g").notNull(),
+    fatG: real("fat_g").notNull(),
+    fiberG: real("fiber_g"),
+    confidence: confidenceEnum("confidence").notNull(),
+    uncertaintyReasons: jsonb("uncertainty_reasons").$type<string[]>().notNull().default([]),
+    source: mealSourceEnum("source").notNull(),
+    rawUserText: text("raw_user_text"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+    confirmed: boolean("confirmed").notNull().default(false),
+    confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    mealId: uuid("meal_id").references(() => meals.id, { onDelete: "set null" }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("pending_meals_idempotency_key_uq").on(table.idempotencyKey),
+    index("pending_meals_expires_at_idx").on(table.expiresAt),
+    index("pending_meals_created_at_idx").on(table.createdAt),
+  ],
+);
+
+export const userSettings = pgTable("user_settings", {
+  id: varchar("id", { length: 40 }).primaryKey(),
+  calorieTarget: integer("calorie_target").notNull().default(2200),
+  proteinTargetG: real("protein_target_g").notNull().default(160),
+  timezone: varchar("timezone", { length: 100 }).notNull().default("Asia/Kuala_Lumpur"),
+  preferredUnits: varchar("preferred_units", { length: 20 }).$type<"metric" | "imperial">().notNull().default("metric"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const notificationPreferences = pgTable(
+  "notification_preferences",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    type: varchar("type", { length: 64 }).notNull(),
+    enabled: boolean("enabled").notNull().default(false),
+    timeLocal: varchar("time_local", { length: 5 }),
+    timezone: varchar("timezone", { length: 100 }).notNull(),
+    daysOfWeek: integer("days_of_week").array().notNull(),
+    deliveryChannel: varchar("delivery_channel", { length: 24 }).$type<"web_push" | "whatsapp" | "both">().notNull(),
+    configuration: jsonb("configuration").$type<Record<string, string | number | boolean>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("notification_preferences_type_uq").on(table.type)],
 );
 
 export const mealItems = pgTable("meal_items", {

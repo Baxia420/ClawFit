@@ -2,9 +2,14 @@ import { timingSafeEqual } from "node:crypto";
 import Fastify from "fastify";
 import { z, ZodError } from "zod";
 import {
+  confirmPendingMealSchema,
   mealInputSchema,
   mealPatchSchema,
+  notificationPreferenceSchema,
   NutritionEstimator,
+  pendingMealInputSchema,
+  pendingMealPatchSchema,
+  settingsPatchSchema,
   startWorkoutSchema,
   workoutSetInputSchema,
   workoutSetPatchSchema,
@@ -24,11 +29,23 @@ export function createApp(options: {
   const app = Fastify({ logger: options.logger === false ? false : { redact: ["req.headers.authorization", "headers.x-goog-api-key"] } });
 
   app.addHook("onRequest", async (request, reply) => {
+    (request as unknown as { startTime: number }).startTime = performance.now();
     if (request.url === "/health" || request.url === "/ready") return;
     const authorization = request.headers.authorization;
     const provided = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
     if (!safeEqual(provided, options.apiToken)) {
       await reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "A valid bearer token is required" } });
+    }
+  });
+
+  app.addHook("onResponse", async (request, reply) => {
+    const startTime = (request as unknown as { startTime?: number }).startTime;
+    if (typeof startTime === "number") {
+      const dur = Math.round(performance.now() - startTime);
+      reply.header("Server-Timing", `total;dur=${dur}`);
+      if (options.logger !== false && request.url !== "/health" && request.url !== "/ready") {
+        app.log.info({ method: request.method, url: request.url, status: reply.statusCode, durationMs: dur }, "request completed");
+      }
     }
   });
 
@@ -65,6 +82,16 @@ export function createApp(options: {
   });
 
   app.post("/v1/meals", async (request, reply) => reply.code(201).send(await options.repository.createMeal(mealInputSchema.parse(request.body))));
+  app.post("/v1/meals/pending", async (request, reply) => reply.code(201).send(await options.repository.createPendingMeal(pendingMealInputSchema.parse(request.body))));
+  app.get("/v1/meals/pending/latest", async () => ({ pending: await options.repository.getLatestPendingMeal() }));
+  app.get("/v1/meals/pending/:id", async (request) => options.repository.getPendingMeal(uuidParam.parse(request.params).id));
+  app.patch("/v1/meals/pending/:id", async (request) => options.repository.updatePendingMeal(uuidParam.parse(request.params).id, pendingMealPatchSchema.parse(request.body)));
+  app.delete("/v1/meals/pending/:id", async (request) => options.repository.cancelPendingMeal(uuidParam.parse(request.params).id));
+  app.post("/v1/meals/pending/:id/confirm", async (request, reply) => {
+    const params = uuidParam.parse(request.params);
+    const body = confirmPendingMealSchema.parse(request.body ?? {});
+    return reply.code(200).send(await options.repository.confirmPendingMeal(params.id, body));
+  });
   app.get("/v1/meals/recent", async (request) => options.repository.listRecentMeals(listQuery.parse(request.query).limit));
   app.get("/v1/meals/:id", async (request) => options.repository.getMeal(uuidParam.parse(request.params).id));
   app.patch("/v1/meals/:id", async (request) => options.repository.updateMeal(uuidParam.parse(request.params).id, mealPatchSchema.parse(request.body)));
@@ -78,6 +105,7 @@ export function createApp(options: {
   app.get("/v1/nutrition/trend", async (request) => {
     const query = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query);
     const end = new Date();
+
     const start = new Date(end.getTime() - query.days * 86_400_000);
     return options.repository.nutritionTrend(start, end);
   });
@@ -115,6 +143,15 @@ export function createApp(options: {
   app.get("/v1/exercises/history", async (request) => {
     const query = z.object({ name: z.string().min(1), limit: z.coerce.number().int().min(1).max(500).default(100) }).parse(request.query);
     return options.repository.exerciseHistory(query.name, query.limit);
+  });
+
+  app.get("/v1/settings", async () => options.repository.getSettings());
+  app.patch("/v1/settings", async (request) => options.repository.updateSettings(settingsPatchSchema.parse(request.body)));
+  app.get("/v1/notification-preferences", async () => options.repository.listNotificationPreferences());
+  app.put("/v1/notification-preferences/:type", async (request) => {
+    const type = z.string().parse((request.params as { type?: unknown }).type);
+    const preference = notificationPreferenceSchema.parse({ ...(request.body as object), type });
+    return options.repository.upsertNotificationPreference(preference);
   });
 
   return app;

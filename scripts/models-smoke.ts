@@ -85,10 +85,9 @@ function availableId(result: (typeof results)[string] | undefined) {
 }
 
 function selectDefault(all: typeof results) {
-  const gemma = all["Gemma 4 26B A4B"];
-  if (gemma?.status === "available" && gemma.toolCalling === "pass") return gemma.modelId;
   const lite = all["Gemini 3.5 Flash-Lite"];
   if (lite?.status === "available" && lite.toolCalling === "pass") return lite.modelId;
+  const gemma = all["Gemma 4 26B A4B"];
+  if (gemma?.status === "available" && gemma.toolCalling === "pass") return gemma.modelId;
   return undefined;
 }
-

@@ -22,6 +22,8 @@
   "contracts": {
     "tools": [
       "estimate_nutrition",
+      "get_pending_meal",
+      "confirm_pending_meal",
       "log_meal",
       "get_meal",
       "get_recent_meals",

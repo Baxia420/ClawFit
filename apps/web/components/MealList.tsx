@@ -1,7 +1,7 @@
 import type { Meal } from "../lib/api";
 
 export function MealList({ meals }: { meals: Meal[] }) {
-  if (!meals.length) return <div className="empty"><strong>NO INTAKE LOGGED</strong><span>Message OpenClaw to estimate your first meal.</span></div>;
+  if (!meals.length) return <div className="empty"><strong>NO INTAKE LOGGED</strong><span>Open Ask ClawFit to estimate your first meal.</span></div>;
   return <div className="data-list">{meals.map((meal, index) => (
     <article className="meal-row" key={meal.id}>
       <span className="row-index">{String(index + 1).padStart(2, "0")}</span>
@@ -10,4 +10,3 @@ export function MealList({ meals }: { meals: Meal[] }) {
     </article>
   ))}</div>;
 }
-

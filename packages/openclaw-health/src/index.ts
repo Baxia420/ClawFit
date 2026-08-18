@@ -1,6 +1,6 @@
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { Type } from "typebox";
-import { isMealLogConfirmation } from "./confirmation.js";
+import { isFallbackNotice, isMealLogConfirmation, sanitizeUserFacingError } from "./confirmation.js";
 
 const ConfigSchema = Type.Object({ apiUrl: Type.Optional(Type.String({ default: "http://127.0.0.1:4000" })) }, { additionalProperties: false });
 const Id = Type.String({ format: "uuid" });
@@ -47,6 +47,18 @@ const plugin = defineToolPlugin({
       execute: (params, config) => healthFetch(config, "/v1/nutrition/estimate", { method: "POST", body: { text: params.text, ...(params.imageBase64 && params.imageMimeType ? { image: { base64: params.imageBase64, mimeType: params.imageMimeType } } : {}) } }),
     }),
     tool({
+      name: "get_pending_meal",
+      description: "Get the latest unconfirmed pending meal draft (or a specific draft by ID) across session boundaries.",
+      parameters: Type.Object({ id: Type.Optional(Id) }),
+      execute: (params, config) => (params.id ? healthFetch(config, `/v1/meals/pending/${params.id}`) : healthFetch(config, "/v1/meals/pending/latest")),
+    }),
+    tool({
+      name: "confirm_pending_meal",
+      description: "Confirm and persist an existing pending meal estimate by ID. Idempotent on retries.",
+      parameters: Type.Object({ id: Id, occurredAt: Type.Optional(Type.String({ format: "date-time" })), idempotencyKey: Type.Optional(IdempotencyKey) }),
+      execute: (params, config) => healthFetch(config, `/v1/meals/pending/${params.id}/confirm`, { method: "POST", body: { ...(params.occurredAt ? { occurredAt: params.occurredAt } : {}), ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}) } }),
+    }),
+    tool({
       name: "log_meal",
       description: "Persist a user-confirmed meal estimate. Never call before explicit confirmation unless the original request explicitly said to log it.",
       parameters: LoggedMeal,
@@ -77,20 +89,108 @@ const plugin = defineToolPlugin({
   ],
 });
 
+const lastPromptBySession = new Map<string, string>();
+const blockedRuns = new Set<string>();
+const toolStartTimes = new Map<string, number>();
+
 const registerTools = plugin.register;
 plugin.register = (api) => {
   registerTools(api);
-  api.on("before_prompt_build", (event, context) => {
-    if (context.runId) api.runContext.setRunContext({ runId: context.runId, namespace: "currentPrompt", value: event.prompt });
-    return { appendSystemContext: healthTrackingGuidance };
-  }, { priority: 50 });
-  api.on("before_tool_call", (event, context) => {
-    if (event.toolName !== "log_meal") return;
-    const prompt = context.runId ? api.runContext.getRunContext({ runId: context.runId, namespace: "currentPrompt" }) : undefined;
-    if (typeof prompt !== "string" || !isMealLogConfirmation(prompt)) {
-      return { block: true, blockReason: "Meal logging requires explicit confirmation in the current user message. Present the draft and ask whether to log it." };
-    }
-  }, { priority: 100 });
+
+  api.on(
+    "before_prompt_build",
+    (event, context) => {
+      const sessionKey = context.sessionKey ?? context.sessionId ?? "default";
+      lastPromptBySession.set(sessionKey, event.prompt);
+      if (context.runId) {
+        api.runContext.setRunContext({ runId: context.runId, namespace: "currentPrompt", value: event.prompt });
+        blockedRuns.delete(context.runId);
+      }
+      if (context.sessionKey) {
+        api.runContext.setRunContext({ runId: context.sessionKey, namespace: "currentPrompt", value: event.prompt });
+      }
+      return { appendSystemContext: healthTrackingGuidance };
+    },
+    { priority: 50 },
+  );
+
+  api.on(
+    "before_tool_call",
+    (event, context) => {
+      const toolKey = `${context.runId ?? ""}_${event.toolName}_${event.toolCallId ?? ""}`;
+      toolStartTimes.set(toolKey, performance.now());
+
+      if (event.toolName !== "log_meal" && event.toolName !== "confirm_pending_meal") return;
+
+      if (context.runId && blockedRuns.has(context.runId)) {
+        return {
+          block: true,
+          blockReason: "Meal draft already rejected as unconfirmed in this turn. Reply to the user with the estimated calories/macros and ask if they would like you to log it.",
+        };
+      }
+
+      const fromRun = context.runId ? (api.runContext.getRunContext({ runId: context.runId, namespace: "currentPrompt" }) as string | undefined) : undefined;
+      const fromSession = context.sessionKey ? (api.runContext.getRunContext({ runId: context.sessionKey, namespace: "currentPrompt" }) as string | undefined) : undefined;
+      const fromCache = lastPromptBySession.get(context.sessionKey ?? context.sessionId ?? "default");
+      const rawUserText = typeof event.params?.rawUserText === "string" ? event.params.rawUserText : undefined;
+
+      const candidates = [fromRun, fromSession, fromCache, rawUserText].filter(Boolean) as string[];
+      const isConfirmed = candidates.some((prompt) => isMealLogConfirmation(prompt));
+
+      if (!isConfirmed) {
+        if (context.runId) blockedRuns.add(context.runId);
+        return {
+          block: true,
+          blockReason: "Meal draft is not yet confirmed by the user. Do not call log_meal again in this turn. Present the estimated calories, macros, and confidence to the user and ask 'Would you like me to log this?'",
+        };
+      }
+    },
+    { priority: 100 },
+  );
+
+  api.on(
+    "after_tool_call",
+    (event, context) => {
+      const toolKey = `${context.runId ?? ""}_${event.toolName}_${event.toolCallId ?? ""}`;
+      const start = toolStartTimes.get(toolKey);
+      if (start !== undefined) {
+        toolStartTimes.delete(toolKey);
+        const durationMs = Math.round(performance.now() - start);
+        console.log(`[LATENCY] runId=${context.runId ?? "unknown"} tool=${event.toolName} durationMs=${durationMs}`);
+      }
+    },
+    { priority: 100 },
+  );
+
+  api.on(
+    "reply_payload_sending",
+    (event) => {
+      if (event.payload?.isFallbackNotice || (typeof event.payload?.text === "string" && isFallbackNotice(event.payload.text))) {
+        return { cancel: true, reason: "silent-fallback" };
+      }
+      if (typeof event.payload?.text === "string") {
+        const sanitized = sanitizeUserFacingError(event.payload.text);
+        if (sanitized !== event.payload.text) {
+          event.payload.text = sanitized;
+        }
+      }
+    },
+    { priority: 100 },
+  );
+
+  api.on(
+    "before_agent_reply",
+    (event) => {
+      if (isFallbackNotice(event.cleanedBody)) {
+        return { handled: true, reply: { text: "" }, reason: "silent-fallback" };
+      }
+      const sanitized = sanitizeUserFacingError(event.cleanedBody);
+      if (sanitized !== event.cleanedBody) {
+        return { handled: true, reply: { text: sanitized } };
+      }
+    },
+    { priority: 100 },
+  );
 };
 
 export default plugin;
@@ -102,7 +202,7 @@ ClawFit health tracking policy:
 - Corrections update the existing meal or workout-set ID after resolving it from recent/active state. Never create a replacement. Reuse a stable idempotency key when retrying a create action.
 - Perform only the action in the latest user message. Earlier unanswered or failed user messages are context, not queued actions: never replay them. A retry of the same current action must reuse its original idempotency key.
 - A meal estimate is a draft. For simple quantified foods, create and show a reasonable estimate without estimate_nutrition. Use estimate_nutrition once only for difficult restaurant/photo/mixed meals. Do not call log_meal until the user confirms, unless their first message explicitly asks to log/save/track it.
-- Preserve the complete structured meal draft for the confirmation turn. A bare "yes" or "log it" applies only to the immediately preceding proposal in this session; call log_meal with that draft and never invoke an unrelated workout tool.
+- Preserve the complete structured meal draft for the confirmation turn. A bare "yes" or "log it" applies to the immediately preceding draft; call log_meal (or confirm_pending_meal) and never invoke an unrelated workout tool.
 - Show calorie best/low/high, macros, confidence, and meaningful uncertainty. Use get_daily_nutrition for daily food/totals rather than calculating them yourself.
 - Use deterministic volume and estimated 1RM returned by the tools. Nutrition is an estimate, not medical advice.
 `;
@@ -111,16 +211,21 @@ async function healthFetch(config: { apiUrl?: string }, path: string, options: {
   const token = process.env.HEALTH_API_TOKEN;
   if (!token) throw new Error("HEALTH_API_TOKEN is not available to the OpenClaw Gateway");
   const apiUrl = config.apiUrl ?? process.env.HEALTH_API_URL ?? "http://127.0.0.1:4000";
+  const start = performance.now();
   const response = await fetch(new URL(path, apiUrl), {
     method: options.method ?? "GET",
     headers: { authorization: `Bearer ${token}`, ...(options.body === undefined ? {} : { "content-type": "application/json" }) },
     ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
     signal: AbortSignal.timeout(30_000),
   });
+  const dur = Math.round(performance.now() - start);
   const payload = (await response.json()) as unknown;
   if (!response.ok) {
     const error = payload as { error?: { code?: string; message?: string } };
     throw new Error(`${error.error?.code ?? "HEALTH_API_ERROR"}: ${error.error?.message ?? `Health API returned ${response.status}`}`);
+  }
+  if (dur > 200) {
+    console.log(`[LATENCY] healthFetch path=${path} durationMs=${dur}`);
   }
   return payload;
 }

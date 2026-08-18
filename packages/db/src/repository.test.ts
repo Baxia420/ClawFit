@@ -93,4 +93,61 @@ describe("HealthRepository", () => {
     await repository.deleteWorkoutSet(set.id);
     expect((await repository.getWorkout(result.workout.id)).setCount).toBe(0);
   });
+
+  it("creates, retrieves, and confirms a pending meal estimate idempotently", async () => {
+    const pending = await repository.createPendingMeal({
+      ...baseMeal,
+      idempotencyKey: "pending-meal-001",
+      expiresInSeconds: 3600,
+    });
+    expect(pending.id).toBeDefined();
+    expect(pending.confirmed).toBe(false);
+
+    const latest = await repository.getLatestPendingMeal();
+    expect(latest?.id).toBe(pending.id);
+
+    const confirmed = await repository.confirmPendingMeal(pending.id);
+    expect(confirmed?.label).toBe("Eggs and toast");
+    expect(confirmed?.items).toHaveLength(1);
+
+    const pendingAfter = await repository.getPendingMeal(pending.id);
+    expect(pendingAfter.confirmed).toBe(true);
+    expect(pendingAfter.mealId).toBe(confirmed?.id);
+
+    // Confirming again returns the exact same meal without duplicate records
+    const confirmedAgain = await repository.confirmPendingMeal(pending.id);
+    expect(confirmedAgain?.id).toBe(confirmed?.id);
+
+    // Latest pending meal no longer returns confirmed meal
+    const latestAfter = await repository.getLatestPendingMeal();
+    expect(latestAfter).toBeNull();
+  });
+
+  it("edits and cancels pending meal drafts without creating meals", async () => {
+    const pending = await repository.createPendingMeal({ ...baseMeal, idempotencyKey: "pending-meal-edit-001", expiresInSeconds: 3600 });
+    const edited = await repository.updatePendingMeal(pending.id, { label: "Two eggs and toast", caloriesBest: 420, caloriesLow: 380 });
+    expect(edited.label).toBe("Two eggs and toast");
+    expect(edited.caloriesBest).toBe(420);
+    const cancelled = await repository.cancelPendingMeal(pending.id);
+    expect(cancelled.cancelledAt).toBeInstanceOf(Date);
+    expect(await repository.getLatestPendingMeal()).toBeNull();
+    await expect(repository.confirmPendingMeal(pending.id)).rejects.toThrow("cancelled");
+  });
+
+  it("persists personal goals and notification preferences", async () => {
+    expect((await repository.getSettings()).calorieTarget).toBe(2200);
+    const settings = await repository.updateSettings({ calorieTarget: 2450, proteinTargetG: 175, timezone: "Asia/Kuala_Lumpur", preferredUnits: "metric" });
+    expect(settings.calorieTarget).toBe(2450);
+    const preference = await repository.upsertNotificationPreference({
+      type: "evening_progress",
+      enabled: true,
+      timeLocal: "20:30",
+      timezone: "Asia/Kuala_Lumpur",
+      daysOfWeek: [1, 2, 3, 4, 5, 6, 7],
+      deliveryChannel: "web_push",
+      configuration: {},
+    });
+    expect(preference.enabled).toBe(true);
+    expect(await repository.listNotificationPreferences()).toHaveLength(1);
+  });
 });
