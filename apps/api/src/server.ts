@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { NutritionEstimator } from "@clawfit/health-core";
 import { createDatabase, HealthRepository } from "@clawfit/db";
-import { createApp } from "./app.js";
+import { createApp } from "./create-app.js";
 import { configSchema } from "./config.js";
 import { GeminiNutritionClient } from "./gemini-client.js";
 

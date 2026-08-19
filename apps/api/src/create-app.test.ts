@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createApp } from "./app.js";
+import { createApp } from "./create-app.js";
 import type { HealthRepository } from "@clawfit/db";
 
 const token = "test-token-that-is-at-least-24-chars";

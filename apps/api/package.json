@@ -9,7 +9,8 @@
   "scripts": {
     "dev": "tsx --conditions=development watch src/server.ts",
     "build:dependencies": "pnpm --filter @clawfit/health-core build && pnpm --filter @clawfit/db build",
-    "build": "pnpm run build:dependencies && tsc -p tsconfig.json",
+    "clean": "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
+    "build": "pnpm run build:dependencies && pnpm run clean && tsc -p tsconfig.json",
     "smoke:runtime": "pnpm run build && node scripts/runtime-smoke.mjs",
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
