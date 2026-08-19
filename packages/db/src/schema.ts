@@ -46,6 +46,7 @@ export const pendingMealEstimates = pgTable(
     source: mealSourceEnum("source").notNull(),
     rawUserText: text("raw_user_text"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    scopeKey: varchar("scope_key", { length: 200 }).notNull(),
     idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
     confirmed: boolean("confirmed").notNull().default(false),
     confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
@@ -56,7 +57,8 @@ export const pendingMealEstimates = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("pending_meals_idempotency_key_uq").on(table.idempotencyKey),
+    uniqueIndex("pending_meals_scope_idempotency_uq").on(table.scopeKey, table.idempotencyKey),
+    index("pending_meals_scope_created_at_idx").on(table.scopeKey, table.createdAt),
     index("pending_meals_expires_at_idx").on(table.expiresAt),
     index("pending_meals_created_at_idx").on(table.createdAt),
   ],
@@ -165,4 +167,3 @@ export const workoutSets = pgTable(
     uniqueIndex("workout_sets_exercise_number_uq").on(table.exerciseId, table.setNumber),
   ],
 );
-

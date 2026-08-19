@@ -90,6 +90,7 @@ export const workoutSetPatchSchema = z.object({
 });
 
 export const pendingMealInputSchema = nutritionEstimateSchema.extend({
+  scopeKey: z.string().min(3).max(200).regex(/^[a-z0-9][a-z0-9:_-]*$/i),
   occurredAt: z.coerce.date().default(() => new Date()),
   source: z.enum(["text", "photo", "preset", "manual"]).default("text"),
   rawUserText: z.string().max(4_000).nullable().optional(),
@@ -98,8 +99,13 @@ export const pendingMealInputSchema = nutritionEstimateSchema.extend({
 });
 
 export const confirmPendingMealSchema = z.object({
+  scopeKey: z.string().min(3).max(200).regex(/^[a-z0-9][a-z0-9:_-]*$/i),
   occurredAt: z.coerce.date().optional(),
   idempotencyKey: z.string().min(8).max(200).optional(),
+});
+
+export const pendingMealScopeSchema = z.object({
+  scopeKey: z.string().min(3).max(200).regex(/^[a-z0-9][a-z0-9:_-]*$/i),
 });
 
 export const pendingMealPatchSchema = z.object({

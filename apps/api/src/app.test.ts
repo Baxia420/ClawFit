@@ -56,6 +56,7 @@ describe("Health API", () => {
         macros: { proteinG: 12, carbsG: 1, fatG: 10, fiberG: 0 },
         confidence: "high",
         uncertaintyReasons: [],
+        scopeKey: "web:primary",
         idempotencyKey: "test-pending-12345",
       },
     });
@@ -64,28 +65,36 @@ describe("Health API", () => {
 
     const latestRes = await app.inject({
       method: "GET",
-      url: "/v1/meals/pending/latest",
+      url: "/v1/meals/pending/latest?scopeKey=web%3Aprimary",
       headers: { authorization: `Bearer ${token}` },
     });
     expect(latestRes.statusCode).toBe(200);
     expect(latestRes.json().pending.id).toBe(validUuid);
 
-    const editRes = await app.inject({ method: "PATCH", url: `/v1/meals/pending/${validUuid}`, headers: { authorization: `Bearer ${token}` }, payload: { label: "Two eggs" } });
+    const editRes = await app.inject({ method: "PATCH", url: `/v1/meals/pending/${validUuid}`, headers: { authorization: `Bearer ${token}` }, payload: { scopeKey: "web:primary", label: "Two eggs" } });
     expect(editRes.statusCode).toBe(200);
-    expect(pendingRepo.updatePendingMeal).toHaveBeenCalledWith(validUuid, { label: "Two eggs" });
+    expect(pendingRepo.updatePendingMeal).toHaveBeenCalledWith(validUuid, "web:primary", { label: "Two eggs" });
 
-    const cancelRes = await app.inject({ method: "DELETE", url: `/v1/meals/pending/${validUuid}`, headers: { authorization: `Bearer ${token}` } });
+    const cancelRes = await app.inject({ method: "DELETE", url: `/v1/meals/pending/${validUuid}?scopeKey=web%3Aprimary`, headers: { authorization: `Bearer ${token}` } });
     expect(cancelRes.statusCode).toBe(200);
-    expect(pendingRepo.cancelPendingMeal).toHaveBeenCalledWith(validUuid);
+    expect(pendingRepo.cancelPendingMeal).toHaveBeenCalledWith(validUuid, "web:primary");
 
     const confirmRes = await app.inject({
       method: "POST",
       url: `/v1/meals/pending/${validUuid}/confirm`,
       headers: { authorization: `Bearer ${token}` },
-      payload: {},
+      payload: { scopeKey: "web:primary" },
     });
     expect(confirmRes.statusCode).toBe(200);
     expect(confirmRes.json().id).toBe(mealUuid);
+    expect(pendingRepo.confirmPendingMeal).toHaveBeenCalledWith(validUuid, { scopeKey: "web:primary" });
+
+    const missingScopeRes = await app.inject({
+      method: "GET",
+      url: "/v1/meals/pending/latest",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(missingScopeRes.statusCode).toBe(400);
 
     await app.close();
   });

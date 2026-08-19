@@ -20,6 +20,9 @@ export function sanitizeUserFacingError(text: string | null | undefined): string
     /HTTP 429/i.test(text) ||
     /assistant turn failed/i.test(text) ||
     /FailoverError/i.test(text) ||
+    /HealthApiNetworkError/i.test(text) ||
+    /fetch failed/i.test(text) ||
+    /\b(?:ECONNREFUSED|ECONNRESET|ETIMEDOUT)\b/i.test(text) ||
     /\[code=\w+\]/i.test(text) ||
     /generativelanguage\.googleapis\.com/i.test(text);
 

@@ -12,13 +12,15 @@ describe("web assistant command adapter", () => {
     expect(result.kind).toBe("meal_draft");
     expect(result.meal?.caloriesBest).toBe(330);
     expect(request).toHaveBeenCalledWith("/v1/meals/pending", expect.objectContaining({ method: "POST" }));
+    expect(request).toHaveBeenCalledWith("/v1/meals/pending", expect.objectContaining({ body: expect.stringContaining('"scopeKey":"web:primary"') }));
   });
 
   it("confirms the latest pending meal using the idempotent backend route", async () => {
     const request = vi.fn(async (path: string) => path.endsWith("/confirm") ? { ...pendingMeal(), confirmed: true } : { pending: pendingMeal() });
     const result = await handleAssistantCommand({ message: "log it", requestId: "22222222-2222-4222-a222-222222222222" }, { request } as unknown as AssistantHealthClient);
     expect(result.kind).toBe("meal_logged");
-    expect(request).toHaveBeenLastCalledWith(`/v1/meals/pending/${pendingMeal().id}/confirm`, { method: "POST", body: "{}" });
+    expect(request).toHaveBeenCalledWith("/v1/meals/pending/latest?scopeKey=web%3Aprimary");
+    expect(request).toHaveBeenLastCalledWith(`/v1/meals/pending/${pendingMeal().id}/confirm`, { method: "POST", body: '{"scopeKey":"web:primary"}' });
   });
 
   it("resolves repeated-set shorthand from the authoritative active workout", async () => {

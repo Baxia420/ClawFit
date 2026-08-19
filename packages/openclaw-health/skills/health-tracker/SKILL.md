@@ -25,9 +25,9 @@ Apply this skill when the user describes food, asks about nutrition, starts or l
 1. Call `find_food_preset` first for “usual”, “normal”, or named repeated foods.
 2. For known quantities and simple foods, form a reasonable draft directly; do not spend the strong nutrition model.
 3. Call `estimate_nutrition` once for restaurant meals, meal photos, mixed curries, unknown sauces/oils, ambiguous portions, or when your own estimate is not credible. Include all visible photo details in `text`; include image bytes only if the current client actually supplies them.
-4. Present the draft and wait for confirmation unless the user already asked to log it.
-5. After confirmation, call `log_meal` (or `confirm_pending_meal`) with the preserved raw text, source, timestamp, and stable idempotency key.
-6. If the user says “log it” or “yes” after a fresh session or compacted context, call `get_pending_meal` to retrieve the active draft if needed, then confirm it.
+4. Persist every unconfirmed draft with `create_pending_meal`, then present it and wait for confirmation. The tool derives the peer/session scope; do not invent or pass a scope yourself.
+5. After confirmation, resolve the current peer's draft with `get_pending_meal`, then call `confirm_pending_meal`. Use `log_meal` directly only when the original request already explicitly said to log.
+6. If the user says “log it” or “yes” after a fresh session or compacted context, call `get_pending_meal`; the scoped database result, not chat history, is authoritative.
 
 Confidence: high means known quantities or packaged/home-cooked food; medium means identifiable food with portion/preparation uncertainty; low means restaurant food, hidden oil/sauce, or a visually ambiguous mixed dish. Low confidence requires a meaningful calorie range.
 

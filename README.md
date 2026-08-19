@@ -16,6 +16,8 @@ The installable web app now routes Ask ClawFit commands through a same-origin Ne
 
 The OpenClaw plugin exposes only health-domain tools. It does not expose SQL, shell, filesystem access, or generic HTTP requests. Meal estimates are drafts until explicitly confirmed.
 
+For the two-project Vercel Preview, Neon migration/import, environment, protection, and OpenClaw cutover procedure, use [the Vercel Preview runbook](docs/vercel-preview.md).
+
 ## Prerequisites
 
 - Node.js 24.15+
@@ -89,7 +91,7 @@ Test a text query first (`what have I eaten today?`), then a meal photo, then a 
 ## Nutrition & Session Reliability
 
 - **Routine & Specialist Model Routing**: Routine conversation, workouts, queries, and simple meal drafts route through `Gemini 3.5 Flash-Lite` (250k TPM limit, sub-2s latency). Difficult restaurant meals, mixed curries, hidden oils, and photos route synchronously through `gemini-3.7-flash-video-understanding-eap` (or fallback `gemini-3.6-flash`).
-- **Pending Meal Estimates**: Unconfirmed estimates are stored in the PostgreSQL `pending_meal_estimates` table with a 2-hour TTL. Confirmations ("log it", "yes", "track it") persist exactly one meal record idempotently. Shorthand confirmations work across session resets and compacted context via `get_pending_meal` and `confirm_pending_meal`.
+- **Pending Meal Estimates**: Unconfirmed estimates are stored in PostgreSQL with a 2-hour TTL and a durable client scope. Web drafts use a server-owned Web scope; OpenClaw derives a hashed WhatsApp peer identity (or canonical session fallback). Latest, ID lookup, edit, cancel, and confirmation all enforce that scope, while confirmation remains idempotent. Chat history is never authoritative.
 - **Silent Model Fallbacks & Sanitized Errors**: Provider fallback diagnostics (`↪️ Model Fallback: ...`) are suppressed from outbound WhatsApp messages. Transient 429 quota exhaustion or backend errors are sanitized to concise, non-alarming user guidance.
 - **Session Hygiene & Compaction**: OpenClaw is configured with 60-minute idle session resets (`session.reset.mode: "idle"`) and token compaction (`mode: "safeguard"`, 8k reserve, 4k recent). WhatsApp UX remains a continuous single thread while authoritative state is recovered from PostgreSQL tools (`get_active_workout`, `get_daily_nutrition`, `get_pending_meal`).
 - **Latency Instrumentation**: OpenClaw plugin and Health API log structured request timings (`[LATENCY]`, `Server-Timing` headers) to detect slow operations and eliminate tool-calling loops.

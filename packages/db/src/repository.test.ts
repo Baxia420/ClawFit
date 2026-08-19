@@ -20,6 +20,8 @@ const baseMeal: MealInput = {
   rawUserText: "3 eggs and toast",
   idempotencyKey: "meal-request-001",
 };
+const webScope = "web:primary";
+const whatsappScope = "openclaw:whatsapp:peer-a";
 
 describe("HealthRepository", () => {
   let pg: PGlite;
@@ -97,41 +99,65 @@ describe("HealthRepository", () => {
   it("creates, retrieves, and confirms a pending meal estimate idempotently", async () => {
     const pending = await repository.createPendingMeal({
       ...baseMeal,
+      scopeKey: webScope,
       idempotencyKey: "pending-meal-001",
       expiresInSeconds: 3600,
     });
     expect(pending.id).toBeDefined();
     expect(pending.confirmed).toBe(false);
 
-    const latest = await repository.getLatestPendingMeal();
+    const latest = await repository.getLatestPendingMeal(webScope);
     expect(latest?.id).toBe(pending.id);
 
-    const confirmed = await repository.confirmPendingMeal(pending.id);
+    const confirmed = await repository.confirmPendingMeal(pending.id, { scopeKey: webScope, idempotencyKey: "client-confirm-attempt-001" });
     expect(confirmed?.label).toBe("Eggs and toast");
     expect(confirmed?.items).toHaveLength(1);
 
-    const pendingAfter = await repository.getPendingMeal(pending.id);
+    const pendingAfter = await repository.getPendingMeal(pending.id, webScope);
     expect(pendingAfter.confirmed).toBe(true);
     expect(pendingAfter.mealId).toBe(confirmed?.id);
 
     // Confirming again returns the exact same meal without duplicate records
-    const confirmedAgain = await repository.confirmPendingMeal(pending.id);
+    const confirmedAgain = await repository.confirmPendingMeal(pending.id, { scopeKey: webScope, idempotencyKey: "client-confirm-attempt-002" });
     expect(confirmedAgain?.id).toBe(confirmed?.id);
 
     // Latest pending meal no longer returns confirmed meal
-    const latestAfter = await repository.getLatestPendingMeal();
+    const latestAfter = await repository.getLatestPendingMeal(webScope);
     expect(latestAfter).toBeNull();
   });
 
   it("edits and cancels pending meal drafts without creating meals", async () => {
-    const pending = await repository.createPendingMeal({ ...baseMeal, idempotencyKey: "pending-meal-edit-001", expiresInSeconds: 3600 });
-    const edited = await repository.updatePendingMeal(pending.id, { label: "Two eggs and toast", caloriesBest: 420, caloriesLow: 380 });
+    const pending = await repository.createPendingMeal({ ...baseMeal, scopeKey: webScope, idempotencyKey: "pending-meal-edit-001", expiresInSeconds: 3600 });
+    const edited = await repository.updatePendingMeal(pending.id, webScope, { label: "Two eggs and toast", caloriesBest: 420, caloriesLow: 380 });
     expect(edited.label).toBe("Two eggs and toast");
     expect(edited.caloriesBest).toBe(420);
-    const cancelled = await repository.cancelPendingMeal(pending.id);
+    const cancelled = await repository.cancelPendingMeal(pending.id, webScope);
     expect(cancelled.cancelledAt).toBeInstanceOf(Date);
-    expect(await repository.getLatestPendingMeal()).toBeNull();
-    await expect(repository.confirmPendingMeal(pending.id)).rejects.toThrow("cancelled");
+    expect(await repository.getLatestPendingMeal(webScope)).toBeNull();
+    await expect(repository.confirmPendingMeal(pending.id, { scopeKey: webScope })).rejects.toThrow("cancelled");
+  });
+
+  it("isolates pending meals across web and WhatsApp scopes", async () => {
+    const webPending = await repository.createPendingMeal({ ...baseMeal, scopeKey: webScope, idempotencyKey: "shared-request-key", expiresInSeconds: 3600 });
+    const whatsappPending = await repository.createPendingMeal({ ...baseMeal, scopeKey: whatsappScope, label: "WhatsApp draft", idempotencyKey: "shared-request-key", expiresInSeconds: 3600 });
+
+    expect((await repository.getLatestPendingMeal(webScope))?.id).toBe(webPending.id);
+    expect((await repository.getLatestPendingMeal(whatsappScope))?.id).toBe(whatsappPending.id);
+    await expect(repository.getPendingMeal(whatsappPending.id, webScope)).rejects.toThrow("not found");
+    await expect(repository.confirmPendingMeal(whatsappPending.id, { scopeKey: webScope })).rejects.toThrow("not found");
+
+    const confirmed = await repository.confirmPendingMeal(whatsappPending.id, { scopeKey: whatsappScope });
+    const confirmedAgain = await repository.confirmPendingMeal(whatsappPending.id, { scopeKey: whatsappScope });
+    expect(confirmedAgain?.id).toBe(confirmed?.id);
+    expect((await repository.getLatestPendingMeal(webScope))?.id).toBe(webPending.id);
+  });
+
+  it("does not confirm an unconfirmed draft after its two-hour TTL", async () => {
+    const pending = await repository.createPendingMeal({ ...baseMeal, scopeKey: webScope, idempotencyKey: "pending-meal-expiry-001", expiresInSeconds: 7_200 });
+    const afterExpiry = new Date(pending.expiresAt.getTime() + 1);
+
+    expect(await repository.getLatestPendingMeal(webScope, afterExpiry)).toBeNull();
+    await expect(repository.confirmPendingMeal(pending.id, { scopeKey: webScope }, afterExpiry)).rejects.toThrow("expired");
   });
 
   it("persists personal goals and notification preferences", async () => {

@@ -7,7 +7,8 @@ export async function healthApi<T>(path: string): Promise<T | null> {
     const response = await fetch(new URL(path, apiUrl), { headers: { authorization: `Bearer ${token}` }, cache: "no-store" });
     if (!response.ok) return null;
     return (await response.json()) as T;
-  } catch {
+  } catch (error) {
+    logNetworkFailure(path, error);
     return null;
   }
 }
@@ -19,22 +20,45 @@ export class HealthApiError extends Error {
   }
 }
 
+export class HealthApiNetworkError extends HealthApiError {
+  constructor() {
+    super("ClawFit's health service is temporarily unavailable. Nothing was changed.", 503);
+    this.name = "HealthApiNetworkError";
+  }
+}
+
 export async function healthApiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = process.env.HEALTH_API_TOKEN;
   if (!token) throw new HealthApiError("The Health API is not configured", 503);
-  const response = await fetch(new URL(path, apiUrl), {
-    ...init,
-    headers: {
-      authorization: `Bearer ${token}`,
-      ...(init.body === undefined ? {} : { "content-type": "application/json" }),
-      ...init.headers,
-    },
-    cache: "no-store",
-    signal: init.signal ?? AbortSignal.timeout(50_000),
-  });
-  const payload = (await response.json()) as { error?: { message?: string } } & T;
+  let response: Response;
+  try {
+    response = await fetch(new URL(path, apiUrl), {
+      ...init,
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(init.body === undefined ? {} : { "content-type": "application/json" }),
+        ...init.headers,
+      },
+      cache: "no-store",
+      signal: init.signal ?? AbortSignal.timeout(50_000),
+    });
+  } catch (error) {
+    logNetworkFailure(path, error);
+    throw new HealthApiNetworkError();
+  }
+  let payload: { error?: { message?: string } } & T;
+  try {
+    payload = (await response.json()) as { error?: { message?: string } } & T;
+  } catch (error) {
+    logNetworkFailure(path, error, response.status);
+    throw new HealthApiNetworkError();
+  }
   if (!response.ok) throw new HealthApiError(payload.error?.message ?? "The Health API request failed", response.status);
   return payload;
+}
+
+function logNetworkFailure(path: string, error: unknown, status?: number) {
+  console.error("[HEALTH_API_NETWORK] request failed", { path, ...(status === undefined ? {} : { status }) }, error);
 }
 
 export type Meal = {

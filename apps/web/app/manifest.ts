@@ -12,6 +12,10 @@ export default function manifest(): MetadataRoute.Manifest {
     theme_color: "#171b18",
     orientation: "portrait-primary",
     categories: ["health", "fitness", "lifestyle"],
-    icons: [{ src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" }],
+    icons: [
+      { src: "/icon", sizes: "512x512", type: "image/png", purpose: "any" },
+      { src: "/icon", sizes: "512x512", type: "image/png", purpose: "maskable" },
+      { src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" },
+    ],
   };
 }

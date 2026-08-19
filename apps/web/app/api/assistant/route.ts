@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { z, ZodError } from "zod";
 import { handleAssistantCommand } from "../../../lib/assistant";
 import type { AssistantMeal, AssistantResult } from "../../../lib/assistant-types";
-import { HealthApiError, healthApiRequest } from "../../../lib/api";
+import { HealthApiError, HealthApiNetworkError, healthApiRequest } from "../../../lib/api";
+import { WEB_PENDING_MEAL_SCOPE, withWebPendingMealScope } from "../../../lib/pending-scope";
 
 export const runtime = "nodejs";
 
@@ -63,16 +64,16 @@ async function runCommand(command: z.infer<typeof commandSchema> & { image?: { m
 
 async function handleAction(action: z.infer<typeof actionSchema>) {
   if (action.action === "confirm") {
-    const meal = await healthApiRequest<AssistantMeal>(`/v1/meals/pending/${action.pendingId}/confirm`, { method: "POST", body: "{}" });
+    const meal = await healthApiRequest<AssistantMeal>(`/v1/meals/pending/${action.pendingId}/confirm`, { method: "POST", body: JSON.stringify({ scopeKey: WEB_PENDING_MEAL_SCOPE }) });
     const result: AssistantResult = { kind: "meal_logged", message: `${meal.label} is logged. Your dashboard is updated.`, meal };
     return NextResponse.json(result);
   }
   if (action.action === "cancel") {
-    await healthApiRequest(`/v1/meals/pending/${action.pendingId}`, { method: "DELETE" });
+    await healthApiRequest(withWebPendingMealScope(`/v1/meals/pending/${action.pendingId}`), { method: "DELETE" });
     const result: AssistantResult = { kind: "message", message: "Meal draft cancelled. Nothing was logged." };
     return NextResponse.json(result);
   }
-  const meal = await healthApiRequest<AssistantMeal>(`/v1/meals/pending/${action.pendingId}`, { method: "PATCH", body: JSON.stringify(action.patch) });
+  const meal = await healthApiRequest<AssistantMeal>(`/v1/meals/pending/${action.pendingId}`, { method: "PATCH", body: JSON.stringify({ scopeKey: WEB_PENDING_MEAL_SCOPE, ...action.patch }) });
   const result: AssistantResult = { kind: "meal_draft", message: "Estimate updated. Review it, then log when ready.", meal };
   return NextResponse.json(result);
 }
@@ -90,6 +91,7 @@ function isSameOrigin(request: Request) {
 
 function assistantError(error: unknown) {
   if (error instanceof ZodError) return NextResponse.json({ error: "That request wasn't valid", details: error.issues }, { status: 400 });
+  if (error instanceof HealthApiNetworkError) return NextResponse.json({ error: error.message }, { status: 503 });
   if (error instanceof HealthApiError) {
     const status = error.status >= 400 && error.status < 500 ? error.status : 502;
     return NextResponse.json({ error: error.message }, { status });

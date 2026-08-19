@@ -40,6 +40,11 @@ describe("error sanitization", () => {
     expect(sanitizeUserFacingError(raw)).toBe("I couldn't complete that just now. Nothing was changed — try again in a moment.");
   });
 
+  it("sanitizes raw network failures", () => {
+    const raw = "HealthApiNetworkError: fetch failed (ECONNREFUSED 127.0.0.1:4000)";
+    expect(sanitizeUserFacingError(raw)).toBe("I couldn't complete that just now. Nothing was changed — try again in a moment.");
+  });
+
   it("preserves standard user-facing messages", () => {
     const normal = "Logged 3 eggs and 2 slices of toast (350 kcal).";
     expect(sanitizeUserFacingError(normal)).toBe(normal);

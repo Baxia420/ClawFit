@@ -53,17 +53,13 @@ export class HealthRepository {
       if (input.items.length > 0) {
         await tx.insert(mealItems).values(input.items.map((item) => ({ mealId: created.id, name: item.name, portionDescription: item.portionDescription })));
       }
-      await tx
-        .update(pendingMealEstimates)
-        .set({ confirmed: true, confirmedAt: new Date(), mealId: created.id, updatedAt: new Date() })
-        .where(eq(pendingMealEstimates.idempotencyKey, input.idempotencyKey));
       return this.getMealWith(tx, created.id);
     });
   }
 
   async createPendingMeal(input: PendingMealInput) {
     const existing = await this.db.query.pendingMealEstimates.findFirst({
-      where: eq(pendingMealEstimates.idempotencyKey, input.idempotencyKey),
+      where: and(eq(pendingMealEstimates.scopeKey, input.scopeKey), eq(pendingMealEstimates.idempotencyKey, input.idempotencyKey)),
     });
     if (existing) return existing;
     const expiresAt = new Date(Date.now() + (input.expiresInSeconds ?? 7_200) * 1000);
@@ -84,27 +80,34 @@ export class HealthRepository {
         source: input.source,
         rawUserText: input.rawUserText ?? null,
         occurredAt: input.occurredAt,
+        scopeKey: input.scopeKey,
         idempotencyKey: input.idempotencyKey,
         confirmed: false,
         expiresAt,
       })
+      .onConflictDoNothing({ target: [pendingMealEstimates.scopeKey, pendingMealEstimates.idempotencyKey] })
       .returning();
-    if (!created) throw new Error("Pending meal insert returned no record");
-    return created;
+    if (created) return created;
+    const concurrent = await this.db.query.pendingMealEstimates.findFirst({
+      where: and(eq(pendingMealEstimates.scopeKey, input.scopeKey), eq(pendingMealEstimates.idempotencyKey, input.idempotencyKey)),
+    });
+    if (!concurrent) throw new Error("Pending meal insert returned no record");
+    return concurrent;
   }
 
-  async getPendingMeal(id: string) {
+  async getPendingMeal(id: string, scopeKey: string) {
     const pending = await this.db.query.pendingMealEstimates.findFirst({
-      where: eq(pendingMealEstimates.id, id),
+      where: and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, scopeKey)),
     });
     if (!pending) throw new NotFoundError("Pending meal estimate not found");
     return pending;
   }
 
-  async getLatestPendingMeal(now = new Date()) {
+  async getLatestPendingMeal(scopeKey: string, now = new Date()) {
     const pending = await this.db.query.pendingMealEstimates.findFirst({
       where: and(
         eq(pendingMealEstimates.confirmed, false),
+        eq(pendingMealEstimates.scopeKey, scopeKey),
         isNull(pendingMealEstimates.cancelledAt),
         gt(pendingMealEstimates.expiresAt, now),
       ),
@@ -113,8 +116,8 @@ export class HealthRepository {
     return pending ?? null;
   }
 
-  async updatePendingMeal(id: string, patch: PendingMealPatch) {
-    const current = await this.getPendingMeal(id);
+  async updatePendingMeal(id: string, scopeKey: string, patch: PendingMealPatch) {
+    const current = await this.getPendingMeal(id, scopeKey);
     if (current.confirmed) throw new ConflictError("A confirmed meal draft cannot be edited");
     if (current.cancelledAt) throw new ConflictError("A cancelled meal draft cannot be edited");
     const nextLow = patch.caloriesLow ?? current.caloriesLow;
@@ -126,30 +129,30 @@ export class HealthRepository {
     const [updated] = await this.db
       .update(pendingMealEstimates)
       .set({ ...patch, updatedAt: new Date() })
-      .where(eq(pendingMealEstimates.id, id))
+      .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, scopeKey)))
       .returning();
     if (!updated) throw new NotFoundError("Pending meal estimate not found");
     return updated;
   }
 
-  async cancelPendingMeal(id: string) {
-    const current = await this.getPendingMeal(id);
+  async cancelPendingMeal(id: string, scopeKey: string) {
+    const current = await this.getPendingMeal(id, scopeKey);
     if (current.confirmed) throw new ConflictError("A confirmed meal draft cannot be cancelled");
     if (current.cancelledAt) return current;
     const [cancelled] = await this.db
       .update(pendingMealEstimates)
       .set({ cancelledAt: new Date(), updatedAt: new Date() })
-      .where(eq(pendingMealEstimates.id, id))
+      .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, scopeKey)))
       .returning();
     if (!cancelled) throw new NotFoundError("Pending meal estimate not found");
     return cancelled;
   }
 
-  async confirmPendingMeal(id: string, options: { occurredAt?: Date | undefined; idempotencyKey?: string | undefined } = {}) {
+  async confirmPendingMeal(id: string, options: { scopeKey: string; occurredAt?: Date | undefined; idempotencyKey?: string | undefined }, now = new Date()) {
 
     return this.db.transaction(async (tx) => {
       const pending = await tx.query.pendingMealEstimates.findFirst({
-        where: eq(pendingMealEstimates.id, id),
+        where: and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, options.scopeKey)),
       });
       if (!pending) throw new NotFoundError("Pending meal estimate not found");
       if (pending.cancelledAt) throw new ConflictError("A cancelled meal draft cannot be confirmed");
@@ -157,7 +160,8 @@ export class HealthRepository {
         const existingMeal = await this.getMealWith(tx, pending.mealId);
         if (existingMeal) return existingMeal;
       }
-      const mealIdempotencyKey = options.idempotencyKey ?? `confirmed_${pending.idempotencyKey}`;
+      if (pending.expiresAt <= now) throw new ConflictError("An expired meal draft cannot be confirmed");
+      const mealIdempotencyKey = `confirmed_${pending.id}`;
       const existingByUq = await tx.query.meals.findFirst({
         where: eq(meals.idempotencyKey, mealIdempotencyKey),
       });
@@ -165,7 +169,7 @@ export class HealthRepository {
         await tx
           .update(pendingMealEstimates)
           .set({ confirmed: true, confirmedAt: new Date(), mealId: existingByUq.id, updatedAt: new Date() })
-          .where(eq(pendingMealEstimates.id, id));
+          .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, options.scopeKey)));
         return this.getMealWith(tx, existingByUq.id);
       }
 
@@ -207,7 +211,7 @@ export class HealthRepository {
       await tx
         .update(pendingMealEstimates)
         .set({ confirmed: true, confirmedAt: new Date(), mealId: persisted.id, updatedAt: new Date() })
-        .where(eq(pendingMealEstimates.id, id));
+        .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, options.scopeKey)));
 
       return this.getMealWith(tx, persisted.id);
     });

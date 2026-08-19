@@ -13,6 +13,9 @@
     profile: "minimal",
     alsoAllow: [
       "estimate_nutrition",
+      "create_pending_meal",
+      "get_pending_meal",
+      "confirm_pending_meal",
       "log_meal",
       "update_meal",
       "delete_meal",

@@ -1,6 +1,8 @@
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
-import { Type } from "typebox";
+import { jsonResult } from "openclaw/plugin-sdk/tool-results";
+import { Type, type Static } from "typebox";
 import { isFallbackNotice, isMealLogConfirmation, sanitizeUserFacingError } from "./confirmation.js";
+import { derivePendingMealScope, healthFetch, withPendingMealScope } from "./health-client.js";
 
 const ConfigSchema = Type.Object({ apiUrl: Type.Optional(Type.String({ default: "http://127.0.0.1:4000" })) }, { additionalProperties: false });
 const Id = Type.String({ format: "uuid" });
@@ -29,6 +31,15 @@ const PresetMeal = Type.Object({
   rawUserText: Type.Union([Type.String(), Type.Null()]),
   idempotencyKey: IdempotencyKey,
 });
+const PendingMealDraft = Type.Object({
+  ...EstimateFields,
+  occurredAt: Type.String({ format: "date-time" }),
+  source: Type.Union([Type.Literal("text"), Type.Literal("photo"), Type.Literal("preset"), Type.Literal("manual")]),
+  rawUserText: Type.Union([Type.String(), Type.Null()]),
+  idempotencyKey: IdempotencyKey,
+});
+const PendingMealLookup = Type.Object({ id: Type.Optional(Id) });
+const PendingMealConfirmation = Type.Object({ id: Id, occurredAt: Type.Optional(Type.String({ format: "date-time" })), idempotencyKey: Type.Optional(IdempotencyKey) });
 
 const plugin = defineToolPlugin({
   id: "clawfit-health",
@@ -47,16 +58,59 @@ const plugin = defineToolPlugin({
       execute: (params, config) => healthFetch(config, "/v1/nutrition/estimate", { method: "POST", body: { text: params.text, ...(params.imageBase64 && params.imageMimeType ? { image: { base64: params.imageBase64, mimeType: params.imageMimeType } } : {}) } }),
     }),
     tool({
+      name: "create_pending_meal",
+      description: "Persist a scoped meal draft for later confirmation. This never logs a meal and always expires after two hours.",
+      parameters: PendingMealDraft,
+      factory: ({ config, toolContext }) => {
+        const scopeKey = derivePendingMealScope(toolContext);
+        return {
+          name: "create_pending_meal",
+          label: "create_pending_meal",
+          description: "Persist a scoped meal draft for later confirmation. This never logs a meal and always expires after two hours.",
+          parameters: PendingMealDraft,
+          execute: async (_toolCallId, rawParams, signal) => {
+            const params = rawParams as Static<typeof PendingMealDraft>;
+            return jsonResult(await healthFetch(config, "/v1/meals/pending", { method: "POST", body: { ...params, scopeKey, expiresInSeconds: 7_200 }, ...(signal ? { signal } : {}) }));
+          },
+        };
+      },
+    }),
+    tool({
       name: "get_pending_meal",
-      description: "Get the latest unconfirmed pending meal draft (or a specific draft by ID) across session boundaries.",
-      parameters: Type.Object({ id: Type.Optional(Id) }),
-      execute: (params, config) => (params.id ? healthFetch(config, `/v1/meals/pending/${params.id}`) : healthFetch(config, "/v1/meals/pending/latest")),
+      description: "Get this peer's latest unconfirmed pending meal draft (or a scoped draft by ID) across session boundaries.",
+      parameters: PendingMealLookup,
+      factory: ({ config, toolContext }) => {
+        const scopeKey = derivePendingMealScope(toolContext);
+        return {
+          name: "get_pending_meal",
+          label: "get_pending_meal",
+          description: "Get this peer's latest unconfirmed pending meal draft (or a scoped draft by ID) across session boundaries.",
+          parameters: PendingMealLookup,
+          execute: async (_toolCallId, rawParams, signal) => {
+            const params = rawParams as Static<typeof PendingMealLookup>;
+            const path = params.id ? `/v1/meals/pending/${params.id}` : "/v1/meals/pending/latest";
+            return jsonResult(await healthFetch(config, withPendingMealScope(path, scopeKey), signal ? { signal } : {}));
+          },
+        };
+      },
     }),
     tool({
       name: "confirm_pending_meal",
-      description: "Confirm and persist an existing pending meal estimate by ID. Idempotent on retries.",
-      parameters: Type.Object({ id: Id, occurredAt: Type.Optional(Type.String({ format: "date-time" })), idempotencyKey: Type.Optional(IdempotencyKey) }),
-      execute: (params, config) => healthFetch(config, `/v1/meals/pending/${params.id}/confirm`, { method: "POST", body: { ...(params.occurredAt ? { occurredAt: params.occurredAt } : {}), ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}) } }),
+      description: "Confirm and persist an existing meal draft in this peer's scope by ID. Idempotent on retries.",
+      parameters: PendingMealConfirmation,
+      factory: ({ config, toolContext }) => {
+        const scopeKey = derivePendingMealScope(toolContext);
+        return {
+          name: "confirm_pending_meal",
+          label: "confirm_pending_meal",
+          description: "Confirm and persist an existing meal draft in this peer's scope by ID. Idempotent on retries.",
+          parameters: PendingMealConfirmation,
+          execute: async (_toolCallId, rawParams, signal) => {
+            const params = rawParams as Static<typeof PendingMealConfirmation>;
+            return jsonResult(await healthFetch(config, `/v1/meals/pending/${params.id}/confirm`, { method: "POST", body: { scopeKey, ...(params.occurredAt ? { occurredAt: params.occurredAt } : {}), ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}) }, ...(signal ? { signal } : {}) }));
+          },
+        };
+      },
     }),
     tool({
       name: "log_meal",
@@ -201,31 +255,8 @@ ClawFit health tracking policy:
 - Treat clear workout phrases as actions without unnecessary clarification: "starting push" starts a Push workout; "bench 80 x 8" adds that set; "8 again" reuses the latest exercise and weight; "only got 6" adds another set unless explicitly called a correction. Resolve current state with get_active_workout when needed.
 - Corrections update the existing meal or workout-set ID after resolving it from recent/active state. Never create a replacement. Reuse a stable idempotency key when retrying a create action.
 - Perform only the action in the latest user message. Earlier unanswered or failed user messages are context, not queued actions: never replay them. A retry of the same current action must reuse its original idempotency key.
-- A meal estimate is a draft. For simple quantified foods, create and show a reasonable estimate without estimate_nutrition. Use estimate_nutrition once only for difficult restaurant/photo/mixed meals. Do not call log_meal until the user confirms, unless their first message explicitly asks to log/save/track it.
-- Preserve the complete structured meal draft for the confirmation turn. A bare "yes" or "log it" applies to the immediately preceding draft; call log_meal (or confirm_pending_meal) and never invoke an unrelated workout tool.
+- A meal estimate is a draft. For simple quantified foods, form a reasonable estimate without estimate_nutrition. Use estimate_nutrition once only for difficult restaurant/photo/mixed meals. Persist every unconfirmed estimate with create_pending_meal before presenting it. Do not call log_meal until the user confirms, unless their first message explicitly asks to log/save/track it.
+- A bare "yes" or "log it" applies only to the latest pending draft in the current peer scope. Resolve it with get_pending_meal and call confirm_pending_meal; never use conversation history as authority and never invoke an unrelated workout tool.
 - Show calorie best/low/high, macros, confidence, and meaningful uncertainty. Use get_daily_nutrition for daily food/totals rather than calculating them yourself.
 - Use deterministic volume and estimated 1RM returned by the tools. Nutrition is an estimate, not medical advice.
 `;
-
-async function healthFetch(config: { apiUrl?: string }, path: string, options: { method?: string; body?: unknown } = {}) {
-  const token = process.env.HEALTH_API_TOKEN;
-  if (!token) throw new Error("HEALTH_API_TOKEN is not available to the OpenClaw Gateway");
-  const apiUrl = config.apiUrl ?? process.env.HEALTH_API_URL ?? "http://127.0.0.1:4000";
-  const start = performance.now();
-  const response = await fetch(new URL(path, apiUrl), {
-    method: options.method ?? "GET",
-    headers: { authorization: `Bearer ${token}`, ...(options.body === undefined ? {} : { "content-type": "application/json" }) },
-    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-    signal: AbortSignal.timeout(30_000),
-  });
-  const dur = Math.round(performance.now() - start);
-  const payload = (await response.json()) as unknown;
-  if (!response.ok) {
-    const error = payload as { error?: { code?: string; message?: string } };
-    throw new Error(`${error.error?.code ?? "HEALTH_API_ERROR"}: ${error.error?.message ?? `Health API returned ${response.status}`}`);
-  }
-  if (dur > 200) {
-    console.log(`[LATENCY] healthFetch path=${path} durationMs=${dur}`);
-  }
-  return payload;
-}

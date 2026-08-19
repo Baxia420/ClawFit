@@ -1,4 +1,5 @@
 import type { AssistantMeal, AssistantResult, AssistantWorkout } from "./assistant-types";
+import { WEB_PENDING_MEAL_SCOPE, withWebPendingMealScope } from "./pending-scope";
 
 type RequestInitWithBody = Omit<RequestInit, "body"> & { body?: string };
 
@@ -30,16 +31,16 @@ export async function handleAssistantCommand(
   const normalized = message.toLocaleLowerCase();
 
   if (isConfirmation(normalized)) {
-    const { pending } = await client.request<{ pending: AssistantMeal | null }>("/v1/meals/pending/latest");
+    const { pending } = await client.request<{ pending: AssistantMeal | null }>(withWebPendingMealScope("/v1/meals/pending/latest"));
     if (!pending) return { kind: "message", message: "There isn't an unconfirmed meal draft to log." };
-    const meal = await client.request<AssistantMeal>(`/v1/meals/pending/${pending.id}/confirm`, { method: "POST", body: "{}" });
+    const meal = await client.request<AssistantMeal>(`/v1/meals/pending/${pending.id}/confirm`, { method: "POST", body: JSON.stringify({ scopeKey: WEB_PENDING_MEAL_SCOPE }) });
     return { kind: "meal_logged", message: `${meal.label} is logged. Your totals are up to date.`, meal };
   }
 
   if (/^(cancel|discard)( it| meal)?[.!]?$/i.test(message)) {
-    const { pending } = await client.request<{ pending: AssistantMeal | null }>("/v1/meals/pending/latest");
+    const { pending } = await client.request<{ pending: AssistantMeal | null }>(withWebPendingMealScope("/v1/meals/pending/latest"));
     if (!pending) return { kind: "message", message: "There isn't an unconfirmed meal draft to cancel." };
-    await client.request(`/v1/meals/pending/${pending.id}`, { method: "DELETE" });
+    await client.request(withWebPendingMealScope(`/v1/meals/pending/${pending.id}`), { method: "DELETE" });
     return { kind: "message", message: "Meal draft cancelled. Nothing was logged." };
   }
 
@@ -145,6 +146,7 @@ export async function handleAssistantCommand(
       method: "POST",
       body: JSON.stringify({
         ...estimation.estimate,
+        scopeKey: WEB_PENDING_MEAL_SCOPE,
         occurredAt: now.toISOString(),
         source: input.image ? "photo" : "text",
         rawUserText: message || null,

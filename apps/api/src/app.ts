@@ -9,6 +9,7 @@ import {
   NutritionEstimator,
   pendingMealInputSchema,
   pendingMealPatchSchema,
+  pendingMealScopeSchema,
   settingsPatchSchema,
   startWorkoutSchema,
   workoutSetInputSchema,
@@ -83,10 +84,14 @@ export function createApp(options: {
 
   app.post("/v1/meals", async (request, reply) => reply.code(201).send(await options.repository.createMeal(mealInputSchema.parse(request.body))));
   app.post("/v1/meals/pending", async (request, reply) => reply.code(201).send(await options.repository.createPendingMeal(pendingMealInputSchema.parse(request.body))));
-  app.get("/v1/meals/pending/latest", async () => ({ pending: await options.repository.getLatestPendingMeal() }));
-  app.get("/v1/meals/pending/:id", async (request) => options.repository.getPendingMeal(uuidParam.parse(request.params).id));
-  app.patch("/v1/meals/pending/:id", async (request) => options.repository.updatePendingMeal(uuidParam.parse(request.params).id, pendingMealPatchSchema.parse(request.body)));
-  app.delete("/v1/meals/pending/:id", async (request) => options.repository.cancelPendingMeal(uuidParam.parse(request.params).id));
+  app.get("/v1/meals/pending/latest", async (request) => ({ pending: await options.repository.getLatestPendingMeal(pendingMealScopeSchema.parse(request.query).scopeKey) }));
+  app.get("/v1/meals/pending/:id", async (request) => options.repository.getPendingMeal(uuidParam.parse(request.params).id, pendingMealScopeSchema.parse(request.query).scopeKey));
+  app.patch("/v1/meals/pending/:id", async (request) => {
+    const body = pendingMealPatchSchema.and(pendingMealScopeSchema).parse(request.body);
+    const { scopeKey, ...patch } = body;
+    return options.repository.updatePendingMeal(uuidParam.parse(request.params).id, scopeKey, patch);
+  });
+  app.delete("/v1/meals/pending/:id", async (request) => options.repository.cancelPendingMeal(uuidParam.parse(request.params).id, pendingMealScopeSchema.parse(request.query).scopeKey));
   app.post("/v1/meals/pending/:id/confirm", async (request, reply) => {
     const params = uuidParam.parse(request.params);
     const body = confirmPendingMealSchema.parse(request.body ?? {});
