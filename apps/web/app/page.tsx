@@ -9,15 +9,15 @@ export const dynamic = "force-dynamic";
 
 export default async function TodayPage() {
   const settings = await healthApi<Settings>("/v1/settings");
-  const timezone = settings?.timezone ?? process.env.APP_TIMEZONE ?? "Asia/Kuala_Lumpur";
+  const timezone = settings.timezone;
   const date = localDate(timezone);
   const [daily, active] = await Promise.all([
     healthApi<Daily>(`/v1/nutrition/daily?date=${date}&timezone=${encodeURIComponent(timezone)}`),
-    healthApi<Workout>("/v1/workouts/active"),
+    healthApi<Workout | null>("/v1/workouts/active"),
   ]);
-  const totals = daily?.totals ?? { caloriesBest: 0, caloriesLow: 0, caloriesHigh: 0, proteinG: 0, carbsG: 0, fatG: 0 };
-  const target = settings?.calorieTarget ?? Number(process.env.CALORIE_TARGET ?? 2200);
-  const proteinTarget = settings?.proteinTargetG ?? Number(process.env.PROTEIN_TARGET ?? 160);
+  const totals = daily.totals;
+  const target = settings.calorieTarget;
+  const proteinTarget = settings.proteinTargetG;
   const remaining = Math.max(target - totals.caloriesBest, 0);
   const calorieProgress = Math.min((totals.caloriesBest / target) * 100, 100);
   const proteinProgress = Math.min((totals.proteinG / proteinTarget) * 100, 100);
@@ -36,7 +36,7 @@ export default async function TodayPage() {
         <div className="quick-actions"><AskLauncher label="LOG A MEAL" prompt="I ate " /><AskLauncher label="ADD FOOD PHOTO" prompt="" className="quick-ask secondary" /><AskLauncher label="ASK CLAWFIT →" className="quick-ask dark" /></div>
       </section>
       <div className="split-grid">
-        <section className="panel"><div className="panel-title"><span>01 / MEALS</span><strong>{daily?.meals.length ?? 0} entries</strong></div><MealList meals={daily?.meals ?? []} /></section>
+        <section className="panel"><div className="panel-title"><span>01 / MEALS</span><strong>{daily.meals.length} entries</strong></div><MealList meals={daily.meals} timeZone={timezone} /></section>
         <section className="panel workout-now"><div className="panel-title"><span>02 / ACTIVE WORKOUT</span><strong>{active ? active.workout.status : "offline"}</strong></div>{active ? <><h2>{active.workout.name}</h2><div className="workout-stat"><strong>{active.setCount}</strong><span>SETS</span><strong>{Math.round(active.volumeKg).toLocaleString()}</strong><span>KG VOL</span></div><div className="exercise-tags">{active.exercises.map((exercise) => <span key={exercise.id}>{exercise.name} · {exercise.sets.length}</span>)}</div></> : <div className="empty"><strong>NO ACTIVE SESSION</strong><span>Ask ClawFit: “starting push”.</span></div>}</section>
       </div>
     </div>

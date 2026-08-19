@@ -11,10 +11,18 @@ const notificationMeta: Record<NotificationType, { label: string; description: s
   daily_summary: { label: "Daily summary", description: "A compact end-of-day nutrition and training report.", defaultTime: "21:30" },
   weekly_summary: { label: "Weekly summary", description: "Seven-day intake and performance overview.", defaultTime: "19:00" },
 };
-const dayLabels = ["M", "T", "W", "T", "F", "S", "S"];
+const dayLabels = [
+  { short: "M", full: "Monday" },
+  { short: "T", full: "Tuesday" },
+  { short: "W", full: "Wednesday" },
+  { short: "T", full: "Thursday" },
+  { short: "F", full: "Friday" },
+  { short: "S", full: "Saturday" },
+  { short: "S", full: "Sunday" },
+];
 
 export function SettingsForm({ initialSettings, savedPreferences }: { initialSettings: Settings; savedPreferences: NotificationPreference[] }) {
-  const [settings, setSettings] = useState(initialSettings);
+  const [settings, setSettings] = useState({ ...initialSettings, preferredUnits: "metric" as const });
   const [preferences, setPreferences] = useState(() => Object.entries(notificationMeta).map(([type, meta]) => savedPreferences.find((item) => item.type === type) ?? {
     type: type as NotificationType,
     enabled: false,
@@ -63,7 +71,7 @@ export function SettingsForm({ initialSettings, savedPreferences }: { initialSet
         <label>Calorie target<input type="number" min="500" max="10000" value={settings.calorieTarget} onChange={(event) => setSettings({ ...settings, calorieTarget: Number(event.target.value) })} /><small>KCAL / DAY</small></label>
         <label>Protein target<input type="number" min="10" max="1000" value={settings.proteinTargetG} onChange={(event) => setSettings({ ...settings, proteinTargetG: Number(event.target.value) })} /><small>GRAMS / DAY</small></label>
         <label>Timezone<input value={settings.timezone} onChange={(event) => setSettings({ ...settings, timezone: event.target.value })} /><small>IANA NAME</small></label>
-        <label>Preferred units<select value={settings.preferredUnits} onChange={(event) => setSettings({ ...settings, preferredUnits: event.target.value as Settings["preferredUnits"] })}><option value="metric">Metric / kg</option><option value="imperial">Imperial / lb</option></select><small>DISPLAY PREFERENCE</small></label>
+        <label>Preferred units<select value="metric" disabled><option value="metric">Metric / kg</option></select><small>V1 / KG ONLY</small></label>
       </div>
       <footer><button type="submit" disabled={busy === "goals"}>SAVE GOALS</button></footer>
     </form>
@@ -76,7 +84,7 @@ export function SettingsForm({ initialSettings, savedPreferences }: { initialSet
           return <article key={preference.type}>
             <label className="switch-row"><input type="checkbox" checked={preference.enabled} onChange={(event) => updatePreference(preference.type, { enabled: event.target.checked })} /><span className="toggle" /><div><strong>{meta.label}</strong><small>{meta.description}</small></div></label>
             <div className="schedule-row"><label>TIME<input type="time" value={preference.timeLocal ?? ""} onChange={(event) => updatePreference(preference.type, { timeLocal: event.target.value || null })} /></label><label>CHANNEL<select value={preference.deliveryChannel} onChange={(event) => updatePreference(preference.type, { deliveryChannel: event.target.value as NotificationPreference["deliveryChannel"] })}><option value="web_push">Web push</option><option value="whatsapp">WhatsApp</option><option value="both">Both</option></select></label><button type="button" disabled={busy === preference.type || preference.daysOfWeek.length === 0} onClick={() => void savePreference(preference)}>SAVE</button></div>
-            <div className="day-picker" aria-label={`${meta.label} days`}>{dayLabels.map((day, index) => { const value = index + 1; const active = preference.daysOfWeek.includes(value); return <button key={`${day}-${value}`} type="button" aria-pressed={active} onClick={() => updatePreference(preference.type, { daysOfWeek: active ? preference.daysOfWeek.filter((item) => item !== value) : [...preference.daysOfWeek, value].sort() })}>{day}</button>; })}</div>
+            <div className="day-picker" aria-label={`${meta.label} days`}>{dayLabels.map((day, index) => { const value = index + 1; const active = preference.daysOfWeek.includes(value); return <button key={day.full} type="button" aria-label={day.full} aria-pressed={active} onClick={() => updatePreference(preference.type, { daysOfWeek: active ? preference.daysOfWeek.filter((item) => item !== value) : [...preference.daysOfWeek, value].sort() })}>{day.short}</button>; })}</div>
           </article>;
         })}
       </div>

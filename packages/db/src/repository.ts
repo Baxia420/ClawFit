@@ -259,16 +259,19 @@ export class HealthRepository {
   }
 
   async nutritionTrend(start: Date, end: Date) {
-    return this.db.execute(sql`
-      select date_trunc('day', occurred_at) as day,
-        sum(calories_best)::float as calories_best,
-        sum(calories_low)::float as calories_low,
-        sum(calories_high)::float as calories_high,
-        sum(protein_g)::float as protein_g
-      from ${meals}
-      where occurred_at >= ${start} and occurred_at < ${end}
-      group by 1 order by 1 asc
-    `);
+    const day = sql<Date>`date_trunc('day', ${meals.occurredAt})`;
+    return this.db
+      .select({
+        day: day.as("day"),
+        calories_best: sql<number>`sum(${meals.caloriesBest})::float`.as("calories_best"),
+        calories_low: sql<number>`sum(${meals.caloriesLow})::float`.as("calories_low"),
+        calories_high: sql<number>`sum(${meals.caloriesHigh})::float`.as("calories_high"),
+        protein_g: sql<number>`sum(${meals.proteinG})::float`.as("protein_g"),
+      })
+      .from(meals)
+      .where(and(gte(meals.occurredAt, start), lt(meals.occurredAt, end)))
+      .groupBy(day)
+      .orderBy(day);
   }
 
   async savePreset(name: string, estimate: MealInput) {

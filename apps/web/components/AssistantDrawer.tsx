@@ -23,13 +23,25 @@ export function AssistantDrawer() {
   const inputRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const drawerRef = useRef<HTMLElement>(null);
+  const openerRef = useRef<HTMLElement | null>(null);
+
+  function openDrawer(prompt?: string) {
+    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setOpen(true);
+    if (prompt) setMessage(prompt);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }
+
+  function closeDrawer() {
+    setOpen(false);
+    requestAnimationFrame(() => openerRef.current?.focus());
+  }
 
   useEffect(() => {
     const listener = (event: Event) => {
       const prompt = (event as CustomEvent<{ prompt?: string }>).detail?.prompt;
-      setOpen(true);
-      if (prompt) setMessage(prompt);
-      requestAnimationFrame(() => inputRef.current?.focus());
+      openDrawer(prompt);
     };
     window.addEventListener("clawfit:ask", listener);
     return () => window.removeEventListener("clawfit:ask", listener);
@@ -42,12 +54,34 @@ export function AssistantDrawer() {
   useEffect(() => {
     if (!open) return;
     const previousOverflow = document.body.style.overflow;
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
+    const background = [...document.querySelectorAll<HTMLElement>(".rail, main, .mobile-nav, .assistant-fab")];
+    const handleKeyboard = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeDrawer();
+        return;
+      }
+      if (event.key !== "Tab" || !drawerRef.current) return;
+      const focusable = [...drawerRef.current.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href]')]
+        .filter((element) => element.offsetParent !== null);
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
     document.body.style.overflow = "hidden";
-    window.addEventListener("keydown", closeOnEscape);
+    background.forEach((element) => { element.inert = true; });
+    window.addEventListener("keydown", handleKeyboard);
     return () => {
       document.body.style.overflow = previousOverflow;
-      window.removeEventListener("keydown", closeOnEscape);
+      background.forEach((element) => { element.inert = false; });
+      window.removeEventListener("keydown", handleKeyboard);
     };
   }, [open]);
 
@@ -115,14 +149,14 @@ export function AssistantDrawer() {
 
   return (
     <>
-      <button className="assistant-fab" type="button" onClick={() => setOpen(true)} aria-label="Open Ask ClawFit">
+      <button className="assistant-fab" type="button" onClick={() => openDrawer()} aria-label="Open Ask ClawFit">
         <span>ASK</span><strong>+</strong>
       </button>
-      {open && <button className="assistant-scrim" type="button" aria-label="Close assistant" onClick={() => setOpen(false)} />}
-      <aside className={`assistant-drawer ${open ? "is-open" : ""}`} role="dialog" aria-modal="true" aria-label="Ask ClawFit" aria-hidden={!open}>
+      {open && <button className="assistant-scrim" type="button" aria-label="Close assistant" onClick={closeDrawer} />}
+      <aside ref={drawerRef} className={`assistant-drawer ${open ? "is-open" : ""}`} role="dialog" aria-modal="true" aria-label="Ask ClawFit" aria-hidden={!open}>
         <header className="assistant-head">
           <div><span>CLAWFIT / AI</span><strong>Ask ClawFit</strong></div>
-          <button type="button" onClick={() => setOpen(false)} aria-label="Close assistant">×</button>
+          <button type="button" onClick={closeDrawer} aria-label="Close assistant">×</button>
         </header>
         <div className="assistant-status"><i /> HEALTH API BOUNDARY <span>SERVER-SIDE ONLY</span></div>
         <div className="assistant-feed" aria-live="polite">
@@ -138,7 +172,7 @@ export function AssistantDrawer() {
           {error && <p className="assistant-error" role="alert">{error}</p>}
           <div className="compose-row">
             <label className="photo-button" aria-label="Attach a food photo">
-              <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp,image/heic" onChange={(event) => setImage(event.target.files?.[0] ?? null)} />
+              <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp,image/heic" capture="environment" onChange={(event) => setImage(event.target.files?.[0] ?? null)} />
               <span>PHOTO</span>
             </label>
             <input ref={inputRef} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Meal, set, or question…" maxLength={4000} />

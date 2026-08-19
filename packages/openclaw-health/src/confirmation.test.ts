@@ -6,7 +6,20 @@ describe("meal log confirmation", () => {
     expect(isMealLogConfirmation(prompt)).toBe(true);
   });
 
-  it.each(["I ate 3 eggs and toast", "estimate this meal", "what have I eaten today?", "", null, undefined])("rejects %s", (prompt) => {
+  it.each([
+    "I ate 3 eggs and toast",
+    "estimate this meal",
+    "what have I eaten today?",
+    "don't log this",
+    "do not save it",
+    "estimate it without logging it",
+    "log it not yet",
+    "what did I log?",
+    "have I recorded this meal?",
+    "",
+    null,
+    undefined,
+  ])("rejects %s", (prompt) => {
     expect(isMealLogConfirmation(prompt as string)).toBe(false);
   });
 });

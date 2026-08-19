@@ -76,6 +76,16 @@ describe("HealthRepository", () => {
     expect(daily.totals.caloriesLow).toBe(700);
   });
 
+  it("aggregates nutrition trends through typed timestamp boundaries", async () => {
+    await repository.createMeal(baseMeal);
+    await repository.createMeal({ ...baseMeal, calories: { best: 300, low: 250, high: 350 }, idempotencyKey: "meal-trend-002" });
+
+    const trend = await repository.nutritionTrend(new Date("2026-08-14T00:00:00Z"), new Date("2026-08-15T00:00:00Z"));
+
+    expect(trend).toHaveLength(1);
+    expect(trend[0]).toMatchObject({ calories_best: 800, calories_low: 700, calories_high: 925, protein_g: 60 });
+  });
+
   it("creates a workout with multiple sets and deterministic volume", async () => {
     const result = await repository.startWorkout({ name: "Push", startedAt: new Date("2026-08-14T09:00:00Z"), idempotencyKey: "workout-start-001" });
     await repository.addWorkoutSet(result.workout.id, { exerciseName: "Bench press", weightKg: 80, reps: 8, idempotencyKey: "bench-set-001" });
@@ -84,6 +94,22 @@ describe("HealthRepository", () => {
     expect(workout.setCount).toBe(2);
     expect(workout.volumeKg).toBe(1_200);
     expect(workout.exercises[0]?.sets[0]?.estimatedOneRepMax).toBe(101.3);
+  });
+
+  it("reuses workout and set records when create requests are retried", async () => {
+    const firstWorkout = await repository.startWorkout({ name: "Pull", idempotencyKey: "workout-retry-001" });
+    const retriedWorkout = await repository.startWorkout({ name: "Should not replace", idempotencyKey: "workout-retry-001" });
+    expect(retriedWorkout.workout.id).toBe(firstWorkout.workout.id);
+    expect(retriedWorkout.workout.name).toBe("Pull");
+
+    const firstSet = await repository.addWorkoutSet(firstWorkout.workout.id, { exerciseName: "Row", weightKg: 40, reps: 10, idempotencyKey: "set-retry-001" });
+    const retriedSet = await repository.addWorkoutSet(firstWorkout.workout.id, { exerciseName: "Should not replace", weightKg: 400, reps: 1, idempotencyKey: "set-retry-001" });
+    expect(retriedSet.id).toBe(firstSet.id);
+    expect(retriedSet.weightKg).toBe(40);
+    expect((await repository.getActiveWorkout())?.setCount).toBe(1);
+
+    await repository.finishWorkout(firstWorkout.workout.id);
+    expect(await repository.getActiveWorkout()).toBeNull();
   });
 
   it("corrects and deletes an existing workout set", async () => {

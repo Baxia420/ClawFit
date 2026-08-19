@@ -4,13 +4,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getOpenClawJson, runOpenClaw } from "./openclaw-cli.js";
 
-const healthTools = [
-  "estimate_nutrition", "create_pending_meal", "get_pending_meal", "confirm_pending_meal", "log_meal", "update_meal", "delete_meal", "get_meal", "get_recent_meals", "get_daily_nutrition",
-  "save_food_preset", "find_food_preset", "update_food_preset", "delete_food_preset", "start_workout", "get_active_workout",
-  "add_workout_set", "update_workout_set", "delete_workout_set", "finish_workout", "get_previous_exercise_performance", "get_workout_history",
-];
-
 loadProjectEnv();
+const healthTools = await loadHealthTools();
 await syncGatewayEnv();
 
 const pluginPath = resolve("packages/openclaw-health");
@@ -36,6 +31,16 @@ run("config", "set", "session.resetByType.direct", JSON.stringify({ mode: "idle"
 run("config", "set", "agents.defaults.compaction", JSON.stringify({ mode: "safeguard", reserveTokens: 8192, keepRecentTokens: 4096, maxHistoryShare: 0.5, notifyUser: false }), "--strict-json");
 run("config", "set", "messages.suppressToolErrors", "true", "--strict-json");
 
+const whatsappAllowFrom = parseWhatsAppAllowFrom(process.env.CLAWFIT_WHATSAPP_ALLOW_FROM);
+if (whatsappAllowFrom.length > 0) {
+  run("config", "set", "channels.whatsapp.dmPolicy", "allowlist");
+  run("config", "set", "channels.whatsapp.groupPolicy", "disabled");
+  run("config", "set", "channels.whatsapp.allowFrom", JSON.stringify(whatsappAllowFrom), "--strict-json");
+  run("config", "set", "channels.whatsapp.groupAllowFrom", JSON.stringify(whatsappAllowFrom), "--strict-json");
+} else {
+  console.warn("CLAWFIT_WHATSAPP_ALLOW_FROM is not set; existing WhatsApp sender policy was left unchanged.");
+}
+
 console.log("ClawFit plugin, least-privilege tool policy, and session hygiene configured. Restart the Gateway after model configuration.");
 
 
@@ -50,6 +55,24 @@ function loadProjectEnv() {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+}
+
+async function loadHealthTools() {
+  const policyPath = fileURLToPath(new URL("../openclaw/policy.json", import.meta.url));
+  const parsed = JSON.parse(await readFile(policyPath, "utf8")) as { healthTools?: unknown };
+  if (!Array.isArray(parsed.healthTools) || parsed.healthTools.length === 0 || parsed.healthTools.some((tool) => typeof tool !== "string" || !tool)) {
+    throw new Error("openclaw/policy.json must define a non-empty healthTools string array");
+  }
+  return parsed.healthTools as string[];
+}
+
+function parseWhatsAppAllowFrom(value: string | undefined) {
+  if (!value?.trim()) return [];
+  const entries = value.trim().startsWith("[") ? JSON.parse(value) as unknown : value.split(",").map((entry) => entry.trim());
+  if (!Array.isArray(entries) || entries.some((entry) => typeof entry !== "string" || !/^\+\d{8,15}$/.test(entry))) {
+    throw new Error("CLAWFIT_WHATSAPP_ALLOW_FROM must be a comma-separated list or JSON array of E.164 phone numbers");
+  }
+  return [...new Set(entries as string[])];
 }
 
 async function syncGatewayEnv() {

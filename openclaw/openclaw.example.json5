@@ -39,8 +39,11 @@
   },
   channels: {
     whatsapp: {
-      dmPolicy: "pairing",
+      // Replace this placeholder with the personal sender number; the linked account is the dedicated ClawFit number.
+      dmPolicy: "allowlist",
+      allowFrom: ["+60123456789"],
       groupPolicy: "disabled",
+      groupAllowFrom: ["+60123456789"],
     },
   },
 }

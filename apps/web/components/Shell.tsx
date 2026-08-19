@@ -22,7 +22,7 @@ export function Shell({ children }: { children: ReactNode }) {
         <nav aria-label="Primary navigation">
           {navigation.map(([label, href], index) => <Link href={href} key={href} aria-current={pathname === href ? "page" : undefined}><small>0{index + 1}</small>{label}</Link>)}
         </nav>
-        <div className="rail-status"><i /> API LINK<br /><span>PRIVATE / LOCAL</span></div>
+        <div className="rail-status">API / SERVER-SIDE<br /><span>PRIVATE HEALTH DATA</span></div>
       </aside>
       <main id="main">{children}</main>
       <nav className="mobile-nav" aria-label="Mobile navigation">

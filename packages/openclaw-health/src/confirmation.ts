@@ -2,6 +2,10 @@ export function isMealLogConfirmation(prompt: string | null | undefined): boolea
   if (!prompt || typeof prompt !== "string") return false;
   const trimmed = prompt.trim();
   if (!trimmed) return false;
+  const action = "(?:log(?:ged|ging)?|sav(?:e|ed|ing)|track(?:ed|ing)?|record(?:ed|ing)?)";
+  if (new RegExp(`\\b(?:do\\s+not|don't|dont|never|without)\\b[^.!?]{0,60}\\b${action}\\b`, "i").test(trimmed)) return false;
+  if (new RegExp(`\\b${action}\\b[^.!?]{0,30}\\b(?:not|never)\\b`, "i").test(trimmed)) return false;
+  if (new RegExp(`^(?:what|when|where|why|how(?:\\s+much)?|did\\s+i|have\\s+i)\\b[^.!?]*\\b${action}\\b[^.!?]*[?]?$`, "i").test(trimmed)) return false;
   if (/\b(log|save|track|record)\b/i.test(trimmed)) return true;
   return /^\s*(yes|yep|yeah|sure|ok(?:ay)?|confirm|do it|go ahead|please do)[\s.!]*$/i.test(trimmed);
 }

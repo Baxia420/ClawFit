@@ -16,7 +16,7 @@ The installable web app now routes Ask ClawFit commands through a same-origin Ne
 
 The OpenClaw plugin exposes only health-domain tools. It does not expose SQL, shell, filesystem access, or generic HTTP requests. Meal estimates are drafts until explicitly confirmed.
 
-For the two-project Vercel Preview, Neon migration/import, environment, protection, and OpenClaw cutover procedure, use [the Vercel Preview runbook](docs/vercel-preview.md).
+For the production-shaped v1 topology—Render API, Neon PostgreSQL, Vercel web, and the OpenClaw cutover—use [the deployment runbook](docs/deployment.md). The Fastify API is intentionally not deployed to Vercel.
 
 ## Prerequisites
 
@@ -67,6 +67,8 @@ pnpm nutrition:manual     explicit real-API nutrition test
 7. Verify with `openclaw plugins inspect clawfit-health --runtime --json` and `openclaw security audit --deep`.
 
 Model IDs are intentionally absent from committed OpenClaw configuration. This prevents stale or guessed IDs from being selected.
+
+For a reproducible dedicated-number policy, set `CLAWFIT_WHATSAPP_ALLOW_FROM` in the root `.env` to the personal sender number(s) in E.164 form before running `pnpm openclaw:setup`. The setup then enforces DM allowlisting, disables groups, and mirrors the same sender list to `groupAllowFrom`. If the variable is absent, existing channel policy is preserved rather than guessed.
 
 ## WhatsApp manual pairing
 

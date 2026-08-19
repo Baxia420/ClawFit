@@ -9,7 +9,7 @@ const settingsSchema = z.object({
   calorieTarget: z.number().int().min(500).max(10_000),
   proteinTargetG: z.number().min(10).max(1_000),
   timezone: timezoneSchema,
-  preferredUnits: z.enum(["metric", "imperial"]),
+  preferredUnits: z.literal("metric"),
 });
 const notificationSchema = z.object({
   type: z.enum(["meal_reminder", "workout_reminder", "evening_progress", "unfinished_workout", "daily_summary", "weekly_summary"]),
