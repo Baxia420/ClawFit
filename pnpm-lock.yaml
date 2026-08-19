@@ -47,6 +47,13 @@ importers:
       zod:
         specifier: latest
         version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^26.2.0
+        version: 26.2.0
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
 
   apps/web:
     dependencies:
