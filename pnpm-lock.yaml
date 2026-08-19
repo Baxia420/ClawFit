@@ -95,15 +95,28 @@ importers:
       '@electric-sql/pglite':
         specifier: latest
         version: 0.5.4
+      '@types/node':
+        specifier: ^26.2.0
+        version: 26.2.0
       drizzle-kit:
         specifier: latest
         version: 0.31.10
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
 
   packages/health-core:
     dependencies:
       zod:
         specifier: latest
         version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^26.2.0
+        version: 26.2.0
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
 
   packages/openclaw-health:
     dependencies:

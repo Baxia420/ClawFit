@@ -4,8 +4,18 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./schema": "./src/schema.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "development": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema.d.ts",
+      "development": "./src/schema.ts",
+      "import": "./dist/schema.js",
+      "default": "./dist/schema.js"
+    }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -21,7 +31,8 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "latest",
-    "drizzle-kit": "latest"
+    "@types/node": "^26.2.0",
+    "drizzle-kit": "latest",
+    "typescript": "^7.0.2"
   }
 }
-

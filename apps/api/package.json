@@ -7,8 +7,10 @@
     "node": "24.x"
   },
   "scripts": {
-    "dev": "tsx watch src/server.ts",
-    "build": "tsc -p tsconfig.json",
+    "dev": "tsx --conditions=development watch src/server.ts",
+    "build:dependencies": "pnpm --filter @clawfit/health-core build && pnpm --filter @clawfit/db build",
+    "build": "pnpm run build:dependencies && tsc -p tsconfig.json",
+    "smoke:runtime": "pnpm run build && node scripts/runtime-smoke.mjs",
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
