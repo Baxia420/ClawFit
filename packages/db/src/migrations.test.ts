@@ -157,13 +157,12 @@ describe("two-user identity migration (0004)", () => {
         { id: "44444444-4444-4444-a444-444444444444", user_id: "00000000-0000-0000-0000-000000000002" },
       ]);
 
-      // 7. Verify User Settings schema updated and both rows exist
+      // 7. Verify User Settings schema updated and primary user backfilled without assuming partner targets
       const settingsResult = await pg.query<{ user_id: string; calorie_target: number }>(
         "SELECT user_id, calorie_target FROM user_settings ORDER BY user_id",
       );
       expect(settingsResult.rows).toEqual([
         { user_id: "00000000-0000-0000-0000-000000000002", calorie_target: 2300 },
-        { user_id: "00000000-0000-0000-0000-000000000003", calorie_target: 2000 },
       ]);
 
       // 8. Verify Notification Preferences ownership backfilled

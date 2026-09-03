@@ -48,21 +48,26 @@ ClawFit was initially designed as an implicit single-user personal fitness track
 - Instead, the outer API adapter (`apps/api/src/create-app.ts`) internally binds existing single-user routes to the internal primary-user compatibility context (`DEFAULT_PRIMARY_USER_ID`) and explicitly passes this ID to repository calls.
 - In Stage 2, user identity will be derived securely from WhatsApp metadata (`toolContext.requesterSenderId` via `resolveUser`), and future web authentication will establish web user identity.
 
-### Entity Scoping & Invariants
+### Datastore Architecture & Fail-Closed Startup
+- PostgreSQL (Neon / hosted PostgreSQL) is the sole authoritative datastore for ClawFit.
+- The API does **not** fall back to local PGlite or seed demo fitness records at runtime. If PostgreSQL is unavailable, misconfigured, or failing migrations, the API fails closed and exits immediately with an explicit error. Embedded PGlite is restricted strictly to automated tests.
 
-| Entity | Scoping Mechanism | Integrity Invariants |
-| --- | --- | --- |
-| `meals` | `user_id` (UUID, NOT NULL) | Indexed by `(user_id, occurred_at)`. Repository queries enforce user ownership. |
-| `pending_meal_estimates` | `user_id` (UUID, NOT NULL) | User A cannot view, edit, cancel, or confirm User B's draft. Scope key preserved. |
-| `food_presets` | `user_id` (UUID, NOT NULL) | Unique constraint per user on `(user_id, normalized_name)`. |
-| `workouts` | `user_id` (UUID, NOT NULL) | **One active workout per user**: DB partial unique index on `(user_id) WHERE status = 'active'`. User A and User B can work out simultaneously. |
-| `user_settings` | `user_id` (UUID PK) | Independent calorie targets, protein targets, and timezones per user. |
-| `notification_preferences` | `user_id` (UUID, NOT NULL) | Unique constraint per user on `(user_id, type)`. |
-| `meal_items` | via `meal_id` FK | Child table scoped through parent. |
-| `exercises` / `workout_sets` | via `workout_id` FK | Child tables scoped through parent workout. |
+### Entity Scoping, Health Protection, & Idempotency Invariants
+
+| Entity | Scoping Mechanism | Integrity Invariants | Idempotency Uniqueness |
+| --- | --- | --- | --- |
+| `meals` | `user_id` (UUID, NOT NULL) | Indexed by `(user_id, occurred_at)`. **Protected from delete cascades** (`ON DELETE RESTRICT`). | Unique per user: `(user_id, idempotency_key)`. |
+| `pending_meal_estimates` | `user_id` (UUID, NOT NULL) | User A cannot view, edit, cancel, or confirm User B's draft. Scope key preserved. | Unique per user & scope: `(user_id, scope_key, idempotency_key)`. |
+| `food_presets` | `user_id` (UUID, NOT NULL) | Unique per user on `(user_id, normalized_name)`. Safe patch mutation (`FoodPresetPatch` blocks `userId`/`id` changes; validates `low <= best <= high`). | N/A (named entity). |
+| `workouts` | `user_id` (UUID, NOT NULL) | **One active workout per user**: partial unique index on `(user_id) WHERE status = 'active'`. **Protected from delete cascades** (`ON DELETE RESTRICT`). | Unique per user: `(user_id, idempotency_key)`. |
+| `workout_sets` | via `exercise_id` FK | Scoped via parent exercise and workout. Duplicate lookup verified strictly within user's workout. | Unique per exercise: `(exercise_id, idempotency_key)`. |
+| `user_settings` | `user_id` (UUID PK) | Independent calorie targets, protein targets, and timezones per user. Partner settings are **not** pre-seeded with assumed targets. | PK on `user_id`. |
+| `notification_preferences` | `user_id` (UUID, NOT NULL) | Unique constraint per user on `(user_id, type)`. | Unique per user: `(user_id, type)`. |
+| `meal_items` | via `meal_id` FK | Child table scoped through parent meal. | N/A. |
+| `exercises` | via `workout_id` FK | Scoped through parent workout. Unique on `(workout_id, normalized_name)`. | N/A. |
 
 ### Migration Preservation
-Migration `0004_two_user_identity.sql` creates the new identity tables, seeds the default household and users, backfills all pre-existing records to `DEFAULT_PRIMARY_USER_ID`, and makes `user_id` non-null with foreign keys and unique constraints. Zero historical records are deleted.
+Migration `0004_two_user_identity.sql` creates the new identity tables, seeds the default household and users, backfills all pre-existing records to `DEFAULT_PRIMARY_USER_ID`, and makes `user_id` non-null with foreign keys and unique constraints. Zero historical records are deleted. Calorie and protein targets for the partner are left unconfigured rather than assumed.
 
 ---
 

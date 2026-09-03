@@ -26,11 +26,11 @@
   },
   "dependencies": {
     "@clawfit/health-core": "workspace:*",
-    "@electric-sql/pglite": "latest",
     "drizzle-orm": "latest",
     "postgres": "latest"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "latest",
     "@types/node": "^26.2.0",
     "drizzle-kit": "latest",
     "typescript": "^7.0.2"

@@ -119,6 +119,20 @@ export const pendingMealPatchSchema = z.object({
   fiberG: z.number().nonnegative().max(500).nullable().optional(),
 });
 
+export const foodPresetPatchSchema = z.object({
+  name: z.string().min(1).max(160).optional(),
+  label: z.string().min(1).max(300).optional(),
+  caloriesBest: z.number().int().nonnegative().max(20_000).optional(),
+  caloriesLow: z.number().int().nonnegative().max(20_000).optional(),
+  caloriesHigh: z.number().int().nonnegative().max(20_000).optional(),
+  proteinG: z.number().nonnegative().max(2_000).optional(),
+  carbsG: z.number().nonnegative().max(3_000).optional(),
+  fatG: z.number().nonnegative().max(2_000).optional(),
+  fiberG: z.number().nonnegative().max(500).nullable().optional(),
+  confidence: confidenceSchema.optional(),
+  uncertaintyReasons: z.array(z.string().max(200)).optional(),
+});
+
 export const settingsPatchSchema = z.object({
   calorieTarget: z.number().int().min(500).max(10_000).optional(),
   proteinTargetG: z.number().min(10).max(1_000).optional(),
@@ -205,6 +219,7 @@ export type MealPatch = z.infer<typeof mealPatchSchema>;
 export type PendingMealInput = z.infer<typeof pendingMealInputSchema>;
 export type ConfirmPendingMealInput = z.infer<typeof confirmPendingMealSchema>;
 export type PendingMealPatch = z.infer<typeof pendingMealPatchSchema>;
+export type FoodPresetPatch = z.infer<typeof foodPresetPatchSchema>;
 export type SettingsPatch = z.infer<typeof settingsPatchSchema>;
 export type NotificationPreferenceInput = z.infer<typeof notificationPreferenceSchema>;
 export type WorkoutSetInput = z.infer<typeof workoutSetInputSchema>;

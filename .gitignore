@@ -12,4 +12,3 @@ coverage/
 output/
 apps/web/.vercel/
 .playwright-cli/
-.clawfit-data/

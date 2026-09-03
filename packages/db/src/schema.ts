@@ -55,7 +55,7 @@ export const meals = pgTable(
   "meals",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "restrict" }),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     label: varchar("label", { length: 300 }).notNull(),
     caloriesBest: integer("calories_best").notNull(),
@@ -74,7 +74,7 @@ export const meals = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("meals_idempotency_key_uq").on(table.idempotencyKey),
+    uniqueIndex("meals_user_idempotency_uq").on(table.userId, table.idempotencyKey),
     index("meals_occurred_at_idx").on(table.occurredAt),
     index("meals_user_id_occurred_at_idx").on(table.userId, table.occurredAt),
   ],
@@ -110,7 +110,7 @@ export const pendingMealEstimates = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("pending_meals_scope_idempotency_uq").on(table.scopeKey, table.idempotencyKey),
+    uniqueIndex("pending_meals_user_scope_idempotency_uq").on(table.userId, table.scopeKey, table.idempotencyKey),
     index("pending_meals_scope_created_at_idx").on(table.scopeKey, table.createdAt),
     index("pending_meals_expires_at_idx").on(table.expiresAt),
     index("pending_meals_created_at_idx").on(table.createdAt),
@@ -180,7 +180,7 @@ export const workouts = pgTable(
   "workouts",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "restrict" }),
     name: varchar("name", { length: 120 }).notNull(),
     status: workoutStatusEnum("status").notNull().default("active"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
@@ -190,7 +190,7 @@ export const workouts = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("workouts_idempotency_key_uq").on(table.idempotencyKey),
+    uniqueIndex("workouts_user_idempotency_uq").on(table.userId, table.idempotencyKey),
     index("workouts_started_at_idx").on(table.startedAt),
     index("workouts_user_id_started_at_idx").on(table.userId, table.startedAt),
     uniqueIndex("workouts_user_active_uq").on(table.userId).where(sql`${table.status} = 'active'`),
@@ -225,7 +225,7 @@ export const workoutSets = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("workout_sets_idempotency_key_uq").on(table.idempotencyKey),
+    uniqueIndex("workout_sets_exercise_idempotency_uq").on(table.exerciseId, table.idempotencyKey),
     uniqueIndex("workout_sets_exercise_number_uq").on(table.exerciseId, table.setNumber),
   ],
 );

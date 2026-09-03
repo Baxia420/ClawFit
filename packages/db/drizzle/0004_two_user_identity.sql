@@ -69,7 +69,11 @@ UPDATE "meals" SET "user_id" = '00000000-0000-0000-0000-000000000002' WHERE "use
 --> statement-breakpoint
 ALTER TABLE "meals" ALTER COLUMN "user_id" SET NOT NULL;
 --> statement-breakpoint
-ALTER TABLE "meals" ADD CONSTRAINT "meals_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "meals" ADD CONSTRAINT "meals_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE restrict ON UPDATE no action;
+--> statement-breakpoint
+DROP INDEX IF EXISTS "meals_idempotency_key_uq";
+--> statement-breakpoint
+CREATE UNIQUE INDEX "meals_user_idempotency_uq" ON "meals" USING btree ("user_id","idempotency_key");
 --> statement-breakpoint
 CREATE INDEX "meals_user_id_occurred_at_idx" ON "meals" USING btree ("user_id","occurred_at");
 --> statement-breakpoint
@@ -82,6 +86,10 @@ ALTER TABLE "pending_meal_estimates" ALTER COLUMN "user_id" SET NOT NULL;
 ALTER TABLE "pending_meal_estimates" ADD CONSTRAINT "pending_meal_estimates_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;
 --> statement-breakpoint
 CREATE INDEX "pending_meals_user_id_idx" ON "pending_meal_estimates" USING btree ("user_id");
+--> statement-breakpoint
+DROP INDEX IF EXISTS "pending_meals_scope_idempotency_uq";
+--> statement-breakpoint
+CREATE UNIQUE INDEX "pending_meals_user_scope_idempotency_uq" ON "pending_meal_estimates" USING btree ("user_id","scope_key","idempotency_key");
 --> statement-breakpoint
 ALTER TABLE "food_presets" ADD COLUMN "user_id" uuid;
 --> statement-breakpoint
@@ -101,11 +109,19 @@ UPDATE "workouts" SET "user_id" = '00000000-0000-0000-0000-000000000002' WHERE "
 --> statement-breakpoint
 ALTER TABLE "workouts" ALTER COLUMN "user_id" SET NOT NULL;
 --> statement-breakpoint
-ALTER TABLE "workouts" ADD CONSTRAINT "workouts_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "workouts" ADD CONSTRAINT "workouts_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE restrict ON UPDATE no action;
+--> statement-breakpoint
+DROP INDEX IF EXISTS "workouts_idempotency_key_uq";
+--> statement-breakpoint
+CREATE UNIQUE INDEX "workouts_user_idempotency_uq" ON "workouts" USING btree ("user_id","idempotency_key");
 --> statement-breakpoint
 CREATE INDEX "workouts_user_id_started_at_idx" ON "workouts" USING btree ("user_id","started_at");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "workouts_user_active_uq" ON "workouts" USING btree ("user_id") WHERE ("status" = 'active');
+--> statement-breakpoint
+DROP INDEX IF EXISTS "workout_sets_idempotency_key_uq";
+--> statement-breakpoint
+CREATE UNIQUE INDEX "workout_sets_exercise_idempotency_uq" ON "workout_sets" USING btree ("exercise_id","idempotency_key");
 --> statement-breakpoint
 ALTER TABLE "user_settings" ADD COLUMN "user_id" uuid;
 --> statement-breakpoint
@@ -121,10 +137,6 @@ ALTER TABLE "user_settings" ADD PRIMARY KEY ("user_id");
 --> statement-breakpoint
 ALTER TABLE "user_settings" ADD CONSTRAINT "user_settings_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;
 --> statement-breakpoint
-INSERT INTO "user_settings" ("user_id", "calorie_target", "protein_target_g", "timezone", "preferred_units")
-VALUES ('00000000-0000-0000-0000-000000000003', 2000, 120, 'Asia/Kuala_Lumpur', 'metric')
-ON CONFLICT ("user_id") DO NOTHING;
---> statement-breakpoint
 ALTER TABLE "notification_preferences" ADD COLUMN "user_id" uuid;
 --> statement-breakpoint
 UPDATE "notification_preferences" SET "user_id" = '00000000-0000-0000-0000-000000000002' WHERE "user_id" IS NULL;
@@ -136,3 +148,4 @@ ALTER TABLE "notification_preferences" ADD CONSTRAINT "notification_preferences_
 DROP INDEX IF EXISTS "notification_preferences_type_uq";
 --> statement-breakpoint
 CREATE UNIQUE INDEX "notification_preferences_user_type_uq" ON "notification_preferences" USING btree ("user_id","type");
+

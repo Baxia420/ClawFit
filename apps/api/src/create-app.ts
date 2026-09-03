@@ -3,6 +3,7 @@ import Fastify from "fastify";
 import { z, ZodError } from "zod";
 import {
   confirmPendingMealSchema,
+  foodPresetPatchSchema,
   mealInputSchema,
   mealPatchSchema,
   notificationPreferenceSchema,
@@ -156,8 +157,7 @@ export function createApp(options: {
   });
   app.patch("/v1/food-presets/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
-    const parsed = presetPatchSchema.parse(request.body);
-    const patch = Object.fromEntries(Object.entries(parsed).filter(([, value]) => value !== undefined)) as Parameters<HealthRepository["updatePreset"]>[2];
+    const patch = foodPresetPatchSchema.parse(request.body);
     return options.repository.updatePreset(compatibilityUserId, id, patch);
   });
   app.delete("/v1/food-presets/:id", async (request) => {
@@ -227,20 +227,6 @@ export function createApp(options: {
 
   return app;
 }
-
-const presetPatchSchema = z.object({
-  name: z.string().min(1).max(160).optional(),
-  label: z.string().min(1).max(300).optional(),
-  caloriesBest: z.number().int().nonnegative().max(20_000).optional(),
-  caloriesLow: z.number().int().nonnegative().max(20_000).optional(),
-  caloriesHigh: z.number().int().nonnegative().max(20_000).optional(),
-  proteinG: z.number().nonnegative().max(2_000).optional(),
-  carbsG: z.number().nonnegative().max(3_000).optional(),
-  fatG: z.number().nonnegative().max(2_000).optional(),
-  fiberG: z.number().nonnegative().max(500).nullable().optional(),
-  confidence: z.enum(["high", "medium", "low"]).optional(),
-  uncertaintyReasons: z.array(z.string().min(1).max(300)).max(20).optional(),
-});
 
 function safeEqual(left: string, right: string) {
   const leftBuffer = Buffer.from(left);

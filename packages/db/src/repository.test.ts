@@ -435,5 +435,183 @@ describe("HealthRepository", () => {
       expect(confirmed.userId).toBe(userA);
       expect(confirmed.label).toBe("User A Draft Bowl");
     });
+
+    it("isolates idempotency across users for meals, pending meals, workouts, and workout sets", async () => {
+      // 1. Meals: User A and User B can independently use the same idempotency key string
+      const mealA = await repository.createMeal(userA, { ...baseMeal, label: "User A Lunch", idempotencyKey: "shared-meal-key" });
+      const mealB = await repository.createMeal(userB, { ...baseMeal, label: "User B Lunch", idempotencyKey: "shared-meal-key" });
+      expect(mealA.id).not.toBe(mealB.id);
+      expect(mealA.userId).toBe(userA);
+      expect(mealB.userId).toBe(userB);
+
+      // Retries return each user's own meal
+      const retryMealA = await repository.createMeal(userA, { ...baseMeal, label: "Should not replace A", idempotencyKey: "shared-meal-key" });
+      expect(retryMealA.id).toBe(mealA.id);
+      expect(retryMealA.label).toBe("User A Lunch");
+
+      const retryMealB = await repository.createMeal(userB, { ...baseMeal, label: "Should not replace B", idempotencyKey: "shared-meal-key" });
+      expect(retryMealB.id).toBe(mealB.id);
+      expect(retryMealB.label).toBe("User B Lunch");
+
+      // 2. Pending Meals: User A and User B can use identical scopeKey and idempotencyKey
+      const pendingA = await repository.createPendingMeal(userA, {
+        ...baseMeal,
+        scopeKey: "whatsapp:shared-group",
+        idempotencyKey: "shared-pending-key",
+        expiresInSeconds: 3600,
+      });
+      const pendingB = await repository.createPendingMeal(userB, {
+        ...baseMeal,
+        label: "User B Draft",
+        scopeKey: "whatsapp:shared-group",
+        idempotencyKey: "shared-pending-key",
+        expiresInSeconds: 3600,
+      });
+      expect(pendingA.id).not.toBe(pendingB.id);
+      expect(pendingA.userId).toBe(userA);
+      expect(pendingB.userId).toBe(userB);
+
+      expect((await repository.getLatestPendingMeal(userA, "whatsapp:shared-group"))?.id).toBe(pendingA.id);
+      expect((await repository.getLatestPendingMeal(userB, "whatsapp:shared-group"))?.id).toBe(pendingB.id);
+
+      // 3. Workouts: User A and User B can use identical idempotencyKey
+      const workoutA = await repository.startWorkout(userA, {
+        name: "User A Push",
+        idempotencyKey: "shared-workout-key",
+      });
+      const workoutB = await repository.startWorkout(userB, {
+        name: "User B Pull",
+        idempotencyKey: "shared-workout-key",
+      });
+      expect(workoutA.workout.id).not.toBe(workoutB.workout.id);
+      expect(workoutA.workout.userId).toBe(userA);
+      expect(workoutB.workout.userId).toBe(userB);
+
+      const retryWorkoutA = await repository.startWorkout(userA, {
+        name: "Should not replace",
+        idempotencyKey: "shared-workout-key",
+      });
+      expect(retryWorkoutA.workout.id).toBe(workoutA.workout.id);
+
+      const retryWorkoutB = await repository.startWorkout(userB, {
+        name: "Should not replace",
+        idempotencyKey: "shared-workout-key",
+      });
+      expect(retryWorkoutB.workout.id).toBe(workoutB.workout.id);
+
+      // 4. Workout Sets: CRITICAL test for cross-user duplicate lookup
+      const setA = await repository.addWorkoutSet(userA, workoutA.workout.id, {
+        exerciseName: "Bench Press",
+        weightKg: 80,
+        reps: 8,
+        idempotencyKey: "shared-set-key",
+      });
+      expect(setA.idempotencyKey).toBe("shared-set-key");
+
+      const setB = await repository.addWorkoutSet(userB, workoutB.workout.id, {
+        exerciseName: "Row",
+        weightKg: 60,
+        reps: 10,
+        idempotencyKey: "shared-set-key",
+      });
+      expect(setB.idempotencyKey).toBe("shared-set-key");
+
+      // Verify User B received their own set, NOT User A's set!
+      expect(setB.id).not.toBe(setA.id);
+      expect(setB.weightKg).toBe(60);
+      expect(setA.weightKg).toBe(80);
+
+      // Retries resolve only within the caller's workout context
+      const retrySetA = await repository.addWorkoutSet(userA, workoutA.workout.id, {
+        exerciseName: "Bench Press",
+        weightKg: 999,
+        reps: 999,
+        idempotencyKey: "shared-set-key",
+      });
+      expect(retrySetA.id).toBe(setA.id);
+      expect(retrySetA.weightKg).toBe(80);
+
+      const retrySetB = await repository.addWorkoutSet(userB, workoutB.workout.id, {
+        exerciseName: "Row",
+        weightKg: 999,
+        reps: 999,
+        idempotencyKey: "shared-set-key",
+      });
+      expect(retrySetB.id).toBe(setB.id);
+      expect(retrySetB.weightKg).toBe(60);
+
+      // Cross-workout set addition is blocked
+      await expect(
+        repository.addWorkoutSet(userB, workoutA.workout.id, {
+          exerciseName: "Bench Press",
+          weightKg: 50,
+          reps: 5,
+          idempotencyKey: "tamper-key",
+        }),
+      ).rejects.toThrow("Workout not found");
+    });
+
+    it("protects health history from user delete cascades with RESTRICT", async () => {
+      // User A logs a meal
+      await repository.createMeal(userA, baseMeal);
+
+      // Attempting to delete User A must fail with foreign key constraint violation (ON DELETE RESTRICT)
+      await expect(pg.query("DELETE FROM users WHERE id = $1", [userA])).rejects.toThrow();
+
+      // Core historical health data remains completely intact
+      const mealsA = await repository.listRecentMeals(userA);
+      expect(mealsA).toHaveLength(1);
+
+      // User B finishes a workout
+      const wb = await repository.startWorkout(userB, { name: "Leg Day", idempotencyKey: "wb-hist-01" });
+      await repository.finishWorkout(userB, wb.workout.id);
+
+      // Attempting to delete User B must also fail with foreign key violation
+      await expect(pg.query("DELETE FROM users WHERE id = $1", [userB])).rejects.toThrow();
+
+      const historyB = await repository.workoutHistory(userB);
+      expect(historyB).toHaveLength(1);
+
+      // Routine user deactivation via active = false succeeds and preserves history
+      await pg.query("UPDATE users SET active = false WHERE id = $1", [userA]);
+      const deactivatedUser = await repository.getUser(userA);
+      expect(deactivatedUser.active).toBe(false);
+      expect(await repository.listRecentMeals(userA)).toHaveLength(1);
+    });
+
+    it("enforces safe preset updates with ownership isolation and calorie range validation", async () => {
+      const presetA = await repository.savePreset(userA, "Oatmeal Bowl", baseMeal);
+      expect(presetA.userId).toBe(userA);
+
+      // User B cannot mutate User A's preset
+      await expect(
+        repository.updatePreset(userB, presetA.id, { label: "Hacked by User B" }),
+      ).rejects.toThrow("Food preset not found");
+
+      // User B cannot delete User A's preset
+      await expect(
+        repository.deletePreset(userB, presetA.id),
+      ).rejects.toThrow("Food preset not found");
+
+      // Calorie range validation: low <= best <= high
+      await expect(
+        repository.updatePreset(userA, presetA.id, { caloriesBest: 300 }),
+      ).rejects.toThrow("Calorie ranges must satisfy low <= best <= high");
+
+      await expect(
+        repository.updatePreset(userA, presetA.id, { caloriesLow: 600, caloriesHigh: 400 }),
+      ).rejects.toThrow("Calorie ranges must satisfy low <= best <= high");
+
+      // Valid update applies safely
+      const updated = await repository.updatePreset(userA, presetA.id, {
+        caloriesBest: 520,
+        caloriesLow: 480,
+        caloriesHigh: 580,
+        label: "Updated Oatmeal Bowl",
+      });
+      expect(updated.label).toBe("Updated Oatmeal Bowl");
+      expect(updated.caloriesBest).toBe(520);
+      expect(updated.userId).toBe(userA);
+    });
   });
 });

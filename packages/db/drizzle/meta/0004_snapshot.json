@@ -658,21 +658,6 @@
         }
       },
       "indexes": {
-        "meals_idempotency_key_uq": {
-          "name": "meals_idempotency_key_uq",
-          "columns": [
-            {
-              "expression": "idempotency_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "meals_occurred_at_idx": {
           "name": "meals_occurred_at_idx",
           "columns": [
@@ -708,6 +693,27 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "meals_user_idempotency_uq": {
+          "name": "meals_user_idempotency_uq",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "idempotency_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -721,7 +727,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
+          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },
@@ -1015,27 +1021,6 @@
         }
       },
       "indexes": {
-        "pending_meals_scope_idempotency_uq": {
-          "name": "pending_meals_scope_idempotency_uq",
-          "columns": [
-            {
-              "expression": "scope_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "idempotency_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "pending_meals_scope_created_at_idx": {
           "name": "pending_meals_scope_created_at_idx",
           "columns": [
@@ -1098,6 +1083,33 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "pending_meals_user_scope_idempotency_uq": {
+          "name": "pending_meals_user_scope_idempotency_uq",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "scope_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "idempotency_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -1341,21 +1353,6 @@
         }
       },
       "indexes": {
-        "workout_sets_idempotency_key_uq": {
-          "name": "workout_sets_idempotency_key_uq",
-          "columns": [
-            {
-              "expression": "idempotency_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "workout_sets_exercise_number_uq": {
           "name": "workout_sets_exercise_number_uq",
           "columns": [
@@ -1367,6 +1364,27 @@
             },
             {
               "expression": "set_number",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "workout_sets_exercise_idempotency_uq": {
+          "name": "workout_sets_exercise_idempotency_uq",
+          "columns": [
+            {
+              "expression": "exercise_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "idempotency_key",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1464,21 +1482,6 @@
         }
       },
       "indexes": {
-        "workouts_idempotency_key_uq": {
-          "name": "workouts_idempotency_key_uq",
-          "columns": [
-            {
-              "expression": "idempotency_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "workouts_started_at_idx": {
           "name": "workouts_started_at_idx",
           "columns": [
@@ -1530,6 +1533,27 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "workouts_user_idempotency_uq": {
+          "name": "workouts_user_idempotency_uq",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "idempotency_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1543,7 +1567,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
+          "onDelete": "restrict",
           "onUpdate": "no action"
         }
       },

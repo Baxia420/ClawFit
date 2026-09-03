@@ -4,6 +4,7 @@ import {
   sumNutrition,
   workoutVolume,
   type CreateUserInput,
+  type FoodPresetPatch,
   type LinkExternalIdentityInput,
   type MealInput,
   type MealPatch,
@@ -202,7 +203,7 @@ export class HealthRepository {
         confirmed: false,
         expiresAt,
       })
-      .onConflictDoNothing({ target: [pendingMealEstimates.scopeKey, pendingMealEstimates.idempotencyKey] })
+      .onConflictDoNothing({ target: [pendingMealEstimates.userId, pendingMealEstimates.scopeKey, pendingMealEstimates.idempotencyKey] })
       .returning();
     if (created) return created;
     const concurrent = await this.db.query.pendingMealEstimates.findFirst({
@@ -459,9 +460,38 @@ export class HealthRepository {
       .limit(10);
   }
 
-  async updatePreset(userId: string, id: string, patch: Partial<typeof foodPresets.$inferInsert>): Promise<typeof foodPresets.$inferSelect> {
-    const values = { ...patch, ...(patch.name ? { normalizedName: normalizeName(patch.name) } : {}), updatedAt: new Date() };
-    const [updated] = await this.db.update(foodPresets).set(values).where(and(eq(foodPresets.id, id), eq(foodPresets.userId, userId))).returning();
+  async updatePreset(userId: string, id: string, patch: FoodPresetPatch): Promise<typeof foodPresets.$inferSelect> {
+    const existing = await this.db.query.foodPresets.findFirst({
+      where: and(eq(foodPresets.id, id), eq(foodPresets.userId, userId)),
+    });
+    if (!existing) throw new NotFoundError("Food preset not found");
+
+    const effectiveLow = patch.caloriesLow ?? existing.caloriesLow;
+    const effectiveBest = patch.caloriesBest ?? existing.caloriesBest;
+    const effectiveHigh = patch.caloriesHigh ?? existing.caloriesHigh;
+
+    if (effectiveLow > effectiveBest || effectiveBest > effectiveHigh) {
+      throw new ConflictError("Calorie ranges must satisfy low <= best <= high");
+    }
+
+    const [updated] = await this.db
+      .update(foodPresets)
+      .set({
+        ...(patch.name !== undefined ? { name: patch.name, normalizedName: normalizeName(patch.name) } : {}),
+        ...(patch.label !== undefined ? { label: patch.label } : {}),
+        ...(patch.caloriesBest !== undefined ? { caloriesBest: patch.caloriesBest } : {}),
+        ...(patch.caloriesLow !== undefined ? { caloriesLow: patch.caloriesLow } : {}),
+        ...(patch.caloriesHigh !== undefined ? { caloriesHigh: patch.caloriesHigh } : {}),
+        ...(patch.proteinG !== undefined ? { proteinG: patch.proteinG } : {}),
+        ...(patch.carbsG !== undefined ? { carbsG: patch.carbsG } : {}),
+        ...(patch.fatG !== undefined ? { fatG: patch.fatG } : {}),
+        ...(patch.fiberG !== undefined ? { fiberG: patch.fiberG } : {}),
+        ...(patch.confidence !== undefined ? { confidence: patch.confidence } : {}),
+        ...(patch.uncertaintyReasons !== undefined ? { uncertaintyReasons: patch.uncertaintyReasons } : {}),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(foodPresets.id, id), eq(foodPresets.userId, userId)))
+      .returning();
     if (!updated) throw new NotFoundError("Food preset not found");
     return updated;
   }
@@ -505,8 +535,19 @@ export class HealthRepository {
       });
       if (!workout) throw new NotFoundError("Workout not found");
       if (workout.status !== "active") throw new ConflictError("Cannot add a set to a finished workout");
-      const duplicate = await tx.query.workoutSets.findFirst({ where: eq(workoutSets.idempotencyKey, input.idempotencyKey) });
-      if (duplicate) return duplicate;
+
+      const duplicate = await tx
+        .select({ set: workoutSets })
+        .from(workoutSets)
+        .innerJoin(exercises, eq(workoutSets.exerciseId, exercises.id))
+        .where(
+          and(
+            eq(exercises.workoutId, workoutId),
+            eq(workoutSets.idempotencyKey, input.idempotencyKey),
+          ),
+        )
+        .limit(1);
+      if (duplicate[0]) return duplicate[0].set;
       const normalizedName = normalizeName(input.exerciseName);
       let exercise = await tx.query.exercises.findFirst({ where: and(eq(exercises.workoutId, workoutId), eq(exercises.normalizedName, normalizedName)) });
       if (!exercise) {
