@@ -699,7 +699,19 @@ export class HealthRepository {
   }
 
   async checkReady() {
-    await this.db.execute(sql`select 1 as ready`);
+    const result = await this.db.execute(sql`
+      SELECT u.id
+      FROM users u
+      INNER JOIN households h ON h.id = ${DEFAULT_HOUSEHOLD_ID}
+      LEFT JOIN meals m ON m.user_id = u.id
+      LEFT JOIN workouts w ON w.user_id = u.id
+      WHERE u.id = ${DEFAULT_PRIMARY_USER_ID}
+      LIMIT 1
+    `);
+    const rows = Array.isArray(result) ? result : (result as { rows?: unknown[] }).rows ?? [];
+    if (rows.length === 0) {
+      throw new Error("ClawFit database schema is not ready: required Stage 1 identity bootstrap is missing");
+    }
     return true;
   }
 

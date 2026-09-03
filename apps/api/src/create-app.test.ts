@@ -16,6 +16,26 @@ describe("Health API", () => {
     await app.close();
   });
 
+  it("handles the public /ready endpoint based on repository readiness", async () => {
+    const readyRepo = {
+      checkReady: vi.fn().mockResolvedValue(true),
+    } as unknown as HealthRepository;
+    const readyApp = createApp({ repository: readyRepo, apiToken: token, logger: false });
+    const readyRes = await readyApp.inject({ method: "GET", url: "/ready" });
+    expect(readyRes.statusCode).toBe(200);
+    expect(readyRes.json()).toEqual({ status: "ready" });
+    await readyApp.close();
+
+    const unreadyRepo = {
+      checkReady: vi.fn().mockRejectedValue(new Error("Pre-0004 schema missing")),
+    } as unknown as HealthRepository;
+    const unreadyApp = createApp({ repository: unreadyRepo, apiToken: token, logger: false });
+    const unreadyRes = await unreadyApp.inject({ method: "GET", url: "/ready" });
+    expect(unreadyRes.statusCode).toBe(503);
+    expect(unreadyRes.json()).toEqual({ status: "not_ready" });
+    await unreadyApp.close();
+  });
+
   it("requires bearer authentication", async () => {
     const app = createApp({ repository, apiToken: token, logger: false });
     const response = await app.inject({ method: "GET", url: "/v1/meals/recent" });

@@ -613,5 +613,31 @@ describe("HealthRepository", () => {
       expect(updated.caloriesBest).toBe(520);
       expect(updated.userId).toBe(userA);
     });
+
+    it("reports ready on current schema and fails if pre-0004 schema is present", async () => {
+      // 1. Current schema (all migrations 0000-0004 applied) => ready
+      await expect(repository.checkReady()).resolves.toBe(true);
+
+      // 2. Pre-0004 schema (database reachable but missing migration 0004) => NOT ready
+      const pre0004Pg = new PGlite();
+      try {
+        for (const name of [
+          "0000_fuzzy_doorman.sql",
+          "0001_cuddly_pending_meals.sql",
+          "0002_mobile_product_foundation.sql",
+          "0003_scope_pending_meals.sql",
+        ]) {
+          const migrationSql = await readFile(new URL(`../drizzle/${name}`, import.meta.url), "utf8");
+          await pre0004Pg.exec(migrationSql.replaceAll("--> statement-breakpoint", ""));
+        }
+        const pre0004Db = drizzle(pre0004Pg, { schema }) as unknown as HealthDatabase;
+        const pre0004Repo = new HealthRepository(pre0004Db);
+
+        await expect(pre0004Repo.checkReady()).rejects.toThrow();
+      } finally {
+        await pre0004Pg.close();
+      }
+    });
   });
 });
+
