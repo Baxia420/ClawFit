@@ -15,7 +15,7 @@ import {
   workoutSetInputSchema,
   workoutSetPatchSchema,
 } from "@clawfit/health-core";
-import { ConflictError, HealthRepository, NotFoundError } from "@clawfit/db";
+import { ConflictError, DEFAULT_PRIMARY_USER_ID, HealthRepository, NotFoundError } from "@clawfit/db";
 
 const uuidParam = z.object({ id: z.string().uuid() });
 const dateQuery = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), timezone: z.string().min(1).default("Asia/Kuala_Lumpur") });
@@ -28,6 +28,7 @@ export function createApp(options: {
   logger?: boolean;
 }) {
   const app = Fastify({ logger: options.logger === false ? false : { redact: ["req.headers.authorization", "headers.x-goog-api-key"] } });
+  const compatibilityUserId = DEFAULT_PRIMARY_USER_ID;
 
   app.addHook("onRequest", async (request, reply) => {
     (request as unknown as { startTime: number }).startTime = performance.now();
@@ -82,81 +83,146 @@ export function createApp(options: {
     return options.estimator.estimate({ text: body.text, ...(body.image ? { image: body.image } : {}) });
   });
 
-  app.post("/v1/meals", async (request, reply) => reply.code(201).send(await options.repository.createMeal(mealInputSchema.parse(request.body))));
-  app.post("/v1/meals/pending", async (request, reply) => reply.code(201).send(await options.repository.createPendingMeal(pendingMealInputSchema.parse(request.body))));
-  app.get("/v1/meals/pending/latest", async (request) => ({ pending: await options.repository.getLatestPendingMeal(pendingMealScopeSchema.parse(request.query).scopeKey) }));
-  app.get("/v1/meals/pending/:id", async (request) => options.repository.getPendingMeal(uuidParam.parse(request.params).id, pendingMealScopeSchema.parse(request.query).scopeKey));
+  app.post("/v1/meals", async (request, reply) => {
+    const input = mealInputSchema.parse(request.body);
+    return reply.code(201).send(await options.repository.createMeal(compatibilityUserId, input));
+  });
+  app.post("/v1/meals/pending", async (request, reply) => {
+    const input = pendingMealInputSchema.parse(request.body);
+    return reply.code(201).send(await options.repository.createPendingMeal(compatibilityUserId, input));
+  });
+  app.get("/v1/meals/pending/latest", async (request) => {
+    const scopeKey = pendingMealScopeSchema.parse(request.query).scopeKey;
+    return { pending: await options.repository.getLatestPendingMeal(compatibilityUserId, scopeKey) };
+  });
+  app.get("/v1/meals/pending/:id", async (request) => {
+    const id = uuidParam.parse(request.params).id;
+    const scopeKey = pendingMealScopeSchema.parse(request.query).scopeKey;
+    return options.repository.getPendingMeal(compatibilityUserId, id, scopeKey);
+  });
   app.patch("/v1/meals/pending/:id", async (request) => {
+    const id = uuidParam.parse(request.params).id;
     const body = pendingMealPatchSchema.and(pendingMealScopeSchema).parse(request.body);
     const { scopeKey, ...patch } = body;
-    return options.repository.updatePendingMeal(uuidParam.parse(request.params).id, scopeKey, patch);
+    return options.repository.updatePendingMeal(compatibilityUserId, id, scopeKey, patch);
   });
-  app.delete("/v1/meals/pending/:id", async (request) => options.repository.cancelPendingMeal(uuidParam.parse(request.params).id, pendingMealScopeSchema.parse(request.query).scopeKey));
+  app.delete("/v1/meals/pending/:id", async (request) => {
+    const id = uuidParam.parse(request.params).id;
+    const scopeKey = pendingMealScopeSchema.parse(request.query).scopeKey;
+    return options.repository.cancelPendingMeal(compatibilityUserId, id, scopeKey);
+  });
   app.post("/v1/meals/pending/:id/confirm", async (request, reply) => {
     const params = uuidParam.parse(request.params);
     const body = confirmPendingMealSchema.parse(request.body ?? {});
-    return reply.code(200).send(await options.repository.confirmPendingMeal(params.id, body));
+    return reply.code(200).send(await options.repository.confirmPendingMeal(compatibilityUserId, params.id, body));
   });
-  app.get("/v1/meals/recent", async (request) => options.repository.listRecentMeals(listQuery.parse(request.query).limit));
-  app.get("/v1/meals/:id", async (request) => options.repository.getMeal(uuidParam.parse(request.params).id));
-  app.patch("/v1/meals/:id", async (request) => options.repository.updateMeal(uuidParam.parse(request.params).id, mealPatchSchema.parse(request.body)));
-  app.delete("/v1/meals/:id", async (request) => options.repository.deleteMeal(uuidParam.parse(request.params).id));
+  app.get("/v1/meals/recent", async (request) => {
+    const limit = listQuery.parse(request.query).limit;
+    return options.repository.listRecentMeals(compatibilityUserId, limit);
+  });
+  app.get("/v1/meals/:id", async (request) => {
+    const id = uuidParam.parse(request.params).id;
+    return options.repository.getMeal(compatibilityUserId, id);
+  });
+  app.patch("/v1/meals/:id", async (request) => {
+    const id = uuidParam.parse(request.params).id;
+    const patch = mealPatchSchema.parse(request.body);
+    return options.repository.updateMeal(compatibilityUserId, id, patch);
+  });
+  app.delete("/v1/meals/:id", async (request) => {
+    const id = uuidParam.parse(request.params).id;
+    return options.repository.deleteMeal(compatibilityUserId, id);
+  });
   app.get("/v1/nutrition/daily", async (request) => {
     const query = dateQuery.parse(request.query);
     const { start, end } = zonedDayRange(query.date, query.timezone);
-    const result = await options.repository.dailyNutrition(start, end);
+    const result = await options.repository.dailyNutrition(compatibilityUserId, start, end);
     return { ...result, date: query.date };
   });
   app.get("/v1/nutrition/trend", async (request) => {
     const query = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query);
     const end = new Date();
-
     const start = new Date(end.getTime() - query.days * 86_400_000);
-    return options.repository.nutritionTrend(start, end);
+    return options.repository.nutritionTrend(compatibilityUserId, start, end);
   });
 
   app.post("/v1/food-presets", async (request, reply) => {
     const body = z.object({ name: z.string().min(1).max(160), meal: mealInputSchema }).parse(request.body);
-    return reply.code(201).send(await options.repository.savePreset(body.name, body.meal));
+    return reply.code(201).send(await options.repository.savePreset(compatibilityUserId, body.name, body.meal));
   });
-  app.get("/v1/food-presets", async (request) => options.repository.findPresets(z.object({ query: z.string().max(160).default("") }).parse(request.query).query));
+  app.get("/v1/food-presets", async (request) => {
+    const query = z.object({ query: z.string().max(160).default("") }).parse(request.query).query;
+    return options.repository.findPresets(compatibilityUserId, query);
+  });
   app.patch("/v1/food-presets/:id", async (request) => {
+    const id = uuidParam.parse(request.params).id;
     const parsed = presetPatchSchema.parse(request.body);
-    const patch = Object.fromEntries(Object.entries(parsed).filter(([, value]) => value !== undefined)) as Parameters<HealthRepository["updatePreset"]>[1];
-    return options.repository.updatePreset(uuidParam.parse(request.params).id, patch);
+    const patch = Object.fromEntries(Object.entries(parsed).filter(([, value]) => value !== undefined)) as Parameters<HealthRepository["updatePreset"]>[2];
+    return options.repository.updatePreset(compatibilityUserId, id, patch);
   });
-  app.delete("/v1/food-presets/:id", async (request) => options.repository.deletePreset(uuidParam.parse(request.params).id));
+  app.delete("/v1/food-presets/:id", async (request) => {
+    const id = uuidParam.parse(request.params).id;
+    return options.repository.deletePreset(compatibilityUserId, id);
+  });
 
   app.post("/v1/workouts", async (request, reply) => {
     const body = startWorkoutSchema.parse(request.body);
-    return reply.code(201).send(await options.repository.startWorkout({ name: body.name, idempotencyKey: body.idempotencyKey, ...(body.startedAt ? { startedAt: body.startedAt } : {}) }));
+    const payload = { name: body.name, idempotencyKey: body.idempotencyKey, ...(body.startedAt ? { startedAt: body.startedAt } : {}) };
+    return reply.code(201).send(await options.repository.startWorkout(compatibilityUserId, payload));
   });
-  app.get("/v1/workouts/active", async () => options.repository.getActiveWorkout());
-  app.get("/v1/workouts/history", async (request) => options.repository.workoutHistory(listQuery.parse(request.query).limit));
-  app.get("/v1/workouts/:id", async (request) => options.repository.getWorkout(uuidParam.parse(request.params).id));
-  app.post("/v1/workouts/:id/sets", async (request, reply) => reply.code(201).send(await options.repository.addWorkoutSet(uuidParam.parse(request.params).id, workoutSetInputSchema.parse(request.body))));
-  app.patch("/v1/workout-sets/:id", async (request) => options.repository.updateWorkoutSet(uuidParam.parse(request.params).id, workoutSetPatchSchema.parse(request.body)));
-  app.delete("/v1/workout-sets/:id", async (request) => options.repository.deleteWorkoutSet(uuidParam.parse(request.params).id));
+  app.get("/v1/workouts/active", async () => {
+    return options.repository.getActiveWorkout(compatibilityUserId);
+  });
+  app.get("/v1/workouts/history", async (request) => {
+    const limit = listQuery.parse(request.query).limit;
+    return options.repository.workoutHistory(compatibilityUserId, limit);
+  });
+  app.get("/v1/workouts/:id", async (request) => {
+    const id = uuidParam.parse(request.params).id;
+    return options.repository.getWorkout(compatibilityUserId, id);
+  });
+  app.post("/v1/workouts/:id/sets", async (request, reply) => {
+    const id = uuidParam.parse(request.params).id;
+    const body = workoutSetInputSchema.parse(request.body);
+    return reply.code(201).send(await options.repository.addWorkoutSet(compatibilityUserId, id, body));
+  });
+  app.patch("/v1/workout-sets/:id", async (request) => {
+    const id = uuidParam.parse(request.params).id;
+    const patch = workoutSetPatchSchema.parse(request.body);
+    return options.repository.updateWorkoutSet(compatibilityUserId, id, patch);
+  });
+  app.delete("/v1/workout-sets/:id", async (request) => {
+    const id = uuidParam.parse(request.params).id;
+    return options.repository.deleteWorkoutSet(compatibilityUserId, id);
+  });
   app.post("/v1/workouts/:id/finish", async (request) => {
+    const id = uuidParam.parse(request.params).id;
     const body = z.object({ finishedAt: z.coerce.date().optional() }).parse(request.body ?? {});
-    return options.repository.finishWorkout(uuidParam.parse(request.params).id, body.finishedAt);
+    return options.repository.finishWorkout(compatibilityUserId, id, body.finishedAt);
   });
   app.get("/v1/exercises/previous", async (request) => {
     const query = z.object({ name: z.string().min(1), before: z.coerce.date().optional() }).parse(request.query);
-    return options.repository.previousExercisePerformance(query.name, query.before);
+    return options.repository.previousExercisePerformance(compatibilityUserId, query.name, query.before);
   });
   app.get("/v1/exercises/history", async (request) => {
     const query = z.object({ name: z.string().min(1), limit: z.coerce.number().int().min(1).max(500).default(100) }).parse(request.query);
-    return options.repository.exerciseHistory(query.name, query.limit);
+    return options.repository.exerciseHistory(compatibilityUserId, query.name, query.limit);
   });
 
-  app.get("/v1/settings", async () => options.repository.getSettings());
-  app.patch("/v1/settings", async (request) => options.repository.updateSettings(settingsPatchSchema.parse(request.body)));
-  app.get("/v1/notification-preferences", async () => options.repository.listNotificationPreferences());
+  app.get("/v1/settings", async () => {
+    return options.repository.getSettings(compatibilityUserId);
+  });
+  app.patch("/v1/settings", async (request) => {
+    const patch = settingsPatchSchema.parse(request.body);
+    return options.repository.updateSettings(compatibilityUserId, patch);
+  });
+  app.get("/v1/notification-preferences", async () => {
+    return options.repository.listNotificationPreferences(compatibilityUserId);
+  });
   app.put("/v1/notification-preferences/:type", async (request) => {
     const type = z.string().parse((request.params as { type?: unknown }).type);
     const preference = notificationPreferenceSchema.parse({ ...(request.body as object), type });
-    return options.repository.upsertNotificationPreference(preference);
+    return options.repository.upsertNotificationPreference(compatibilityUserId, preference);
   });
 
   return app;

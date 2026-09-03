@@ -145,6 +145,59 @@ export const notificationPreferenceSchema = z.object({
   configuration: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({}),
 });
 
+export const userSchema = z.object({
+  id: z.string().uuid(),
+  displayName: z.string().min(1).max(120),
+  role: z.string().min(1).max(40).default("primary"),
+  active: z.boolean().default(true),
+  createdAt: z.coerce.date(),
+  updatedAt: z.coerce.date(),
+});
+
+export const createUserInputSchema = z.object({
+  displayName: z.string().min(1).max(120),
+  role: z.string().min(1).max(40).default("primary"),
+  active: z.boolean().default(true),
+});
+
+export const householdSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(1).max(120),
+  createdAt: z.coerce.date(),
+  updatedAt: z.coerce.date(),
+});
+
+export const householdMemberSchema = z.object({
+  id: z.string().uuid(),
+  householdId: z.string().uuid(),
+  userId: z.string().uuid(),
+  role: z.string().min(1).max(40).default("member"),
+  createdAt: z.coerce.date(),
+  updatedAt: z.coerce.date(),
+});
+
+export const externalIdentitySchema = z.object({
+  id: z.string().uuid(),
+  userId: z.string().uuid(),
+  provider: z.string().min(1).max(64),
+  externalIdentifier: z.string().min(1).max(255),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+  createdAt: z.coerce.date(),
+  updatedAt: z.coerce.date(),
+});
+
+export const resolveUserSchema = z.object({
+  provider: z.string().min(1).max(64),
+  externalIdentifier: z.string().min(1).max(255),
+});
+
+export const linkExternalIdentitySchema = z.object({
+  userId: z.string().uuid(),
+  provider: z.string().min(1).max(64),
+  externalIdentifier: z.string().min(1).max(255),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
 export type Confidence = z.infer<typeof confidenceSchema>;
 export type NutritionEstimate = z.infer<typeof nutritionEstimateSchema>;
 export type MealInput = z.infer<typeof mealInputSchema>;
@@ -156,3 +209,10 @@ export type SettingsPatch = z.infer<typeof settingsPatchSchema>;
 export type NotificationPreferenceInput = z.infer<typeof notificationPreferenceSchema>;
 export type WorkoutSetInput = z.infer<typeof workoutSetInputSchema>;
 export type WorkoutSetPatch = z.infer<typeof workoutSetPatchSchema>;
+export type User = z.infer<typeof userSchema>;
+export type CreateUserInput = z.infer<typeof createUserInputSchema>;
+export type Household = z.infer<typeof householdSchema>;
+export type HouseholdMember = z.infer<typeof householdMemberSchema>;
+export type ExternalIdentity = z.infer<typeof externalIdentitySchema>;
+export type ResolveUserInput = z.infer<typeof resolveUserSchema>;
+export type LinkExternalIdentityInput = z.infer<typeof linkExternalIdentitySchema>;

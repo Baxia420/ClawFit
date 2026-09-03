@@ -3,17 +3,37 @@ import {
   estimatedOneRepMax,
   sumNutrition,
   workoutVolume,
+  type CreateUserInput,
+  type LinkExternalIdentityInput,
   type MealInput,
   type MealPatch,
   type NotificationPreferenceInput,
   type PendingMealInput,
   type PendingMealPatch,
+  type ResolveUserInput,
   type SettingsPatch,
   type WorkoutSetInput,
   type WorkoutSetPatch,
 } from "@clawfit/health-core";
 import type { HealthDatabase } from "./client.js";
-import { exercises, foodPresets, mealItems, meals, notificationPreferences, pendingMealEstimates, userSettings, workouts, workoutSets } from "./schema.js";
+import {
+  exercises,
+  externalIdentities,
+  foodPresets,
+  householdMembers,
+  mealItems,
+  meals,
+  notificationPreferences,
+  pendingMealEstimates,
+  userSettings,
+  users,
+  workouts,
+  workoutSets,
+} from "./schema.js";
+
+export const DEFAULT_HOUSEHOLD_ID = "00000000-0000-0000-0000-000000000001";
+export const DEFAULT_PRIMARY_USER_ID = "00000000-0000-0000-0000-000000000002";
+export const DEFAULT_PARTNER_USER_ID = "00000000-0000-0000-0000-000000000003";
 
 export class NotFoundError extends Error {
   override name = "NotFoundError";
@@ -23,16 +43,108 @@ export class ConflictError extends Error {
   override name = "ConflictError";
 }
 
+export type HydratedMeal = typeof meals.$inferSelect & { items: (typeof mealItems.$inferSelect)[] };
+
 export class HealthRepository {
   constructor(private readonly db: HealthDatabase) {}
 
-  async createMeal(input: MealInput) {
+  async createUser(input: CreateUserInput) {
+    const [created] = await this.db
+      .insert(users)
+      .values({
+        displayName: input.displayName,
+        role: input.role ?? "primary",
+        active: input.active ?? true,
+      })
+      .returning();
+    if (!created) throw new Error("User insert returned no record");
+    return created;
+  }
+
+  async getUser(id: string) {
+    const user = await this.db.query.users.findFirst({ where: eq(users.id, id) });
+    if (!user) throw new NotFoundError("User not found");
+    return user;
+  }
+
+  async listUsers() {
+    return this.db.select().from(users).orderBy(asc(users.createdAt));
+  }
+
+  async getHouseholdMembers(householdId: string = DEFAULT_HOUSEHOLD_ID) {
+    return this.db
+      .select({ member: householdMembers, user: users })
+      .from(householdMembers)
+      .innerJoin(users, eq(householdMembers.userId, users.id))
+      .where(eq(householdMembers.householdId, householdId))
+      .orderBy(asc(householdMembers.createdAt));
+  }
+
+  async getPartnerUser(userId: string) {
+    const membership = await this.db.query.householdMembers.findFirst({
+      where: eq(householdMembers.userId, userId),
+    });
+    if (!membership) return null;
+    const partnerMember = await this.db
+      .select({ user: users })
+      .from(householdMembers)
+      .innerJoin(users, eq(householdMembers.userId, users.id))
+      .where(and(eq(householdMembers.householdId, membership.householdId), sql`${householdMembers.userId} <> ${userId}`))
+      .limit(1);
+    return partnerMember[0]?.user ?? null;
+  }
+
+  async linkExternalIdentity(input: LinkExternalIdentityInput) {
+    const user = await this.db.query.users.findFirst({ where: eq(users.id, input.userId) });
+    if (!user) throw new NotFoundError("User not found");
+
+    const existing = await this.db.query.externalIdentities.findFirst({
+      where: and(eq(externalIdentities.provider, input.provider), eq(externalIdentities.externalIdentifier, input.externalIdentifier)),
+    });
+    if (existing) {
+      if (existing.userId !== input.userId) {
+        throw new ConflictError(`External identifier '${input.externalIdentifier}' is already mapped to another user`);
+      }
+      return existing;
+    }
+
+    const [created] = await this.db
+      .insert(externalIdentities)
+      .values({
+        userId: input.userId,
+        provider: input.provider,
+        externalIdentifier: input.externalIdentifier,
+        metadata: input.metadata ?? {},
+      })
+      .returning();
+    if (!created) throw new Error("Failed to insert external identity");
+    return created;
+  }
+
+  async resolveUser(input: ResolveUserInput) {
+    const identity = await this.db.query.externalIdentities.findFirst({
+      where: and(eq(externalIdentities.provider, input.provider), eq(externalIdentities.externalIdentifier, input.externalIdentifier)),
+    });
+    if (!identity) {
+      return { resolved: false as const, reason: "unknown_external_identity" as const };
+    }
+    const user = await this.db.query.users.findFirst({ where: eq(users.id, identity.userId) });
+    if (!user || !user.active) {
+      return { resolved: false as const, reason: "user_inactive_or_missing" as const };
+    }
+    return { resolved: true as const, user, externalIdentity: identity };
+  }
+
+  async createMeal(userId: string, input: MealInput): Promise<HydratedMeal> {
     return this.db.transaction(async (tx) => {
-      const existing = await tx.query.meals.findFirst({ where: eq(meals.idempotencyKey, input.idempotencyKey) });
-      if (existing) return this.getMealWith(tx, existing.id);
+      const existing = await tx.query.meals.findFirst({
+        where: and(eq(meals.userId, userId), eq(meals.idempotencyKey, input.idempotencyKey)),
+      });
+      if (existing) return (await this.getMealWith(tx, userId, existing.id))!;
       const [created] = await tx
         .insert(meals)
         .values({
+          userId,
           occurredAt: input.occurredAt,
           label: input.label,
           caloriesBest: input.calories.best,
@@ -53,19 +165,24 @@ export class HealthRepository {
       if (input.items.length > 0) {
         await tx.insert(mealItems).values(input.items.map((item) => ({ mealId: created.id, name: item.name, portionDescription: item.portionDescription })));
       }
-      return this.getMealWith(tx, created.id);
+      return (await this.getMealWith(tx, userId, created.id))!;
     });
   }
 
-  async createPendingMeal(input: PendingMealInput) {
+  async createPendingMeal(userId: string, input: PendingMealInput): Promise<typeof pendingMealEstimates.$inferSelect> {
     const existing = await this.db.query.pendingMealEstimates.findFirst({
-      where: and(eq(pendingMealEstimates.scopeKey, input.scopeKey), eq(pendingMealEstimates.idempotencyKey, input.idempotencyKey)),
+      where: and(
+        eq(pendingMealEstimates.userId, userId),
+        eq(pendingMealEstimates.scopeKey, input.scopeKey),
+        eq(pendingMealEstimates.idempotencyKey, input.idempotencyKey),
+      ),
     });
     if (existing) return existing;
     const expiresAt = new Date(Date.now() + (input.expiresInSeconds ?? 7_200) * 1000);
     const [created] = await this.db
       .insert(pendingMealEstimates)
       .values({
+        userId,
         label: input.label,
         items: input.items,
         caloriesBest: input.calories.best,
@@ -89,23 +206,28 @@ export class HealthRepository {
       .returning();
     if (created) return created;
     const concurrent = await this.db.query.pendingMealEstimates.findFirst({
-      where: and(eq(pendingMealEstimates.scopeKey, input.scopeKey), eq(pendingMealEstimates.idempotencyKey, input.idempotencyKey)),
+      where: and(
+        eq(pendingMealEstimates.userId, userId),
+        eq(pendingMealEstimates.scopeKey, input.scopeKey),
+        eq(pendingMealEstimates.idempotencyKey, input.idempotencyKey),
+      ),
     });
     if (!concurrent) throw new Error("Pending meal insert returned no record");
     return concurrent;
   }
 
-  async getPendingMeal(id: string, scopeKey: string) {
+  async getPendingMeal(userId: string, id: string, scopeKey: string): Promise<typeof pendingMealEstimates.$inferSelect> {
     const pending = await this.db.query.pendingMealEstimates.findFirst({
-      where: and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, scopeKey)),
+      where: and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, scopeKey), eq(pendingMealEstimates.userId, userId)),
     });
     if (!pending) throw new NotFoundError("Pending meal estimate not found");
     return pending;
   }
 
-  async getLatestPendingMeal(scopeKey: string, now = new Date()) {
+  async getLatestPendingMeal(userId: string, scopeKey: string, now: Date = new Date()): Promise<typeof pendingMealEstimates.$inferSelect | null> {
     const pending = await this.db.query.pendingMealEstimates.findFirst({
       where: and(
+        eq(pendingMealEstimates.userId, userId),
         eq(pendingMealEstimates.confirmed, false),
         eq(pendingMealEstimates.scopeKey, scopeKey),
         isNull(pendingMealEstimates.cancelledAt),
@@ -116,8 +238,8 @@ export class HealthRepository {
     return pending ?? null;
   }
 
-  async updatePendingMeal(id: string, scopeKey: string, patch: PendingMealPatch) {
-    const current = await this.getPendingMeal(id, scopeKey);
+  async updatePendingMeal(userId: string, id: string, scopeKey: string, patch: PendingMealPatch): Promise<typeof pendingMealEstimates.$inferSelect> {
+    const current = await this.getPendingMeal(userId, id, scopeKey);
     if (current.confirmed) throw new ConflictError("A confirmed meal draft cannot be edited");
     if (current.cancelledAt) throw new ConflictError("A cancelled meal draft cannot be edited");
     const nextLow = patch.caloriesLow ?? current.caloriesLow;
@@ -129,53 +251,58 @@ export class HealthRepository {
     const [updated] = await this.db
       .update(pendingMealEstimates)
       .set({ ...patch, updatedAt: new Date() })
-      .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, scopeKey)))
+      .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, scopeKey), eq(pendingMealEstimates.userId, userId)))
       .returning();
     if (!updated) throw new NotFoundError("Pending meal estimate not found");
     return updated;
   }
 
-  async cancelPendingMeal(id: string, scopeKey: string) {
-    const current = await this.getPendingMeal(id, scopeKey);
+  async cancelPendingMeal(userId: string, id: string, scopeKey: string): Promise<typeof pendingMealEstimates.$inferSelect> {
+    const current = await this.getPendingMeal(userId, id, scopeKey);
     if (current.confirmed) throw new ConflictError("A confirmed meal draft cannot be cancelled");
     if (current.cancelledAt) return current;
     const [cancelled] = await this.db
       .update(pendingMealEstimates)
       .set({ cancelledAt: new Date(), updatedAt: new Date() })
-      .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, scopeKey)))
+      .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, scopeKey), eq(pendingMealEstimates.userId, userId)))
       .returning();
     if (!cancelled) throw new NotFoundError("Pending meal estimate not found");
     return cancelled;
   }
 
-  async confirmPendingMeal(id: string, options: { scopeKey: string; occurredAt?: Date | undefined; idempotencyKey?: string | undefined }, now = new Date()) {
-
+  async confirmPendingMeal(
+    userId: string,
+    id: string,
+    options: { scopeKey: string; occurredAt?: Date | undefined; idempotencyKey?: string | undefined },
+    now: Date = new Date(),
+  ): Promise<HydratedMeal> {
     return this.db.transaction(async (tx) => {
       const pending = await tx.query.pendingMealEstimates.findFirst({
-        where: and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, options.scopeKey)),
+        where: and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, options.scopeKey), eq(pendingMealEstimates.userId, userId)),
       });
       if (!pending) throw new NotFoundError("Pending meal estimate not found");
       if (pending.cancelledAt) throw new ConflictError("A cancelled meal draft cannot be confirmed");
       if (pending.confirmed && pending.mealId) {
-        const existingMeal = await this.getMealWith(tx, pending.mealId);
+        const existingMeal = await this.getMealWith(tx, userId, pending.mealId);
         if (existingMeal) return existingMeal;
       }
       if (pending.expiresAt <= now) throw new ConflictError("An expired meal draft cannot be confirmed");
       const mealIdempotencyKey = `confirmed_${pending.id}`;
       const existingByUq = await tx.query.meals.findFirst({
-        where: eq(meals.idempotencyKey, mealIdempotencyKey),
+        where: and(eq(meals.userId, userId), eq(meals.idempotencyKey, mealIdempotencyKey)),
       });
       if (existingByUq) {
         await tx
           .update(pendingMealEstimates)
           .set({ confirmed: true, confirmedAt: new Date(), mealId: existingByUq.id, updatedAt: new Date() })
-          .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, options.scopeKey)));
-        return this.getMealWith(tx, existingByUq.id);
+          .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, options.scopeKey), eq(pendingMealEstimates.userId, userId)));
+        return (await this.getMealWith(tx, userId, existingByUq.id))!;
       }
 
       const [created] = await tx
         .insert(meals)
         .values({
+          userId,
           occurredAt: options.occurredAt ?? pending.occurredAt,
           label: pending.label,
           caloriesBest: pending.caloriesBest,
@@ -191,10 +318,9 @@ export class HealthRepository {
           rawUserText: pending.rawUserText,
           idempotencyKey: mealIdempotencyKey,
         })
-        .onConflictDoNothing({ target: meals.idempotencyKey })
         .returning();
 
-      const persisted = created ?? await tx.query.meals.findFirst({ where: eq(meals.idempotencyKey, mealIdempotencyKey) });
+      const persisted = created ?? (await tx.query.meals.findFirst({ where: and(eq(meals.userId, userId), eq(meals.idempotencyKey, mealIdempotencyKey)) }));
       if (!persisted) throw new Error("Confirmed meal could not be resolved");
 
       const items = Array.isArray(pending.items) ? pending.items : [];
@@ -211,26 +337,28 @@ export class HealthRepository {
       await tx
         .update(pendingMealEstimates)
         .set({ confirmed: true, confirmedAt: new Date(), mealId: persisted.id, updatedAt: new Date() })
-        .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, options.scopeKey)));
+        .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, options.scopeKey), eq(pendingMealEstimates.userId, userId)));
 
-      return this.getMealWith(tx, persisted.id);
+      return (await this.getMealWith(tx, userId, persisted.id))!;
     });
   }
 
-
-  async getMeal(id: string) {
-    const result = await this.getMealWith(this.db, id);
+  async getMeal(userId: string, id: string): Promise<HydratedMeal> {
+    const result = await this.getMealWith(this.db, userId, id);
     if (!result) throw new NotFoundError("Meal not found");
     return result;
   }
 
-  async listRecentMeals(limit = 20) {
-    const rows = await this.db.select().from(meals).orderBy(desc(meals.occurredAt)).limit(limit);
-    return Promise.all(rows.map((row) => this.getMealWith(this.db, row.id)));
+  async listRecentMeals(userId: string, limit: number = 20): Promise<HydratedMeal[]> {
+    const rows = await this.db.select().from(meals).where(eq(meals.userId, userId)).orderBy(desc(meals.occurredAt)).limit(limit);
+    const results = await Promise.all(rows.map((row) => this.getMealWith(this.db, userId, row.id)));
+    return results.filter((m): m is HydratedMeal => m !== null);
   }
 
-  async updateMeal(id: string, patch: MealPatch) {
-    const current = await this.db.query.meals.findFirst({ where: eq(meals.id, id) });
+  async updateMeal(userId: string, id: string, patch: MealPatch): Promise<HydratedMeal> {
+    const current = await this.db.query.meals.findFirst({
+      where: and(eq(meals.id, id), eq(meals.userId, userId)),
+    });
     if (!current) throw new NotFoundError("Meal not found");
     const nextLow = patch.caloriesLow ?? current.caloriesLow;
     const nextBest = patch.caloriesBest ?? current.caloriesBest;
@@ -241,24 +369,31 @@ export class HealthRepository {
     const [updated] = await this.db
       .update(meals)
       .set({ ...patch, updatedAt: new Date() })
-      .where(eq(meals.id, id))
+      .where(and(eq(meals.id, id), eq(meals.userId, userId)))
       .returning();
     if (!updated) throw new NotFoundError("Meal not found");
-    return this.getMeal(id);
+    return this.getMeal(userId, id);
   }
 
-  async deleteMeal(id: string) {
-    const [deleted] = await this.db.delete(meals).where(eq(meals.id, id)).returning({ id: meals.id });
+  async deleteMeal(userId: string, id: string): Promise<{ id: string }> {
+    const [deleted] = await this.db
+      .delete(meals)
+      .where(and(eq(meals.id, id), eq(meals.userId, userId)))
+      .returning({ id: meals.id });
     if (!deleted) throw new NotFoundError("Meal not found");
     return deleted;
   }
 
-  async dailyNutrition(start: Date, end: Date) {
-    const rows = await this.db.select().from(meals).where(and(gte(meals.occurredAt, start), lt(meals.occurredAt, end))).orderBy(asc(meals.occurredAt));
+  async dailyNutrition(userId: string, start: Date, end: Date): Promise<{ date: string; totals: ReturnType<typeof sumNutrition>; meals: typeof meals.$inferSelect[] }> {
+    const rows = await this.db
+      .select()
+      .from(meals)
+      .where(and(eq(meals.userId, userId), gte(meals.occurredAt, start), lt(meals.occurredAt, end)))
+      .orderBy(asc(meals.occurredAt));
     return { date: start.toISOString().slice(0, 10), totals: sumNutrition(rows), meals: rows };
   }
 
-  async nutritionTrend(start: Date, end: Date) {
+  async nutritionTrend(userId: string, start: Date, end: Date): Promise<{ day: Date; calories_best: number; calories_low: number; calories_high: number; protein_g: number }[]> {
     const day = sql<Date>`date_trunc('day', ${meals.occurredAt})`;
     return this.db
       .select({
@@ -269,16 +404,18 @@ export class HealthRepository {
         protein_g: sql<number>`sum(${meals.proteinG})::float`.as("protein_g"),
       })
       .from(meals)
-      .where(and(gte(meals.occurredAt, start), lt(meals.occurredAt, end)))
+      .where(and(eq(meals.userId, userId), gte(meals.occurredAt, start), lt(meals.occurredAt, end)))
       .groupBy(day)
       .orderBy(day);
   }
 
-  async savePreset(name: string, estimate: MealInput) {
+  async savePreset(userId: string, name: string, estimate: MealInput): Promise<typeof foodPresets.$inferSelect> {
     const normalizedName = normalizeName(name);
+
     const [preset] = await this.db
       .insert(foodPresets)
       .values({
+        userId,
         name,
         normalizedName,
         label: estimate.label,
@@ -293,7 +430,7 @@ export class HealthRepository {
         uncertaintyReasons: estimate.uncertaintyReasons,
       })
       .onConflictDoUpdate({
-        target: foodPresets.normalizedName,
+        target: [foodPresets.userId, foodPresets.normalizedName],
         set: {
           name,
           label: estimate.label,
@@ -310,47 +447,62 @@ export class HealthRepository {
         },
       })
       .returning();
+    if (!preset) throw new Error("Food preset upsert returned no record");
     return preset;
   }
 
-  async findPresets(query: string) {
-    return this.db.select().from(foodPresets).where(ilike(foodPresets.normalizedName, `%${normalizeName(query)}%`)).limit(10);
+  async findPresets(userId: string, query: string): Promise<(typeof foodPresets.$inferSelect)[]> {
+    return this.db
+      .select()
+      .from(foodPresets)
+      .where(and(eq(foodPresets.userId, userId), ilike(foodPresets.normalizedName, `%${normalizeName(query)}%`)))
+      .limit(10);
   }
 
-  async updatePreset(id: string, patch: Partial<typeof foodPresets.$inferInsert>) {
+  async updatePreset(userId: string, id: string, patch: Partial<typeof foodPresets.$inferInsert>): Promise<typeof foodPresets.$inferSelect> {
     const values = { ...patch, ...(patch.name ? { normalizedName: normalizeName(patch.name) } : {}), updatedAt: new Date() };
-    const [updated] = await this.db.update(foodPresets).set(values).where(eq(foodPresets.id, id)).returning();
+    const [updated] = await this.db.update(foodPresets).set(values).where(and(eq(foodPresets.id, id), eq(foodPresets.userId, userId))).returning();
     if (!updated) throw new NotFoundError("Food preset not found");
     return updated;
   }
 
-  async deletePreset(id: string) {
-    const [deleted] = await this.db.delete(foodPresets).where(eq(foodPresets.id, id)).returning({ id: foodPresets.id });
+  async deletePreset(userId: string, id: string): Promise<{ id: string }> {
+    const [deleted] = await this.db
+      .delete(foodPresets)
+      .where(and(eq(foodPresets.id, id), eq(foodPresets.userId, userId)))
+      .returning({ id: foodPresets.id });
     if (!deleted) throw new NotFoundError("Food preset not found");
     return deleted;
   }
 
-  async startWorkout(input: { name: string; startedAt?: Date; idempotencyKey: string }) {
-    const existing = await this.db.query.workouts.findFirst({ where: eq(workouts.idempotencyKey, input.idempotencyKey) });
-    if (existing) return this.getWorkout(existing.id);
-    const active = await this.getActiveWorkout();
+  async startWorkout(userId: string, input: { name: string; startedAt?: Date | undefined; idempotencyKey: string }): Promise<HydratedWorkout> {
+    const existing = await this.db.query.workouts.findFirst({
+      where: and(eq(workouts.userId, userId), eq(workouts.idempotencyKey, input.idempotencyKey)),
+    });
+    if (existing) return this.getWorkout(userId, existing.id);
+    const active = await this.getActiveWorkout(userId);
     if (active) throw new ConflictError(`Workout ${active.workout.id} is already active`);
     const [created] = await this.db
       .insert(workouts)
-      .values({ name: input.name, startedAt: input.startedAt ?? new Date(), idempotencyKey: input.idempotencyKey })
+      .values({ userId, name: input.name, startedAt: input.startedAt ?? new Date(), idempotencyKey: input.idempotencyKey })
       .returning();
     if (!created) throw new Error("Workout insert returned no record");
-    return this.getWorkout(created.id);
+    return this.getWorkout(userId, created.id);
   }
 
-  async getActiveWorkout() {
-    const active = await this.db.query.workouts.findFirst({ where: eq(workouts.status, "active"), orderBy: desc(workouts.startedAt) });
-    return active ? this.getWorkout(active.id) : null;
+  async getActiveWorkout(userId: string): Promise<HydratedWorkout | null> {
+    const active = await this.db.query.workouts.findFirst({
+      where: and(eq(workouts.userId, userId), eq(workouts.status, "active")),
+      orderBy: desc(workouts.startedAt),
+    });
+    return active ? this.getWorkout(userId, active.id) : null;
   }
 
-  async addWorkoutSet(workoutId: string, input: WorkoutSetInput) {
+  async addWorkoutSet(userId: string, workoutId: string, input: WorkoutSetInput): Promise<typeof workoutSets.$inferSelect> {
     return this.db.transaction(async (tx) => {
-      const workout = await tx.query.workouts.findFirst({ where: eq(workouts.id, workoutId) });
+      const workout = await tx.query.workouts.findFirst({
+        where: and(eq(workouts.id, workoutId), eq(workouts.userId, userId)),
+      });
       if (!workout) throw new NotFoundError("Workout not found");
       if (workout.status !== "active") throw new ConflictError("Cannot add a set to a finished workout");
       const duplicate = await tx.query.workoutSets.findFirst({ where: eq(workoutSets.idempotencyKey, input.idempotencyKey) });
@@ -381,13 +533,31 @@ export class HealthRepository {
     });
   }
 
-  async updateWorkoutSet(id: string, patch: WorkoutSetPatch) {
+  async updateWorkoutSet(userId: string, id: string, patch: WorkoutSetPatch): Promise<typeof workoutSets.$inferSelect & { estimatedOneRepMax: number | null }> {
+    const existing = await this.db
+      .select({ set: workoutSets, workout: workouts })
+      .from(workoutSets)
+      .innerJoin(exercises, eq(workoutSets.exerciseId, exercises.id))
+      .innerJoin(workouts, eq(exercises.workoutId, workouts.id))
+      .where(and(eq(workoutSets.id, id), eq(workouts.userId, userId)))
+      .limit(1);
+    if (!existing[0]) throw new NotFoundError("Workout set not found");
+
     const [updated] = await this.db.update(workoutSets).set({ ...patch, updatedAt: new Date() }).where(eq(workoutSets.id, id)).returning();
     if (!updated) throw new NotFoundError("Workout set not found");
     return { ...updated, estimatedOneRepMax: estimatedOneRepMax(updated.weightKg, updated.reps) };
   }
 
-  async deleteWorkoutSet(id: string) {
+  async deleteWorkoutSet(userId: string, id: string): Promise<{ id: string }> {
+    const existing = await this.db
+      .select({ set: workoutSets, workout: workouts })
+      .from(workoutSets)
+      .innerJoin(exercises, eq(workoutSets.exerciseId, exercises.id))
+      .innerJoin(workouts, eq(exercises.workoutId, workouts.id))
+      .where(and(eq(workoutSets.id, id), eq(workouts.userId, userId)))
+      .limit(1);
+    if (!existing[0]) throw new NotFoundError("Workout set not found");
+
     const [deleted] = await this.db.delete(workoutSets).where(eq(workoutSets.id, id)).returning({ id: workoutSets.id, exerciseId: workoutSets.exerciseId });
     if (!deleted) throw new NotFoundError("Workout set not found");
     const remaining = await this.db.select().from(workoutSets).where(eq(workoutSets.exerciseId, deleted.exerciseId)).orderBy(asc(workoutSets.setNumber));
@@ -397,14 +567,20 @@ export class HealthRepository {
     return { id: deleted.id };
   }
 
-  async finishWorkout(id: string, finishedAt = new Date()) {
-    const [updated] = await this.db.update(workouts).set({ status: "finished", finishedAt, updatedAt: new Date() }).where(eq(workouts.id, id)).returning();
+  async finishWorkout(userId: string, id: string, finishedAt: Date = new Date()): Promise<HydratedWorkout> {
+    const [updated] = await this.db
+      .update(workouts)
+      .set({ status: "finished", finishedAt, updatedAt: new Date() })
+      .where(and(eq(workouts.id, id), eq(workouts.userId, userId)))
+      .returning();
     if (!updated) throw new NotFoundError("Workout not found");
-    return this.getWorkout(id);
+    return this.getWorkout(userId, id);
   }
 
-  async getWorkout(id: string) {
-    const workout = await this.db.query.workouts.findFirst({ where: eq(workouts.id, id) });
+  async getWorkout(userId: string, id: string): Promise<HydratedWorkout> {
+    const workout = await this.db.query.workouts.findFirst({
+      where: and(eq(workouts.id, id), eq(workouts.userId, userId)),
+    });
     if (!workout) throw new NotFoundError("Workout not found");
     const exerciseRows = await this.db.select().from(exercises).where(eq(exercises.workoutId, id)).orderBy(asc(exercises.position));
     const hydrated = await Promise.all(
@@ -417,17 +593,17 @@ export class HealthRepository {
     return { workout, exercises: hydrated, volumeKg: workoutVolume(flatSets), setCount: flatSets.length };
   }
 
-  async workoutHistory(limit = 20) {
-    const rows = await this.db.select({ id: workouts.id }).from(workouts).orderBy(desc(workouts.startedAt)).limit(limit);
-    return Promise.all(rows.map((row) => this.getWorkout(row.id)));
+  async workoutHistory(userId: string, limit: number = 20): Promise<HydratedWorkout[]> {
+    const rows = await this.db.select({ id: workouts.id }).from(workouts).where(eq(workouts.userId, userId)).orderBy(desc(workouts.startedAt)).limit(limit);
+    return Promise.all(rows.map((row) => this.getWorkout(userId, row.id)));
   }
 
-  async previousExercisePerformance(name: string, before = new Date()) {
+  async previousExercisePerformance(userId: string, name: string, before: Date = new Date()): Promise<{ workoutId: string; sets: (typeof workoutSets.$inferSelect & { estimatedOneRepMax: number | null })[] } | null> {
     const exercise = await this.db
       .select({ exerciseId: exercises.id, workoutId: workouts.id })
       .from(exercises)
       .innerJoin(workouts, eq(exercises.workoutId, workouts.id))
-      .where(and(eq(exercises.normalizedName, normalizeName(name)), lt(workouts.startedAt, before)))
+      .where(and(eq(workouts.userId, userId), eq(exercises.normalizedName, normalizeName(name)), lt(workouts.startedAt, before)))
       .orderBy(desc(workouts.startedAt))
       .limit(1);
     if (!exercise[0]) return null;
@@ -435,45 +611,45 @@ export class HealthRepository {
     return { workoutId: exercise[0].workoutId, sets: sets.map((set) => ({ ...set, estimatedOneRepMax: estimatedOneRepMax(set.weightKg, set.reps) })) };
   }
 
-  async exerciseHistory(name: string, limit = 100) {
+  async exerciseHistory(userId: string, name: string, limit: number = 100): Promise<(typeof workoutSets.$inferSelect & { workoutName: string; workoutId: string; estimatedOneRepMax: number | null })[]> {
     const rows = await this.db
       .select({ set: workoutSets, workout: workouts })
       .from(workoutSets)
       .innerJoin(exercises, eq(workoutSets.exerciseId, exercises.id))
       .innerJoin(workouts, eq(exercises.workoutId, workouts.id))
-      .where(eq(exercises.normalizedName, normalizeName(name)))
+      .where(and(eq(workouts.userId, userId), eq(exercises.normalizedName, normalizeName(name))))
       .orderBy(desc(workoutSets.occurredAt))
       .limit(limit);
     return rows.map(({ set, workout }) => ({ ...set, workoutName: workout.name, workoutId: workout.id, estimatedOneRepMax: estimatedOneRepMax(set.weightKg, set.reps) }));
   }
 
-  async getSettings() {
-    const existing = await this.db.query.userSettings.findFirst({ where: eq(userSettings.id, "default") });
+  async getSettings(userId: string): Promise<typeof userSettings.$inferSelect> {
+    const existing = await this.db.query.userSettings.findFirst({ where: eq(userSettings.userId, userId) });
     if (existing) return existing;
-    await this.db.insert(userSettings).values({ id: "default" }).onConflictDoNothing();
-    const created = await this.db.query.userSettings.findFirst({ where: eq(userSettings.id, "default") });
+    await this.db.insert(userSettings).values({ userId }).onConflictDoNothing();
+    const created = await this.db.query.userSettings.findFirst({ where: eq(userSettings.userId, userId) });
     if (!created) throw new Error("Settings insert returned no record");
     return created;
   }
 
-  async updateSettings(patch: SettingsPatch) {
+  async updateSettings(userId: string, patch: SettingsPatch): Promise<typeof userSettings.$inferSelect> {
     await this.db
       .insert(userSettings)
-      .values({ id: "default", ...patch })
-      .onConflictDoUpdate({ target: userSettings.id, set: { ...patch, updatedAt: new Date() } });
-    return this.getSettings();
+      .values({ userId, ...patch })
+      .onConflictDoUpdate({ target: userSettings.userId, set: { ...patch, updatedAt: new Date() } });
+    return this.getSettings(userId);
   }
 
-  async listNotificationPreferences() {
-    return this.db.select().from(notificationPreferences).orderBy(asc(notificationPreferences.type));
+  async listNotificationPreferences(userId: string): Promise<(typeof notificationPreferences.$inferSelect)[]> {
+    return this.db.select().from(notificationPreferences).where(eq(notificationPreferences.userId, userId)).orderBy(asc(notificationPreferences.type));
   }
 
-  async upsertNotificationPreference(input: NotificationPreferenceInput) {
+  async upsertNotificationPreference(userId: string, input: NotificationPreferenceInput): Promise<typeof notificationPreferences.$inferSelect> {
     const [saved] = await this.db
       .insert(notificationPreferences)
-      .values(input)
+      .values({ userId, ...input })
       .onConflictDoUpdate({
-        target: notificationPreferences.type,
+        target: [notificationPreferences.userId, notificationPreferences.type],
         set: { ...input, updatedAt: new Date() },
       })
       .returning();
@@ -486,13 +662,22 @@ export class HealthRepository {
     return true;
   }
 
-  private async getMealWith(db: Pick<HealthDatabase, "query">, id: string) {
-    const meal = await db.query.meals.findFirst({ where: eq(meals.id, id) });
+  private async getMealWith(db: Pick<HealthDatabase, "query">, userId: string, id: string) {
+    const meal = await db.query.meals.findFirst({
+      where: and(eq(meals.id, id), eq(meals.userId, userId)),
+    });
     if (!meal) return null;
     const items = await db.query.mealItems.findMany({ where: eq(mealItems.mealId, id) });
     return { ...meal, items };
   }
 }
+
+export type HydratedWorkout = {
+  workout: typeof workouts.$inferSelect;
+  exercises: (typeof exercises.$inferSelect & { sets: (typeof workoutSets.$inferSelect & { estimatedOneRepMax: number | null })[] })[];
+  volumeKg: number;
+  setCount: number;
+};
 
 function normalizeName(value: string) {
   return value.trim().toLocaleLowerCase().replace(/\s+/g, " ");

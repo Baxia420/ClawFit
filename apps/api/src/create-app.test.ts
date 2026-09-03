@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "./create-app.js";
-import type { HealthRepository } from "@clawfit/db";
+import { DEFAULT_PRIMARY_USER_ID, type HealthRepository } from "@clawfit/db";
 
 const token = "test-token-that-is-at-least-24-chars";
 const repository = {
@@ -73,11 +73,11 @@ describe("Health API", () => {
 
     const editRes = await app.inject({ method: "PATCH", url: `/v1/meals/pending/${validUuid}`, headers: { authorization: `Bearer ${token}` }, payload: { scopeKey: "web:primary", label: "Two eggs" } });
     expect(editRes.statusCode).toBe(200);
-    expect(pendingRepo.updatePendingMeal).toHaveBeenCalledWith(validUuid, "web:primary", { label: "Two eggs" });
+    expect(pendingRepo.updatePendingMeal).toHaveBeenCalledWith(DEFAULT_PRIMARY_USER_ID, validUuid, "web:primary", { label: "Two eggs" });
 
     const cancelRes = await app.inject({ method: "DELETE", url: `/v1/meals/pending/${validUuid}?scopeKey=web%3Aprimary`, headers: { authorization: `Bearer ${token}` } });
     expect(cancelRes.statusCode).toBe(200);
-    expect(pendingRepo.cancelPendingMeal).toHaveBeenCalledWith(validUuid, "web:primary");
+    expect(pendingRepo.cancelPendingMeal).toHaveBeenCalledWith(DEFAULT_PRIMARY_USER_ID, validUuid, "web:primary");
 
     const confirmRes = await app.inject({
       method: "POST",
@@ -87,7 +87,7 @@ describe("Health API", () => {
     });
     expect(confirmRes.statusCode).toBe(200);
     expect(confirmRes.json().id).toBe(mealUuid);
-    expect(pendingRepo.confirmPendingMeal).toHaveBeenCalledWith(validUuid, { scopeKey: "web:primary" });
+    expect(pendingRepo.confirmPendingMeal).toHaveBeenCalledWith(DEFAULT_PRIMARY_USER_ID, validUuid, { scopeKey: "web:primary" });
 
     const missingScopeRes = await app.inject({
       method: "GET",
@@ -111,7 +111,7 @@ describe("Health API", () => {
 
     const settingsResponse = await app.inject({ method: "PATCH", url: "/v1/settings", headers, payload: { calorieTarget: 2400, timezone: "Asia/Kuala_Lumpur" } });
     expect(settingsResponse.statusCode).toBe(200);
-    expect(settingsRepo.updateSettings).toHaveBeenCalledWith({ calorieTarget: 2400, timezone: "Asia/Kuala_Lumpur" });
+    expect(settingsRepo.updateSettings).toHaveBeenCalledWith(DEFAULT_PRIMARY_USER_ID, { calorieTarget: 2400, timezone: "Asia/Kuala_Lumpur" });
 
     const notificationResponse = await app.inject({
       method: "PUT",
@@ -120,7 +120,7 @@ describe("Health API", () => {
       payload: { enabled: true, timeLocal: "21:30", timezone: "Asia/Kuala_Lumpur", daysOfWeek: [1, 2, 3, 4, 5, 6, 7], deliveryChannel: "web_push", configuration: {} },
     });
     expect(notificationResponse.statusCode).toBe(200);
-    expect(settingsRepo.upsertNotificationPreference).toHaveBeenCalledWith(expect.objectContaining({ type: "daily_summary", enabled: true }));
+    expect(settingsRepo.upsertNotificationPreference).toHaveBeenCalledWith(DEFAULT_PRIMARY_USER_ID, expect.objectContaining({ type: "daily_summary", enabled: true }));
     await app.close();
   });
 

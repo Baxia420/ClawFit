@@ -16,7 +16,7 @@ The installable web app now routes Ask ClawFit commands through a same-origin Ne
 
 The OpenClaw plugin exposes only health-domain tools. It does not expose SQL, shell, filesystem access, or generic HTTP requests. Meal estimates are drafts until explicitly confirmed.
 
-For the production-shaped v1 topology—Render API, Neon PostgreSQL, Vercel web, and the OpenClaw cutover—use [the deployment runbook](docs/deployment.md). The Fastify API is intentionally not deployed to Vercel.
+For the production-shaped v1 topology—Render API, Neon PostgreSQL, Vercel web, and the OpenClaw cutover—use [the deployment runbook](docs/deployment.md). The Fastify API is intentionally not deployed to Vercel. For details on the two-user identity architecture, household model, and external identity mapping, see [the identity and multi-user documentation](docs/identity-and-multi-user.md).
 
 ## Prerequisites
 
