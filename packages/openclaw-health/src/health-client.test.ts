@@ -37,4 +37,30 @@ describe("OpenClaw Health API client", () => {
     expect((error as Error).message).not.toContain("ECONNREFUSED");
     expect(log).toHaveBeenCalledWith("[HEALTH_API_NETWORK] request failed", { path: "/v1/settings" }, expect.any(TypeError));
   });
+
+  it("injects sender identity and conversation headers when sender context is provided", async () => {
+    vi.stubEnv("HEALTH_API_OPENCLAW_TOKEN", "openclaw-token-at-least-24-chars");
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
+
+    await healthFetch({}, "/v1/workouts/active", {
+      fetchImpl,
+      sender: {
+        provider: "whatsapp",
+        senderId: "+60123456789",
+        conversationId: "123456789@g.us",
+      },
+    });
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      expect.any(URL),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: "Bearer openclaw-token-at-least-24-chars",
+          "x-clawfit-sender-provider": "whatsapp",
+          "x-clawfit-sender-id": "+60123456789",
+          "x-clawfit-conversation-id": "123456789@g.us",
+        }),
+      }),
+    );
+  });
 });

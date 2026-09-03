@@ -244,10 +244,44 @@ describe("HealthRepository", () => {
         expect(fromPhone.user.id).toBe(userA);
       }
 
+      // Normalization: resolving using JID format or raw digits resolves to normalized phone
+      const fromJid = await repository.resolveUser({ provider: "whatsapp", externalIdentifier: "60123456789@s.whatsapp.net" });
+      expect(fromJid.resolved).toBe(true);
+      if (fromJid.resolved) {
+        expect(fromJid.user.id).toBe(userA);
+      }
+
+      const fromRawDigits = await repository.resolveUser({ provider: "whatsapp", externalIdentifier: "60123456789" });
+      expect(fromRawDigits.resolved).toBe(true);
+      if (fromRawDigits.resolved) {
+        expect(fromRawDigits.user.id).toBe(userA);
+      }
+
       const fromLid = await repository.resolveUser({ provider: "whatsapp", externalIdentifier: "12345678901234@lid" });
       expect(fromLid.resolved).toBe(true);
       if (fromLid.resolved) {
         expect(fromLid.user.id).toBe(userA);
+      }
+    });
+
+    it("rejects resolution of inactive users", async () => {
+      // Create an inactive user
+      const inactiveUser = await repository.createUser({
+        role: "partner",
+        displayName: "Inactive Partner",
+        active: false,
+      });
+
+      await repository.linkExternalIdentity({
+        userId: inactiveUser.id,
+        provider: "whatsapp",
+        externalIdentifier: "+60177778888",
+      });
+
+      const result = await repository.resolveUser({ provider: "whatsapp", externalIdentifier: "+60177778888" });
+      expect(result.resolved).toBe(false);
+      if (!result.resolved) {
+        expect(result.reason).toBe("user_inactive_or_missing");
       }
     });
 

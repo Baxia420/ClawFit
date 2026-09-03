@@ -1,10 +1,13 @@
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
-import { Type, type Static } from "typebox";
+import { Type, type Static, type TSchema } from "typebox";
 import { isFallbackNotice, isMealLogConfirmation, sanitizeUserFacingError } from "./confirmation.js";
-import { derivePendingMealScope, healthFetch, withPendingMealScope } from "./health-client.js";
+import { derivePendingMealScope, healthFetch, withPendingMealScope, type SenderContext } from "./health-client.js";
 
-const ConfigSchema = Type.Object({ apiUrl: Type.Optional(Type.String({ default: "http://127.0.0.1:4000" })) }, { additionalProperties: false });
+const ConfigSchema = Type.Object({
+  apiUrl: Type.Optional(Type.String({ default: "http://127.0.0.1:4000" })),
+  allowedGroupIds: Type.Optional(Type.Array(Type.String())),
+}, { additionalProperties: false });
 const Id = Type.String({ format: "uuid" });
 const IdempotencyKey = Type.String({ minLength: 8, maxLength: 200 });
 const NullableNumber = Type.Union([Type.Number({ minimum: 0 }), Type.Null()]);
@@ -41,13 +44,97 @@ const PendingMealDraft = Type.Object({
 const PendingMealLookup = Type.Object({ id: Type.Optional(Id) });
 const PendingMealConfirmation = Type.Object({ id: Id, occurredAt: Type.Optional(Type.String({ format: "date-time" })), idempotencyKey: Type.Optional(IdempotencyKey) });
 
+function createSenderTool<TParams extends TSchema>(
+  tool: any,
+  options: {
+    name: string;
+    description: string;
+    parameters: TParams;
+    execute: (
+      params: Static<TParams>,
+      context: {
+        config: Static<typeof ConfigSchema>;
+        sender: SenderContext;
+        toolContext: any;
+        signal?: AbortSignal;
+      },
+    ) => Promise<unknown>;
+  },
+) {
+  return tool({
+    name: options.name,
+    label: options.name,
+    description: options.description,
+    parameters: options.parameters,
+    factory: ({ config, toolContext }: { config: Static<typeof ConfigSchema>; toolContext: any }) => {
+      const senderId = toolContext?.requesterSenderId;
+      const conversationId = toolContext?.deliveryContext?.to;
+      const provider = toolContext?.messageChannel ?? "whatsapp";
+
+      return {
+        name: options.name,
+        label: options.name,
+        description: options.description,
+        parameters: options.parameters,
+        execute: async (_toolCallId: string, rawParams: unknown, signal?: AbortSignal) => {
+          if (conversationId && conversationId.includes("@g.us")) {
+            const allowedGroupIds = config?.allowedGroupIds ??
+              (process.env.CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS
+                ? process.env.CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS.split(",").map((s) => s.trim()).filter(Boolean)
+                : []);
+            if (!allowedGroupIds.includes(conversationId)) {
+              return jsonResult({
+                error: "This WhatsApp group is not authorized for ClawFit health tracking.",
+              });
+            }
+          }
+
+          if (!senderId) {
+            return jsonResult({
+              error: "This WhatsApp account isn't linked to a ClawFit profile yet.",
+            });
+          }
+
+          const sender: SenderContext = {
+            provider,
+            senderId,
+            conversationId,
+          };
+
+          try {
+            const result = await options.execute(rawParams as Static<TParams>, {
+              config,
+              sender,
+              toolContext,
+              ...(signal ? { signal } : {}),
+            });
+            return jsonResult(result);
+          } catch (err) {
+            const message = (err as Error).message;
+            if (message.includes("UNRESOLVED_SENDER_IDENTITY:") || message.includes("isn't linked to a ClawFit profile yet")) {
+              return jsonResult({ error: "This WhatsApp account isn't linked to a ClawFit profile yet." });
+            }
+            if (message.includes("INACTIVE_USER:") || message.includes("profile is inactive")) {
+              return jsonResult({ error: "This ClawFit profile is inactive. Please contact the household administrator." });
+            }
+            if (message.includes("UNAUTHORIZED_GROUP:") || message.includes("not authorized")) {
+              return jsonResult({ error: "This WhatsApp group is not authorized for ClawFit health tracking." });
+            }
+            throw err;
+          }
+        },
+      };
+    },
+  });
+}
+
 const plugin = defineToolPlugin({
   id: "clawfit-health",
   name: "ClawFit Health",
   description: "Authenticated domain tools for nutrition and workout tracking.",
   configSchema: ConfigSchema,
   tools: (tool) => [
-    tool({
+    createSenderTool(tool, {
       name: "estimate_nutrition",
       description: "Estimate a difficult or uncertain meal synchronously. This returns a draft only; it does not log anything.",
       parameters: Type.Object({
@@ -55,91 +142,233 @@ const plugin = defineToolPlugin({
         imageBase64: Type.Optional(Type.String({ description: "Optional raw base64 image data when the active client can provide it." })),
         imageMimeType: Type.Optional(Type.String({ description: "MIME type paired with imageBase64." })),
       }),
-      execute: (params, config) => healthFetch(config, "/v1/nutrition/estimate", { method: "POST", body: { text: params.text, ...(params.imageBase64 && params.imageMimeType ? { image: { base64: params.imageBase64, mimeType: params.imageMimeType } } : {}) } }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, "/v1/nutrition/estimate", {
+          method: "POST",
+          body: { text: params.text, ...(params.imageBase64 && params.imageMimeType ? { image: { base64: params.imageBase64, mimeType: params.imageMimeType } } : {}) },
+          sender,
+          ...(signal ? { signal } : {}),
+        }),
     }),
-    tool({
+    createSenderTool(tool, {
       name: "create_pending_meal",
       description: "Persist a scoped meal draft for later confirmation. This never logs a meal and always expires after two hours.",
       parameters: PendingMealDraft,
-      factory: ({ config, toolContext }) => {
+      execute: (params, { config, sender, toolContext, signal }) => {
         const scopeKey = derivePendingMealScope(toolContext);
-        return {
-          name: "create_pending_meal",
-          label: "create_pending_meal",
-          description: "Persist a scoped meal draft for later confirmation. This never logs a meal and always expires after two hours.",
-          parameters: PendingMealDraft,
-          execute: async (_toolCallId, rawParams, signal) => {
-            const params = rawParams as Static<typeof PendingMealDraft>;
-            return jsonResult(await healthFetch(config, "/v1/meals/pending", { method: "POST", body: { ...params, scopeKey, expiresInSeconds: 7_200 }, ...(signal ? { signal } : {}) }));
-          },
-        };
+        return healthFetch(config, "/v1/meals/pending", {
+          method: "POST",
+          body: { ...params, scopeKey, expiresInSeconds: 7_200 },
+          sender,
+          ...(signal ? { signal } : {}),
+        });
       },
     }),
-    tool({
+    createSenderTool(tool, {
       name: "get_pending_meal",
       description: "Get this peer's latest unconfirmed pending meal draft (or a scoped draft by ID) across session boundaries.",
       parameters: PendingMealLookup,
-      factory: ({ config, toolContext }) => {
+      execute: (params, { config, sender, toolContext, signal }) => {
         const scopeKey = derivePendingMealScope(toolContext);
-        return {
-          name: "get_pending_meal",
-          label: "get_pending_meal",
-          description: "Get this peer's latest unconfirmed pending meal draft (or a scoped draft by ID) across session boundaries.",
-          parameters: PendingMealLookup,
-          execute: async (_toolCallId, rawParams, signal) => {
-            const params = rawParams as Static<typeof PendingMealLookup>;
-            const path = params.id ? `/v1/meals/pending/${params.id}` : "/v1/meals/pending/latest";
-            return jsonResult(await healthFetch(config, withPendingMealScope(path, scopeKey), signal ? { signal } : {}));
-          },
-        };
+        const path = params.id ? `/v1/meals/pending/${params.id}` : "/v1/meals/pending/latest";
+        return healthFetch(config, withPendingMealScope(path, scopeKey), { sender, ...(signal ? { signal } : {}) });
       },
     }),
-    tool({
+    createSenderTool(tool, {
       name: "confirm_pending_meal",
       description: "Confirm and persist an existing meal draft in this peer's scope by ID. Idempotent on retries.",
       parameters: PendingMealConfirmation,
-      factory: ({ config, toolContext }) => {
+      execute: (params, { config, sender, toolContext, signal }) => {
         const scopeKey = derivePendingMealScope(toolContext);
-        return {
-          name: "confirm_pending_meal",
-          label: "confirm_pending_meal",
-          description: "Confirm and persist an existing meal draft in this peer's scope by ID. Idempotent on retries.",
-          parameters: PendingMealConfirmation,
-          execute: async (_toolCallId, rawParams, signal) => {
-            const params = rawParams as Static<typeof PendingMealConfirmation>;
-            return jsonResult(await healthFetch(config, `/v1/meals/pending/${params.id}/confirm`, { method: "POST", body: { scopeKey, ...(params.occurredAt ? { occurredAt: params.occurredAt } : {}), ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}) }, ...(signal ? { signal } : {}) }));
-          },
-        };
+        return healthFetch(config, `/v1/meals/pending/${params.id}/confirm`, {
+          method: "POST",
+          body: { scopeKey, ...(params.occurredAt ? { occurredAt: params.occurredAt } : {}), ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}) },
+          sender,
+          ...(signal ? { signal } : {}),
+        });
       },
     }),
-    tool({
+    createSenderTool(tool, {
       name: "log_meal",
       description: "Persist a user-confirmed meal estimate. Never call before explicit confirmation unless the original request explicitly said to log it.",
       parameters: LoggedMeal,
-      execute: (params, config) => healthFetch(config, "/v1/meals", { method: "POST", body: params }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, "/v1/meals", { method: "POST", body: params, sender, ...(signal ? { signal } : {}) }),
     }),
-    tool({ name: "get_meal", description: "Get one meal by its database ID.", parameters: Type.Object({ id: Id }), execute: (params, config) => healthFetch(config, `/v1/meals/${params.id}`) }),
-    tool({ name: "get_recent_meals", description: "List recent meals so natural-language references can be resolved to an ID.", parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }), execute: (params, config) => healthFetch(config, `/v1/meals/recent?limit=${params.limit ?? 20}`) }),
-    tool({
+    createSenderTool(tool, {
+      name: "get_meal",
+      description: "Get one meal by its database ID.",
+      parameters: Type.Object({ id: Id }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, `/v1/meals/${params.id}`, { sender, ...(signal ? { signal } : {}) }),
+    }),
+    createSenderTool(tool, {
+      name: "get_recent_meals",
+      description: "List recent meals so natural-language references can be resolved to an ID.",
+      parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, `/v1/meals/recent?limit=${params.limit ?? 20}`, { sender, ...(signal ? { signal } : {}) }),
+    }),
+    createSenderTool(tool, {
       name: "update_meal",
       description: "Correct an existing meal by ID. Use this for calorie, quantity, macro, confidence, label, or time corrections.",
-      parameters: Type.Object({ id: Id, patch: Type.Partial(Type.Object({ occurredAt: Type.String({ format: "date-time" }), label: Type.String(), caloriesBest: Type.Integer({ minimum: 0 }), caloriesLow: Type.Integer({ minimum: 0 }), caloriesHigh: Type.Integer({ minimum: 0 }), proteinG: Type.Number({ minimum: 0 }), carbsG: Type.Number({ minimum: 0 }), fatG: Type.Number({ minimum: 0 }), fiberG: NullableNumber, confidence: Confidence, uncertaintyReasons: Type.Array(Type.String()) })) }),
-      execute: (params, config) => healthFetch(config, `/v1/meals/${params.id}`, { method: "PATCH", body: params.patch }),
+      parameters: Type.Object({
+        id: Id,
+        patch: Type.Partial(
+          Type.Object({
+            occurredAt: Type.String({ format: "date-time" }),
+            label: Type.String(),
+            caloriesBest: Type.Integer({ minimum: 0 }),
+            caloriesLow: Type.Integer({ minimum: 0 }),
+            caloriesHigh: Type.Integer({ minimum: 0 }),
+            proteinG: Type.Number({ minimum: 0 }),
+            carbsG: Type.Number({ minimum: 0 }),
+            fatG: Type.Number({ minimum: 0 }),
+            fiberG: NullableNumber,
+            confidence: Confidence,
+            uncertaintyReasons: Type.Array(Type.String()),
+          }),
+        ),
+      }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, `/v1/meals/${params.id}`, { method: "PATCH", body: params.patch, sender, ...(signal ? { signal } : {}) }),
     }),
-    tool({ name: "delete_meal", description: "Delete one existing meal by ID.", parameters: Type.Object({ id: Id }), execute: (params, config) => healthFetch(config, `/v1/meals/${params.id}`, { method: "DELETE" }) }),
-    tool({ name: "get_daily_nutrition", description: "Read database-backed meals and deterministic nutrition totals for a local calendar date.", parameters: Type.Object({ date: Type.String({ format: "date" }), timezone: Type.Optional(Type.String({ default: "Asia/Kuala_Lumpur" })) }), execute: (params, config) => healthFetch(config, `/v1/nutrition/daily?date=${encodeURIComponent(params.date)}&timezone=${encodeURIComponent(params.timezone ?? "Asia/Kuala_Lumpur")}`) }),
-    tool({ name: "save_food_preset", description: "Save or replace a user-confirmed repeated food preset.", parameters: Type.Object({ name: Type.String(), meal: PresetMeal }), execute: (params, config) => healthFetch(config, "/v1/food-presets", { method: "POST", body: params }) }),
-    tool({ name: "find_food_preset", description: "Find a saved food preset before estimating repeated food.", parameters: Type.Object({ query: Type.String() }), execute: (params, config) => healthFetch(config, `/v1/food-presets?query=${encodeURIComponent(params.query)}`) }),
-    tool({ name: "update_food_preset", description: "Update fields on a saved food preset by ID.", parameters: Type.Object({ id: Id, patch: Type.Partial(Type.Object({ name: Type.String(), label: Type.String(), caloriesBest: Type.Integer({ minimum: 0 }), caloriesLow: Type.Integer({ minimum: 0 }), caloriesHigh: Type.Integer({ minimum: 0 }), proteinG: Type.Number({ minimum: 0 }), carbsG: Type.Number({ minimum: 0 }), fatG: Type.Number({ minimum: 0 }), fiberG: NullableNumber, confidence: Confidence, uncertaintyReasons: Type.Array(Type.String()) })) }), execute: (params, config) => healthFetch(config, `/v1/food-presets/${params.id}`, { method: "PATCH", body: params.patch }) }),
-    tool({ name: "delete_food_preset", description: "Delete a saved food preset by ID.", parameters: Type.Object({ id: Id }), execute: (params, config) => healthFetch(config, `/v1/food-presets/${params.id}`, { method: "DELETE" }) }),
-    tool({ name: "start_workout", description: "Start one active conversational workout session.", parameters: Type.Object({ name: Type.String(), startedAt: Type.Optional(Type.String({ format: "date-time" })), idempotencyKey: IdempotencyKey }), execute: (params, config) => healthFetch(config, "/v1/workouts", { method: "POST", body: params }) }),
-    tool({ name: "get_active_workout", description: "Get the active workout and all current exercises and sets.", parameters: Type.Object({}), execute: (_params, config) => healthFetch(config, "/v1/workouts/active") }),
-    tool({ name: "add_workout_set", description: "Add one set to an exercise in the active workout. Repeated shorthand should reuse the latest exercise and weight from tool state.", parameters: Type.Object({ workoutId: Id, exerciseName: Type.String(), weightKg: NullableNumber, reps: Type.Integer({ minimum: 1 }), rpe: Type.Optional(Type.Union([Type.Number({ minimum: 1, maximum: 10 }), Type.Null()])), notes: Type.Optional(Type.Union([Type.String(), Type.Null()])), occurredAt: Type.Optional(Type.String({ format: "date-time" })), idempotencyKey: IdempotencyKey }), execute: (params, config) => { const { workoutId, ...body } = params; return healthFetch(config, `/v1/workouts/${workoutId}/sets`, { method: "POST", body }); } }),
-    tool({ name: "update_workout_set", description: "Correct an existing workout set by ID.", parameters: Type.Object({ id: Id, patch: Type.Partial(Type.Object({ weightKg: NullableNumber, reps: Type.Integer({ minimum: 1 }), rpe: Type.Union([Type.Number({ minimum: 1, maximum: 10 }), Type.Null()]), notes: Type.Union([Type.String(), Type.Null()]) })) }), execute: (params, config) => healthFetch(config, `/v1/workout-sets/${params.id}`, { method: "PATCH", body: params.patch }) }),
-    tool({ name: "delete_workout_set", description: "Delete an existing workout set by ID.", parameters: Type.Object({ id: Id }), execute: (params, config) => healthFetch(config, `/v1/workout-sets/${params.id}`, { method: "DELETE" }) }),
-    tool({ name: "finish_workout", description: "Finish the active workout and return deterministic totals.", parameters: Type.Object({ id: Id, finishedAt: Type.Optional(Type.String({ format: "date-time" })) }), execute: (params, config) => healthFetch(config, `/v1/workouts/${params.id}/finish`, { method: "POST", body: params.finishedAt ? { finishedAt: params.finishedAt } : {} }) }),
-    tool({ name: "get_previous_exercise_performance", description: "Get the most recent prior performance for an exercise.", parameters: Type.Object({ name: Type.String(), before: Type.Optional(Type.String({ format: "date-time" })) }), execute: (params, config) => healthFetch(config, `/v1/exercises/previous?name=${encodeURIComponent(params.name)}${params.before ? `&before=${encodeURIComponent(params.before)}` : ""}`) }),
-    tool({ name: "get_workout_history", description: "List recent workouts with exercises, sets, volume, and estimated 1RM values.", parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }), execute: (params, config) => healthFetch(config, `/v1/workouts/history?limit=${params.limit ?? 20}`) }),
+    createSenderTool(tool, {
+      name: "delete_meal",
+      description: "Delete one existing meal by ID.",
+      parameters: Type.Object({ id: Id }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, `/v1/meals/${params.id}`, { method: "DELETE", sender, ...(signal ? { signal } : {}) }),
+    }),
+    createSenderTool(tool, {
+      name: "get_daily_nutrition",
+      description: "Read database-backed meals and deterministic nutrition totals for a local calendar date.",
+      parameters: Type.Object({ date: Type.String({ format: "date" }), timezone: Type.Optional(Type.String({ default: "Asia/Kuala_Lumpur" })) }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, `/v1/nutrition/daily?date=${encodeURIComponent(params.date)}&timezone=${encodeURIComponent(params.timezone ?? "Asia/Kuala_Lumpur")}`, { sender, ...(signal ? { signal } : {}) }),
+    }),
+    createSenderTool(tool, {
+      name: "save_food_preset",
+      description: "Save or replace a user-confirmed repeated food preset.",
+      parameters: Type.Object({ name: Type.String(), meal: PresetMeal }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, "/v1/food-presets", { method: "POST", body: params, sender, ...(signal ? { signal } : {}) }),
+    }),
+    createSenderTool(tool, {
+      name: "find_food_preset",
+      description: "Find a saved food preset before estimating repeated food.",
+      parameters: Type.Object({ query: Type.String() }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, `/v1/food-presets?query=${encodeURIComponent(params.query)}`, { sender, ...(signal ? { signal } : {}) }),
+    }),
+    createSenderTool(tool, {
+      name: "update_food_preset",
+      description: "Update fields on a saved food preset by ID.",
+      parameters: Type.Object({
+        id: Id,
+        patch: Type.Partial(
+          Type.Object({
+            name: Type.String(),
+            label: Type.String(),
+            caloriesBest: Type.Integer({ minimum: 0 }),
+            caloriesLow: Type.Integer({ minimum: 0 }),
+            caloriesHigh: Type.Integer({ minimum: 0 }),
+            proteinG: Type.Number({ minimum: 0 }),
+            carbsG: Type.Number({ minimum: 0 }),
+            fatG: Type.Number({ minimum: 0 }),
+            fiberG: NullableNumber,
+            confidence: Confidence,
+            uncertaintyReasons: Type.Array(Type.String()),
+          }),
+        ),
+      }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, `/v1/food-presets/${params.id}`, { method: "PATCH", body: params.patch, sender, ...(signal ? { signal } : {}) }),
+    }),
+    createSenderTool(tool, {
+      name: "delete_food_preset",
+      description: "Delete a saved food preset by ID.",
+      parameters: Type.Object({ id: Id }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, `/v1/food-presets/${params.id}`, { method: "DELETE", sender, ...(signal ? { signal } : {}) }),
+    }),
+    createSenderTool(tool, {
+      name: "start_workout",
+      description: "Start one active conversational workout session.",
+      parameters: Type.Object({ name: Type.String(), startedAt: Type.Optional(Type.String({ format: "date-time" })), idempotencyKey: IdempotencyKey }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, "/v1/workouts", { method: "POST", body: params, sender, ...(signal ? { signal } : {}) }),
+    }),
+    createSenderTool(tool, {
+      name: "get_active_workout",
+      description: "Get the active workout and all current exercises and sets.",
+      parameters: Type.Object({}),
+      execute: (_params, { config, sender, signal }) =>
+        healthFetch(config, "/v1/workouts/active", { sender, ...(signal ? { signal } : {}) }),
+    }),
+    createSenderTool(tool, {
+      name: "add_workout_set",
+      description: "Add one set to an exercise in the active workout. Repeated shorthand should reuse the latest exercise and weight from tool state.",
+      parameters: Type.Object({
+        workoutId: Id,
+        exerciseName: Type.String(),
+        weightKg: NullableNumber,
+        reps: Type.Integer({ minimum: 1 }),
+        rpe: Type.Optional(Type.Union([Type.Number({ minimum: 1, maximum: 10 }), Type.Null()])),
+        notes: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+        occurredAt: Type.Optional(Type.String({ format: "date-time" })),
+        idempotencyKey: IdempotencyKey,
+      }),
+      execute: (params, { config, sender, signal }) => {
+        const { workoutId, ...body } = params;
+        return healthFetch(config, `/v1/workouts/${workoutId}/sets`, { method: "POST", body, sender, ...(signal ? { signal } : {}) });
+      },
+    }),
+    createSenderTool(tool, {
+      name: "update_workout_set",
+      description: "Correct an existing workout set by ID.",
+      parameters: Type.Object({
+        id: Id,
+        patch: Type.Partial(
+          Type.Object({
+            weightKg: NullableNumber,
+            reps: Type.Integer({ minimum: 1 }),
+            rpe: Type.Union([Type.Number({ minimum: 1, maximum: 10 }), Type.Null()]),
+            notes: Type.Union([Type.String(), Type.Null()]),
+          }),
+        ),
+      }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, `/v1/workout-sets/${params.id}`, { method: "PATCH", body: params.patch, sender, ...(signal ? { signal } : {}) }),
+    }),
+    createSenderTool(tool, {
+      name: "delete_workout_set",
+      description: "Delete an existing workout set by ID.",
+      parameters: Type.Object({ id: Id }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, `/v1/workout-sets/${params.id}`, { method: "DELETE", sender, ...(signal ? { signal } : {}) }),
+    }),
+    createSenderTool(tool, {
+      name: "finish_workout",
+      description: "Finish the active workout and return deterministic totals.",
+      parameters: Type.Object({ id: Id, finishedAt: Type.Optional(Type.String({ format: "date-time" })) }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, `/v1/workouts/${params.id}/finish`, { method: "POST", body: params.finishedAt ? { finishedAt: params.finishedAt } : {}, sender, ...(signal ? { signal } : {}) }),
+    }),
+    createSenderTool(tool, {
+      name: "get_previous_exercise_performance",
+      description: "Get the most recent prior performance for an exercise.",
+      parameters: Type.Object({ name: Type.String(), before: Type.Optional(Type.String({ format: "date-time" })) }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, `/v1/exercises/previous?name=${encodeURIComponent(params.name)}${params.before ? `&before=${encodeURIComponent(params.before)}` : ""}`, { sender, ...(signal ? { signal } : {}) }),
+    }),
+    createSenderTool(tool, {
+      name: "get_workout_history",
+      description: "List recent workouts with exercises, sets, volume, and estimated 1RM values.",
+      parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
+      execute: (params, { config, sender, signal }) =>
+        healthFetch(config, `/v1/workouts/history?limit=${params.limit ?? 20}`, { sender, ...(signal ? { signal } : {}) }),
+    }),
   ],
 });
 

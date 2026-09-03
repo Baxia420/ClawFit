@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, gt, gte, ilike, isNull, lt, sql } from "drizzle-orm";
 import {
   estimatedOneRepMax,
+  normalizeWhatsAppIdentifier,
   sumNutrition,
   workoutVolume,
   type CreateUserInput,
@@ -99,12 +100,16 @@ export class HealthRepository {
     const user = await this.db.query.users.findFirst({ where: eq(users.id, input.userId) });
     if (!user) throw new NotFoundError("User not found");
 
+    const externalIdentifier = input.provider === "whatsapp"
+      ? normalizeWhatsAppIdentifier(input.externalIdentifier)
+      : input.externalIdentifier.trim();
+
     const existing = await this.db.query.externalIdentities.findFirst({
-      where: and(eq(externalIdentities.provider, input.provider), eq(externalIdentities.externalIdentifier, input.externalIdentifier)),
+      where: and(eq(externalIdentities.provider, input.provider), eq(externalIdentities.externalIdentifier, externalIdentifier)),
     });
     if (existing) {
       if (existing.userId !== input.userId) {
-        throw new ConflictError(`External identifier '${input.externalIdentifier}' is already mapped to another user`);
+        throw new ConflictError(`External identifier '${externalIdentifier}' is already mapped to another user`);
       }
       return existing;
     }
@@ -114,7 +119,7 @@ export class HealthRepository {
       .values({
         userId: input.userId,
         provider: input.provider,
-        externalIdentifier: input.externalIdentifier,
+        externalIdentifier,
         metadata: input.metadata ?? {},
       })
       .returning();
@@ -123,9 +128,22 @@ export class HealthRepository {
   }
 
   async resolveUser(input: ResolveUserInput) {
-    const identity = await this.db.query.externalIdentities.findFirst({
-      where: and(eq(externalIdentities.provider, input.provider), eq(externalIdentities.externalIdentifier, input.externalIdentifier)),
-    });
+    const candidateIdentifiers: string[] = [input.externalIdentifier.trim()];
+    if (input.provider === "whatsapp") {
+      const normalized = normalizeWhatsAppIdentifier(input.externalIdentifier);
+      if (!candidateIdentifiers.includes(normalized)) {
+        candidateIdentifiers.unshift(normalized);
+      }
+    }
+
+    let identity: typeof externalIdentities.$inferSelect | undefined;
+    for (const candidate of candidateIdentifiers) {
+      identity = await this.db.query.externalIdentities.findFirst({
+        where: and(eq(externalIdentities.provider, input.provider), eq(externalIdentities.externalIdentifier, candidate)),
+      });
+      if (identity) break;
+    }
+
     if (!identity) {
       return { resolved: false as const, reason: "unknown_external_identity" as const };
     }

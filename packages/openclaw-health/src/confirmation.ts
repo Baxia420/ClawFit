@@ -17,6 +17,17 @@ export function isFallbackNotice(text: string | null | undefined): boolean {
 
 export function sanitizeUserFacingError(text: string | null | undefined): string {
   if (!text || typeof text !== "string") return "I couldn't complete that just now. Nothing was changed — try again in a moment.";
+
+  if (text.includes("UNRESOLVED_SENDER_IDENTITY:") || text.includes("This WhatsApp account isn't linked to a ClawFit profile yet.")) {
+    return "This WhatsApp account isn't linked to a ClawFit profile yet.";
+  }
+  if (text.includes("INACTIVE_USER:") || text.includes("This ClawFit profile is inactive.")) {
+    return "This ClawFit profile is inactive. Please contact the household administrator.";
+  }
+  if (text.includes("UNAUTHORIZED_GROUP:") || text.includes("This WhatsApp group is not authorized for ClawFit health tracking.")) {
+    return "This WhatsApp group is not authorized for ClawFit health tracking.";
+  }
+
   const hasRawError =
     /RESOURCE_EXHAUSTED/i.test(text) ||
     /Google Generative AI API error/i.test(text) ||

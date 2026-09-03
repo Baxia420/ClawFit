@@ -19,7 +19,7 @@ export class HealthApiNetworkError extends HealthApiError {
 }
 
 export async function healthApiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = process.env.HEALTH_API_TOKEN;
+  const token = process.env.HEALTH_API_WEB_TOKEN ?? process.env.HEALTH_API_TOKEN;
   if (!token) throw new HealthApiError("The Health API is not configured", 503);
   let response: Response;
   try {

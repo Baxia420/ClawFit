@@ -22,7 +22,8 @@
     "openclaw:setup": "pnpm openclaw:plugin:build && tsx scripts/setup-openclaw.ts",
     "openclaw:plugin:build": "pnpm --filter @clawfit/openclaw-health build",
     "openclaw:plugin:validate": "pnpm --filter @clawfit/openclaw-health validate",
-    "nutrition:manual": "tsx scripts/manual-nutrition-test.ts"
+    "nutrition:manual": "tsx scripts/manual-nutrition-test.ts",
+    "identity:link": "tsx scripts/link-whatsapp-identity.ts"
   },
   "devDependencies": {
     "@electric-sql/pglite": "latest",

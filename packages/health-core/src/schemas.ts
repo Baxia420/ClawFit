@@ -231,3 +231,34 @@ export type HouseholdMember = z.infer<typeof householdMemberSchema>;
 export type ExternalIdentity = z.infer<typeof externalIdentitySchema>;
 export type ResolveUserInput = z.infer<typeof resolveUserSchema>;
 export type LinkExternalIdentityInput = z.infer<typeof linkExternalIdentitySchema>;
+
+export const senderHeadersSchema = z.object({
+  "x-clawfit-sender-provider": z.string().min(1).default("whatsapp"),
+  "x-clawfit-sender-id": z.string().min(1),
+  "x-clawfit-conversation-id": z.string().min(1).optional(),
+});
+export type SenderHeaders = z.infer<typeof senderHeadersSchema>;
+
+/**
+ * Normalizes a WhatsApp identifier into a canonical form:
+ * - WhatsApp phone JID (e.g. 60123456789@s.whatsapp.net) -> +60123456789
+ * - Raw phone digits (e.g. 60123456789) -> +60123456789
+ * - E.164 phone (e.g. +60123456789) -> +60123456789
+ * - WhatsApp LID (e.g. 12345678901234@lid) -> lowercase trimmed LID
+ * - Other strings: trimmed lowercase
+ */
+export function normalizeWhatsAppIdentifier(identifier: string): string {
+  const trimmed = identifier.trim().toLowerCase();
+  if (trimmed.endsWith("@s.whatsapp.net")) {
+    const userPart = trimmed.slice(0, -"@s.whatsapp.net".length);
+    return userPart.startsWith("+") ? userPart : `+${userPart}`;
+  }
+  if (trimmed.endsWith("@lid")) {
+    return trimmed;
+  }
+  if (/^\d{7,15}$/.test(trimmed)) {
+    return `+${trimmed}`;
+  }
+  return trimmed;
+}
+

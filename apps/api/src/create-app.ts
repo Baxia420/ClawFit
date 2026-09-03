@@ -1,5 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
-import Fastify from "fastify";
+import Fastify, { type FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
 import {
   confirmPendingMealSchema,
@@ -22,23 +22,128 @@ const uuidParam = z.object({ id: z.string().uuid() });
 const dateQuery = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), timezone: z.string().min(1).default("Asia/Kuala_Lumpur") });
 const listQuery = z.object({ limit: z.coerce.number().int().min(1).max(100).default(20) });
 
-export function createApp(options: {
+declare module "fastify" {
+  interface FastifyRequest {
+    userId?: string | undefined;
+    clientType?: "web" | "openclaw" | undefined;
+    startTime?: number | undefined;
+  }
+}
+
+export type CreateAppOptions = {
   repository: HealthRepository;
-  apiToken: string;
-  estimator?: NutritionEstimator;
-  logger?: boolean;
-}) {
+  apiToken?: string | undefined;
+  webToken?: string | undefined;
+  openclawToken?: string | undefined;
+  allowedGroupIds?: string[] | undefined;
+  estimator?: NutritionEstimator | undefined;
+  logger?: boolean | undefined;
+};
+
+export function createApp(options: CreateAppOptions) {
   const app = Fastify({ logger: options.logger === false ? false : { redact: ["req.headers.authorization", "headers.x-goog-api-key"] } });
   const compatibilityUserId = DEFAULT_PRIMARY_USER_ID;
+
+  app.decorateRequest("userId", undefined);
+  app.decorateRequest("clientType", undefined);
+
+  const getUserId = (request: FastifyRequest): string => request.userId || compatibilityUserId;
 
   app.addHook("onRequest", async (request, reply) => {
     (request as unknown as { startTime: number }).startTime = performance.now();
     if (request.url === "/health" || request.url === "/ready") return;
+
     const authorization = request.headers.authorization;
     const provided = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
-    if (!safeEqual(provided, options.apiToken)) {
-      await reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "A valid bearer token is required" } });
+
+    const webToken = options.webToken ?? options.apiToken ?? "";
+    const openclawToken = options.openclawToken ?? options.apiToken ?? "";
+
+    const isWeb = Boolean(webToken && safeEqual(provided, webToken));
+    const isOpenClaw = Boolean(openclawToken && safeEqual(provided, openclawToken));
+
+    if (!isWeb && !isOpenClaw) {
+      return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "A valid bearer token is required" } });
     }
+
+    const senderProviderHeader = request.headers["x-clawfit-sender-provider"];
+    const senderIdHeader = request.headers["x-clawfit-sender-id"];
+    const conversationIdHeader = request.headers["x-clawfit-conversation-id"];
+
+    const senderProvider = typeof senderProviderHeader === "string" ? senderProviderHeader : undefined;
+    const senderId = typeof senderIdHeader === "string" ? senderIdHeader : undefined;
+    const conversationId = typeof conversationIdHeader === "string" ? conversationIdHeader : undefined;
+
+    // Web client handling
+    if (isWeb && !isOpenClaw) {
+      if (senderId || senderProvider) {
+        return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Sender headers not permitted for web client" } });
+      }
+      (request as unknown as { clientType: string }).clientType = "web";
+      (request as unknown as { userId: string }).userId = compatibilityUserId;
+      return;
+    }
+
+    // OpenClaw client handling (or dual-configured dev fallback)
+    (request as unknown as { clientType: string }).clientType = "openclaw";
+
+    // If conversation is a WhatsApp group (@g.us), enforce allowlist
+    if (conversationId && conversationId.includes("@g.us")) {
+      const allowed = options.allowedGroupIds ?? [];
+      if (!allowed.includes(conversationId)) {
+        return reply.code(403).send({
+          error: {
+            code: "UNAUTHORIZED_GROUP",
+            message: "This WhatsApp group is not authorized for ClawFit health tracking.",
+          },
+        });
+      }
+    }
+
+    // Public ML estimate route does not require user DB lookup
+    if (request.url === "/v1/nutrition/estimate" && !senderId) {
+      return;
+    }
+
+    // All health data routes require valid, resolved sender
+    if (!senderId) {
+      // In backwards-compatibility mode (single token without sender headers from legacy caller)
+      if (isWeb) {
+        (request as unknown as { clientType: string }).clientType = "web";
+        (request as unknown as { userId: string }).userId = compatibilityUserId;
+        return;
+      }
+      return reply.code(403).send({
+        error: {
+          code: "MISSING_SENDER_IDENTITY",
+          message: "Missing sender identity header",
+        },
+      });
+    }
+
+    const resolution = await options.repository.resolveUser({
+      provider: senderProvider ?? "whatsapp",
+      externalIdentifier: senderId,
+    });
+
+    if (!resolution.resolved) {
+      if (resolution.reason === "user_inactive_or_missing") {
+        return reply.code(403).send({
+          error: {
+            code: "INACTIVE_USER",
+            message: "This ClawFit profile is inactive.",
+          },
+        });
+      }
+      return reply.code(403).send({
+        error: {
+          code: "UNRESOLVED_SENDER_IDENTITY",
+          message: "This WhatsApp account isn't linked to a ClawFit profile yet.",
+        },
+      });
+    }
+
+    (request as unknown as { userId: string }).userId = resolution.user.id;
   });
 
   app.addHook("onResponse", async (request, reply) => {
@@ -86,143 +191,143 @@ export function createApp(options: {
 
   app.post("/v1/meals", async (request, reply) => {
     const input = mealInputSchema.parse(request.body);
-    return reply.code(201).send(await options.repository.createMeal(compatibilityUserId, input));
+    return reply.code(201).send(await options.repository.createMeal(getUserId(request), input));
   });
   app.post("/v1/meals/pending", async (request, reply) => {
     const input = pendingMealInputSchema.parse(request.body);
-    return reply.code(201).send(await options.repository.createPendingMeal(compatibilityUserId, input));
+    return reply.code(201).send(await options.repository.createPendingMeal(getUserId(request), input));
   });
   app.get("/v1/meals/pending/latest", async (request) => {
     const scopeKey = pendingMealScopeSchema.parse(request.query).scopeKey;
-    return { pending: await options.repository.getLatestPendingMeal(compatibilityUserId, scopeKey) };
+    return { pending: await options.repository.getLatestPendingMeal(getUserId(request), scopeKey) };
   });
   app.get("/v1/meals/pending/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const scopeKey = pendingMealScopeSchema.parse(request.query).scopeKey;
-    return options.repository.getPendingMeal(compatibilityUserId, id, scopeKey);
+    return options.repository.getPendingMeal(getUserId(request), id, scopeKey);
   });
   app.patch("/v1/meals/pending/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const body = pendingMealPatchSchema.and(pendingMealScopeSchema).parse(request.body);
     const { scopeKey, ...patch } = body;
-    return options.repository.updatePendingMeal(compatibilityUserId, id, scopeKey, patch);
+    return options.repository.updatePendingMeal(getUserId(request), id, scopeKey, patch);
   });
   app.delete("/v1/meals/pending/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const scopeKey = pendingMealScopeSchema.parse(request.query).scopeKey;
-    return options.repository.cancelPendingMeal(compatibilityUserId, id, scopeKey);
+    return options.repository.cancelPendingMeal(getUserId(request), id, scopeKey);
   });
   app.post("/v1/meals/pending/:id/confirm", async (request, reply) => {
     const params = uuidParam.parse(request.params);
     const body = confirmPendingMealSchema.parse(request.body ?? {});
-    return reply.code(200).send(await options.repository.confirmPendingMeal(compatibilityUserId, params.id, body));
+    return reply.code(200).send(await options.repository.confirmPendingMeal(getUserId(request), params.id, body));
   });
   app.get("/v1/meals/recent", async (request) => {
     const limit = listQuery.parse(request.query).limit;
-    return options.repository.listRecentMeals(compatibilityUserId, limit);
+    return options.repository.listRecentMeals(getUserId(request), limit);
   });
   app.get("/v1/meals/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
-    return options.repository.getMeal(compatibilityUserId, id);
+    return options.repository.getMeal(getUserId(request), id);
   });
   app.patch("/v1/meals/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const patch = mealPatchSchema.parse(request.body);
-    return options.repository.updateMeal(compatibilityUserId, id, patch);
+    return options.repository.updateMeal(getUserId(request), id, patch);
   });
   app.delete("/v1/meals/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
-    return options.repository.deleteMeal(compatibilityUserId, id);
+    return options.repository.deleteMeal(getUserId(request), id);
   });
   app.get("/v1/nutrition/daily", async (request) => {
     const query = dateQuery.parse(request.query);
     const { start, end } = zonedDayRange(query.date, query.timezone);
-    const result = await options.repository.dailyNutrition(compatibilityUserId, start, end);
+    const result = await options.repository.dailyNutrition(getUserId(request), start, end);
     return { ...result, date: query.date };
   });
   app.get("/v1/nutrition/trend", async (request) => {
     const query = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query);
     const end = new Date();
     const start = new Date(end.getTime() - query.days * 86_400_000);
-    return options.repository.nutritionTrend(compatibilityUserId, start, end);
+    return options.repository.nutritionTrend(getUserId(request), start, end);
   });
 
   app.post("/v1/food-presets", async (request, reply) => {
     const body = z.object({ name: z.string().min(1).max(160), meal: mealInputSchema }).parse(request.body);
-    return reply.code(201).send(await options.repository.savePreset(compatibilityUserId, body.name, body.meal));
+    return reply.code(201).send(await options.repository.savePreset(getUserId(request), body.name, body.meal));
   });
   app.get("/v1/food-presets", async (request) => {
     const query = z.object({ query: z.string().max(160).default("") }).parse(request.query).query;
-    return options.repository.findPresets(compatibilityUserId, query);
+    return options.repository.findPresets(getUserId(request), query);
   });
   app.patch("/v1/food-presets/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const patch = foodPresetPatchSchema.parse(request.body);
-    return options.repository.updatePreset(compatibilityUserId, id, patch);
+    return options.repository.updatePreset(getUserId(request), id, patch);
   });
   app.delete("/v1/food-presets/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
-    return options.repository.deletePreset(compatibilityUserId, id);
+    return options.repository.deletePreset(getUserId(request), id);
   });
 
   app.post("/v1/workouts", async (request, reply) => {
     const body = startWorkoutSchema.parse(request.body);
     const payload = { name: body.name, idempotencyKey: body.idempotencyKey, ...(body.startedAt ? { startedAt: body.startedAt } : {}) };
-    return reply.code(201).send(await options.repository.startWorkout(compatibilityUserId, payload));
+    return reply.code(201).send(await options.repository.startWorkout(getUserId(request), payload));
   });
-  app.get("/v1/workouts/active", async () => {
-    return options.repository.getActiveWorkout(compatibilityUserId);
+  app.get("/v1/workouts/active", async (request) => {
+    return options.repository.getActiveWorkout(getUserId(request));
   });
   app.get("/v1/workouts/history", async (request) => {
     const limit = listQuery.parse(request.query).limit;
-    return options.repository.workoutHistory(compatibilityUserId, limit);
+    return options.repository.workoutHistory(getUserId(request), limit);
   });
   app.get("/v1/workouts/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
-    return options.repository.getWorkout(compatibilityUserId, id);
+    return options.repository.getWorkout(getUserId(request), id);
   });
   app.post("/v1/workouts/:id/sets", async (request, reply) => {
     const id = uuidParam.parse(request.params).id;
     const body = workoutSetInputSchema.parse(request.body);
-    return reply.code(201).send(await options.repository.addWorkoutSet(compatibilityUserId, id, body));
+    return reply.code(201).send(await options.repository.addWorkoutSet(getUserId(request), id, body));
   });
   app.patch("/v1/workout-sets/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const patch = workoutSetPatchSchema.parse(request.body);
-    return options.repository.updateWorkoutSet(compatibilityUserId, id, patch);
+    return options.repository.updateWorkoutSet(getUserId(request), id, patch);
   });
   app.delete("/v1/workout-sets/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
-    return options.repository.deleteWorkoutSet(compatibilityUserId, id);
+    return options.repository.deleteWorkoutSet(getUserId(request), id);
   });
   app.post("/v1/workouts/:id/finish", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const body = z.object({ finishedAt: z.coerce.date().optional() }).parse(request.body ?? {});
-    return options.repository.finishWorkout(compatibilityUserId, id, body.finishedAt);
+    return options.repository.finishWorkout(getUserId(request), id, body.finishedAt);
   });
   app.get("/v1/exercises/previous", async (request) => {
     const query = z.object({ name: z.string().min(1), before: z.coerce.date().optional() }).parse(request.query);
-    return options.repository.previousExercisePerformance(compatibilityUserId, query.name, query.before);
+    return options.repository.previousExercisePerformance(getUserId(request), query.name, query.before);
   });
   app.get("/v1/exercises/history", async (request) => {
     const query = z.object({ name: z.string().min(1), limit: z.coerce.number().int().min(1).max(500).default(100) }).parse(request.query);
-    return options.repository.exerciseHistory(compatibilityUserId, query.name, query.limit);
+    return options.repository.exerciseHistory(getUserId(request), query.name, query.limit);
   });
 
-  app.get("/v1/settings", async () => {
-    return options.repository.getSettings(compatibilityUserId);
+  app.get("/v1/settings", async (request) => {
+    return options.repository.getSettings(getUserId(request));
   });
   app.patch("/v1/settings", async (request) => {
     const patch = settingsPatchSchema.parse(request.body);
-    return options.repository.updateSettings(compatibilityUserId, patch);
+    return options.repository.updateSettings(getUserId(request), patch);
   });
-  app.get("/v1/notification-preferences", async () => {
-    return options.repository.listNotificationPreferences(compatibilityUserId);
+  app.get("/v1/notification-preferences", async (request) => {
+    return options.repository.listNotificationPreferences(getUserId(request));
   });
   app.put("/v1/notification-preferences/:type", async (request) => {
     const type = z.string().parse((request.params as { type?: unknown }).type);
     const preference = notificationPreferenceSchema.parse({ ...(request.body as object), type });
-    return options.repository.upsertNotificationPreference(compatibilityUserId, preference);
+    return options.repository.upsertNotificationPreference(getUserId(request), preference);
   });
 
   return app;

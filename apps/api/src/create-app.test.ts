@@ -144,4 +144,177 @@ describe("Health API", () => {
     await app.close();
   });
 
+  describe("Stage 2 — Secure WhatsApp User Routing & Machine Token Boundaries", () => {
+    const webToken = "web-secret-token-at-least-24-chars";
+    const openclawToken = "openclaw-secret-token-at-least-24-chars";
+    const userA = "00000000-0000-0000-0000-000000000002";
+    const userB = "00000000-0000-0000-0000-000000000003";
+    const approvedGroupId = "123456789-987654@g.us";
+    const unapprovedGroupId = "unapproved-group@g.us";
+
+    const mockRepo = {
+      resolveUser: vi.fn().mockImplementation(async ({ externalIdentifier }) => {
+        if (externalIdentifier === "+60123456789") {
+          return { resolved: true, user: { id: userA, role: "primary", active: true } };
+        }
+        if (externalIdentifier === "+60198765432") {
+          return { resolved: true, user: { id: userB, role: "partner", active: true } };
+        }
+        if (externalIdentifier === "+60177778888") {
+          return { resolved: false, reason: "user_inactive_or_missing" };
+        }
+        return { resolved: false, reason: "unknown_external_identity" };
+      }),
+      listRecentMeals: vi.fn().mockResolvedValue([]),
+      createMeal: vi.fn().mockImplementation(async (userId, input) => ({ id: "meal-1", userId, ...input })),
+    } as unknown as HealthRepository;
+
+    const authApp = createApp({
+      repository: mockRepo,
+      webToken,
+      openclawToken,
+      allowedGroupIds: [approvedGroupId],
+      logger: false,
+    });
+
+    it("allows web token requests without sender headers and binds to primary compatibility user", async () => {
+      const res = await authApp.inject({
+        method: "GET",
+        url: "/v1/meals/recent",
+        headers: { authorization: `Bearer ${webToken}` },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(mockRepo.listRecentMeals).toHaveBeenCalledWith(userA, 20);
+    });
+
+    it("rejects web token requests that attempt to supply sender identity headers", async () => {
+      const res = await authApp.inject({
+        method: "GET",
+        url: "/v1/meals/recent",
+        headers: {
+          authorization: `Bearer ${webToken}`,
+          "x-clawfit-sender-id": "+60123456789",
+          "x-clawfit-sender-provider": "whatsapp",
+        },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error.code).toBe("FORBIDDEN");
+      expect(res.json().error.message).toContain("Sender headers not permitted for web client");
+    });
+
+    it("routes OpenClaw requests for recognized User A to User A", async () => {
+      const res = await authApp.inject({
+        method: "GET",
+        url: "/v1/meals/recent",
+        headers: {
+          authorization: `Bearer ${openclawToken}`,
+          "x-clawfit-sender-id": "+60123456789",
+          "x-clawfit-sender-provider": "whatsapp",
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(mockRepo.listRecentMeals).toHaveBeenCalledWith(userA, 20);
+    });
+
+    it("routes OpenClaw requests for recognized User B to User B", async () => {
+      const res = await authApp.inject({
+        method: "GET",
+        url: "/v1/meals/recent",
+        headers: {
+          authorization: `Bearer ${openclawToken}`,
+          "x-clawfit-sender-id": "+60198765432",
+          "x-clawfit-sender-provider": "whatsapp",
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(mockRepo.listRecentMeals).toHaveBeenCalledWith(userB, 20);
+    });
+
+    it("denies OpenClaw requests for unknown senders with a safe domain message", async () => {
+      const res = await authApp.inject({
+        method: "GET",
+        url: "/v1/meals/recent",
+        headers: {
+          authorization: `Bearer ${openclawToken}`,
+          "x-clawfit-sender-id": "+60100000000",
+          "x-clawfit-sender-provider": "whatsapp",
+        },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error.code).toBe("UNRESOLVED_SENDER_IDENTITY");
+      expect(res.json().error.message).toBe("This WhatsApp account isn't linked to a ClawFit profile yet.");
+    });
+
+    it("denies OpenClaw requests for inactive senders with a safe domain message", async () => {
+      const res = await authApp.inject({
+        method: "GET",
+        url: "/v1/meals/recent",
+        headers: {
+          authorization: `Bearer ${openclawToken}`,
+          "x-clawfit-sender-id": "+60177778888",
+          "x-clawfit-sender-provider": "whatsapp",
+        },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error.code).toBe("INACTIVE_USER");
+      expect(res.json().error.message).toBe("This ClawFit profile is inactive.");
+    });
+
+    it("denies OpenClaw group messages from unapproved WhatsApp groups", async () => {
+      const res = await authApp.inject({
+        method: "GET",
+        url: "/v1/meals/recent",
+        headers: {
+          authorization: `Bearer ${openclawToken}`,
+          "x-clawfit-sender-id": "+60123456789",
+          "x-clawfit-conversation-id": unapprovedGroupId,
+        },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error.code).toBe("UNAUTHORIZED_GROUP");
+      expect(res.json().error.message).toContain("not authorized");
+    });
+
+    it("allows OpenClaw group messages from approved WhatsApp groups with recognized senders", async () => {
+      const res = await authApp.inject({
+        method: "GET",
+        url: "/v1/meals/recent",
+        headers: {
+          authorization: `Bearer ${openclawToken}`,
+          "x-clawfit-sender-id": "+60123456789",
+          "x-clawfit-conversation-id": approvedGroupId,
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(mockRepo.listRecentMeals).toHaveBeenCalledWith(userA, 20);
+    });
+
+    it("strictly ignores caller attempts to supply an arbitrary user ID via headers or query", async () => {
+      const res = await authApp.inject({
+        method: "GET",
+        url: `/v1/meals/recent?userId=${userB}`,
+        headers: {
+          authorization: `Bearer ${openclawToken}`,
+          "x-clawfit-sender-id": "+60123456789",
+          "x-user-id": userB,
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      // Resolved to User A based on sender, completely ignoring User B from query/headers
+      expect(mockRepo.listRecentMeals).toHaveBeenCalledWith(userA, 20);
+    });
+
+    it("rejects OpenClaw user operations when sender ID header is missing", async () => {
+      const res = await authApp.inject({
+        method: "GET",
+        url: "/v1/meals/recent",
+        headers: {
+          authorization: `Bearer ${openclawToken}`,
+        },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error.code).toBe("MISSING_SENDER_IDENTITY");
+    });
+  });
 });
+

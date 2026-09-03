@@ -85,21 +85,59 @@ Investigation of the installed environment (`openclaw@2026.7.1-2` and `@openclaw
 - In WhatsApp direct messages: `msg.key.remoteJid` is `<phone>@s.whatsapp.net`, and `toolContext.requesterSenderId` delivers the sender's E.164 phone.
 - In WhatsApp groups: `msg.key.remoteJid` is the group JID (`<groupId>@g.us`), while `msg.key.participant` contains the actual sender's JID (`<phone>@s.whatsapp.net` or `<lid>@lid`).
 - OpenClaw resolves the individual sender and exposes it as `toolContext.requesterSenderId`.
-- **Verdict**: WhatsApp group messages are **not blocked**. In Stage 2, OpenClaw tools can resolve the caller via `toolContext.requesterSenderId` and map them via `resolveUser`.
+- **Verdict**: WhatsApp group messages are **not blocked**. In Stage 2, OpenClaw tools resolve the caller via `toolContext.requesterSenderId` and map them via `resolveUser`.
 
 ---
 
-## 5. Future Milestones Roadmap
+## 5. Stage 2 — Secure WhatsApp User Routing Implementation
 
-The following stages are explicitly future work and not implemented in Stage 1:
+Stage 2 introduces secure identity routing from WhatsApp interactions to isolated user records:
 
-- **Stage 2 — Client, API, and OpenClaw User Routing**:
-  - OpenClaw plugin sender extraction from `toolContext.requesterSenderId`.
-  - Resolution of inbound sender to ClawFit user via `resolveUser`.
-  - Route execution with user-scoped API calls.
-  - Client authentication and user selection in Web client.
+### Core Routing Architecture
+```
+toolContext.requesterSenderId
+         ↓
+Health API external identity resolution (x-clawfit-sender-id, x-clawfit-sender-provider)
+         ↓
+ClawFit userId
+         ↓
+HealthRepository (explicitly user-scoped operation)
+```
+
+### Machine Token Separation & Security Boundaries
+- **Web Machine Token (`HEALTH_API_WEB_TOKEN`)**: Used exclusively by the Web backend. Binds to the Primary User compatibility context temporarily. Any attempt by the Web client to supply `x-clawfit-sender-*` headers is denied with HTTP 403 `FORBIDDEN`.
+- **OpenClaw Machine Token (`HEALTH_API_OPENCLAW_TOKEN`)**: Used exclusively by the OpenClaw Gateway. Injects `x-clawfit-sender-provider` and `x-clawfit-sender-id` from `toolContext.requesterSenderId`.
+- **Arbitrary Impersonation Prohibited**: The API rejects or ignores user-supplied user IDs (`x-user-id`, `?userId=`). User context is derived strictly by resolving the authenticated sender.
+
+### Conversation & Group Allowlisting
+- WhatsApp group messages (identified by conversation target ending with `@g.us`) are checked against `CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS`.
+- Unapproved groups are blocked with `"This WhatsApp group is not authorized for ClawFit health tracking."`
+- Direct messages require an active, recognized sender.
+
+### External Identity Normalization & Resolution
+- Identifiers are normalized via `normalizeWhatsAppIdentifier()`:
+  - Phone JIDs (`60123456789@s.whatsapp.net`) and raw digits (`60123456789`) map to canonical E.164 (`+60123456789`).
+  - WhatsApp LIDs (`12345678901234@lid`) are stored and resolved in lowercase.
+  - Unknown senders receive safe domain error: `"This WhatsApp account isn't linked to a ClawFit profile yet."`
+  - Inactive users (`active = false`) are rejected with `"This ClawFit profile is inactive."`
+
+### Administrative Bootstrap
+Identities are mapped explicitly using the administrative tool:
+```bash
+pnpm identity:link --user <primary|partner> --phone <e164-phone> [--lid <lid>]
+# or batch from environment:
+pnpm identity:link --from-env
+```
+No first-message auto-enrollment is permitted.
+
+---
+
+## 6. Future Milestones Roadmap
+
+The following stages are explicitly future work:
+
 - **Stage 3 — Always-On OpenClaw Hosting**:
-  - Transitioning OpenClaw gateway from local execution to persistent hosted infrastructure.
+  - Transitioning OpenClaw gateway from local execution to persistent hosted infrastructure (e.g. VPS).
   - Resilient webhook delivery and socket reconnection.
 - **Stage 4 — Shared Dashboard**:
   - Web UI views for viewing partner nutrition, workouts, and household streaks.

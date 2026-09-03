@@ -1,6 +1,15 @@
 import { createHash } from "node:crypto";
 
-export type HealthPluginConfig = { apiUrl?: string };
+export type HealthPluginConfig = {
+  apiUrl?: string;
+  allowedGroupIds?: string[];
+};
+
+export type SenderContext = {
+  provider?: string;
+  senderId?: string;
+  conversationId?: string;
+};
 
 type PendingScopeContext = {
   messageChannel?: string;
@@ -14,6 +23,7 @@ type HealthFetchOptions = {
   body?: unknown;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
+  sender?: SenderContext;
 };
 
 export class HealthApiNetworkError extends Error {
@@ -43,15 +53,28 @@ export function withPendingMealScope(path: string, scopeKey: string) {
 }
 
 export async function healthFetch<T = unknown>(config: HealthPluginConfig, path: string, options: HealthFetchOptions = {}): Promise<T> {
-  const token = process.env.HEALTH_API_TOKEN;
-  if (!token) throw new Error("HEALTH_API_TOKEN is not available to the OpenClaw Gateway");
+  const token = process.env.HEALTH_API_OPENCLAW_TOKEN ?? process.env.HEALTH_API_TOKEN;
+  if (!token) throw new Error("HEALTH_API_OPENCLAW_TOKEN or HEALTH_API_TOKEN is not available to the OpenClaw Gateway");
   const apiUrl = config.apiUrl ?? process.env.HEALTH_API_URL ?? "http://127.0.0.1:4000";
   const start = performance.now();
   let response: Response;
+
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${token}`,
+    ...(options.body === undefined ? {} : { "content-type": "application/json" }),
+  };
+  if (options.sender?.senderId) {
+    headers["x-clawfit-sender-provider"] = options.sender.provider ?? "whatsapp";
+    headers["x-clawfit-sender-id"] = options.sender.senderId;
+  }
+  if (options.sender?.conversationId) {
+    headers["x-clawfit-conversation-id"] = options.sender.conversationId;
+  }
+
   try {
     response = await (options.fetchImpl ?? fetch)(new URL(path, apiUrl), {
       method: options.method ?? "GET",
-      headers: { authorization: `Bearer ${token}`, ...(options.body === undefined ? {} : { "content-type": "application/json" }) },
+      headers,
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
       signal: options.signal ?? AbortSignal.timeout(30_000),
     });
