@@ -77,7 +77,13 @@ function createSenderTool<TParams extends TSchema>(
         description: options.description,
         parameters: options.parameters,
         execute: async (_toolCallId: string, rawParams: unknown, signal?: AbortSignal) => {
-          if (conversationId && conversationId.includes("@g.us")) {
+          if (!conversationId) {
+            return jsonResult({
+              error: "Missing WhatsApp conversation context. Request cannot be processed.",
+            });
+          }
+
+          if (conversationId.includes("@g.us")) {
             const allowedGroupIds = config?.allowedGroupIds ??
               (process.env.CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS
                 ? process.env.CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS.split(",").map((s) => s.trim()).filter(Boolean)

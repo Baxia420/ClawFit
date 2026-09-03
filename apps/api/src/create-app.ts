@@ -41,13 +41,39 @@ export type CreateAppOptions = {
 };
 
 export function createApp(options: CreateAppOptions) {
-  const app = Fastify({ logger: options.logger === false ? false : { redact: ["req.headers.authorization", "headers.x-goog-api-key"] } });
+  if (options.webToken && options.openclawToken && options.webToken === options.openclawToken) {
+    throw new Error("HEALTH_API_WEB_TOKEN and HEALTH_API_OPENCLAW_TOKEN must be configured and different from each other");
+  }
+
+  const app = Fastify({
+    logger:
+      options.logger === false
+        ? false
+        : {
+            redact: [
+              "req.headers.authorization",
+              "headers.x-goog-api-key",
+              "req.headers['x-clawfit-sender-id']",
+              "req.headers['x-clawfit-conversation-id']",
+              "headers['x-clawfit-sender-id']",
+              "headers['x-clawfit-conversation-id']",
+              "req.headers['x-clawfit-sender-provider']",
+              "headers['x-clawfit-sender-provider']",
+            ],
+          },
+  });
   const compatibilityUserId = DEFAULT_PRIMARY_USER_ID;
 
   app.decorateRequest("userId", undefined);
   app.decorateRequest("clientType", undefined);
 
-  const getUserId = (request: FastifyRequest): string => request.userId || compatibilityUserId;
+  const requireRequestUserId = (request: FastifyRequest): string => {
+    const userId = request.userId;
+    if (!userId) {
+      throw new Error("UNAUTHENTICATED_REQUEST_CONTEXT: User ID context is missing on request");
+    }
+    return userId;
+  };
 
   app.addHook("onRequest", async (request, reply) => {
     (request as unknown as { startTime: number }).startTime = performance.now();
@@ -57,7 +83,7 @@ export function createApp(options: CreateAppOptions) {
     const provided = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
 
     const webToken = options.webToken ?? options.apiToken ?? "";
-    const openclawToken = options.openclawToken ?? options.apiToken ?? "";
+    const openclawToken = options.openclawToken ?? "";
 
     const isWeb = Boolean(webToken && safeEqual(provided, webToken));
     const isOpenClaw = Boolean(openclawToken && safeEqual(provided, openclawToken));
@@ -76,19 +102,34 @@ export function createApp(options: CreateAppOptions) {
 
     // Web client handling
     if (isWeb && !isOpenClaw) {
-      if (senderId || senderProvider) {
+      if (senderId || senderProvider || conversationId) {
         return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Sender headers not permitted for web client" } });
       }
-      (request as unknown as { clientType: string }).clientType = "web";
-      (request as unknown as { userId: string }).userId = compatibilityUserId;
+      request.clientType = "web";
+      request.userId = compatibilityUserId;
       return;
     }
 
-    // OpenClaw client handling (or dual-configured dev fallback)
-    (request as unknown as { clientType: string }).clientType = "openclaw";
+    // OpenClaw client handling
+    request.clientType = "openclaw";
+
+    // Public ML estimate route does not require user DB lookup if no sender provided
+    if (request.url === "/v1/nutrition/estimate" && !senderId && !conversationId) {
+      return;
+    }
+
+    // OpenClaw requests for health operations require both sender and conversation context
+    if (!conversationId) {
+      return reply.code(403).send({
+        error: {
+          code: "MISSING_CONVERSATION_IDENTITY",
+          message: "Missing conversation identity header",
+        },
+      });
+    }
 
     // If conversation is a WhatsApp group (@g.us), enforce allowlist
-    if (conversationId && conversationId.includes("@g.us")) {
+    if (conversationId.includes("@g.us")) {
       const allowed = options.allowedGroupIds ?? [];
       if (!allowed.includes(conversationId)) {
         return reply.code(403).send({
@@ -100,19 +141,7 @@ export function createApp(options: CreateAppOptions) {
       }
     }
 
-    // Public ML estimate route does not require user DB lookup
-    if (request.url === "/v1/nutrition/estimate" && !senderId) {
-      return;
-    }
-
-    // All health data routes require valid, resolved sender
     if (!senderId) {
-      // In backwards-compatibility mode (single token without sender headers from legacy caller)
-      if (isWeb) {
-        (request as unknown as { clientType: string }).clientType = "web";
-        (request as unknown as { userId: string }).userId = compatibilityUserId;
-        return;
-      }
       return reply.code(403).send({
         error: {
           code: "MISSING_SENDER_IDENTITY",
@@ -127,23 +156,16 @@ export function createApp(options: CreateAppOptions) {
     });
 
     if (!resolution.resolved) {
-      if (resolution.reason === "user_inactive_or_missing") {
-        return reply.code(403).send({
-          error: {
-            code: "INACTIVE_USER",
-            message: "This ClawFit profile is inactive.",
-          },
-        });
-      }
+      const isInactive = resolution.reason === "user_inactive_or_missing";
       return reply.code(403).send({
         error: {
-          code: "UNRESOLVED_SENDER_IDENTITY",
-          message: "This WhatsApp account isn't linked to a ClawFit profile yet.",
+          code: isInactive ? "INACTIVE_USER" : "UNRESOLVED_SENDER_IDENTITY",
+          message: isInactive ? "This ClawFit profile is inactive." : "This WhatsApp account isn't linked to a ClawFit profile yet.",
         },
       });
     }
 
-    (request as unknown as { userId: string }).userId = resolution.user.id;
+    request.userId = resolution.user.id;
   });
 
   app.addHook("onResponse", async (request, reply) => {
@@ -191,143 +213,143 @@ export function createApp(options: CreateAppOptions) {
 
   app.post("/v1/meals", async (request, reply) => {
     const input = mealInputSchema.parse(request.body);
-    return reply.code(201).send(await options.repository.createMeal(getUserId(request), input));
+    return reply.code(201).send(await options.repository.createMeal(requireRequestUserId(request), input));
   });
   app.post("/v1/meals/pending", async (request, reply) => {
     const input = pendingMealInputSchema.parse(request.body);
-    return reply.code(201).send(await options.repository.createPendingMeal(getUserId(request), input));
+    return reply.code(201).send(await options.repository.createPendingMeal(requireRequestUserId(request), input));
   });
   app.get("/v1/meals/pending/latest", async (request) => {
     const scopeKey = pendingMealScopeSchema.parse(request.query).scopeKey;
-    return { pending: await options.repository.getLatestPendingMeal(getUserId(request), scopeKey) };
+    return { pending: await options.repository.getLatestPendingMeal(requireRequestUserId(request), scopeKey) };
   });
   app.get("/v1/meals/pending/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const scopeKey = pendingMealScopeSchema.parse(request.query).scopeKey;
-    return options.repository.getPendingMeal(getUserId(request), id, scopeKey);
+    return options.repository.getPendingMeal(requireRequestUserId(request), id, scopeKey);
   });
   app.patch("/v1/meals/pending/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const body = pendingMealPatchSchema.and(pendingMealScopeSchema).parse(request.body);
     const { scopeKey, ...patch } = body;
-    return options.repository.updatePendingMeal(getUserId(request), id, scopeKey, patch);
+    return options.repository.updatePendingMeal(requireRequestUserId(request), id, scopeKey, patch);
   });
   app.delete("/v1/meals/pending/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const scopeKey = pendingMealScopeSchema.parse(request.query).scopeKey;
-    return options.repository.cancelPendingMeal(getUserId(request), id, scopeKey);
+    return options.repository.cancelPendingMeal(requireRequestUserId(request), id, scopeKey);
   });
   app.post("/v1/meals/pending/:id/confirm", async (request, reply) => {
     const params = uuidParam.parse(request.params);
     const body = confirmPendingMealSchema.parse(request.body ?? {});
-    return reply.code(200).send(await options.repository.confirmPendingMeal(getUserId(request), params.id, body));
+    return reply.code(200).send(await options.repository.confirmPendingMeal(requireRequestUserId(request), params.id, body));
   });
   app.get("/v1/meals/recent", async (request) => {
     const limit = listQuery.parse(request.query).limit;
-    return options.repository.listRecentMeals(getUserId(request), limit);
+    return options.repository.listRecentMeals(requireRequestUserId(request), limit);
   });
   app.get("/v1/meals/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
-    return options.repository.getMeal(getUserId(request), id);
+    return options.repository.getMeal(requireRequestUserId(request), id);
   });
   app.patch("/v1/meals/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const patch = mealPatchSchema.parse(request.body);
-    return options.repository.updateMeal(getUserId(request), id, patch);
+    return options.repository.updateMeal(requireRequestUserId(request), id, patch);
   });
   app.delete("/v1/meals/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
-    return options.repository.deleteMeal(getUserId(request), id);
+    return options.repository.deleteMeal(requireRequestUserId(request), id);
   });
   app.get("/v1/nutrition/daily", async (request) => {
     const query = dateQuery.parse(request.query);
     const { start, end } = zonedDayRange(query.date, query.timezone);
-    const result = await options.repository.dailyNutrition(getUserId(request), start, end);
+    const result = await options.repository.dailyNutrition(requireRequestUserId(request), start, end);
     return { ...result, date: query.date };
   });
   app.get("/v1/nutrition/trend", async (request) => {
     const query = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query);
     const end = new Date();
     const start = new Date(end.getTime() - query.days * 86_400_000);
-    return options.repository.nutritionTrend(getUserId(request), start, end);
+    return options.repository.nutritionTrend(requireRequestUserId(request), start, end);
   });
 
   app.post("/v1/food-presets", async (request, reply) => {
     const body = z.object({ name: z.string().min(1).max(160), meal: mealInputSchema }).parse(request.body);
-    return reply.code(201).send(await options.repository.savePreset(getUserId(request), body.name, body.meal));
+    return reply.code(201).send(await options.repository.savePreset(requireRequestUserId(request), body.name, body.meal));
   });
   app.get("/v1/food-presets", async (request) => {
     const query = z.object({ query: z.string().max(160).default("") }).parse(request.query).query;
-    return options.repository.findPresets(getUserId(request), query);
+    return options.repository.findPresets(requireRequestUserId(request), query);
   });
   app.patch("/v1/food-presets/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const patch = foodPresetPatchSchema.parse(request.body);
-    return options.repository.updatePreset(getUserId(request), id, patch);
+    return options.repository.updatePreset(requireRequestUserId(request), id, patch);
   });
   app.delete("/v1/food-presets/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
-    return options.repository.deletePreset(getUserId(request), id);
+    return options.repository.deletePreset(requireRequestUserId(request), id);
   });
 
   app.post("/v1/workouts", async (request, reply) => {
     const body = startWorkoutSchema.parse(request.body);
     const payload = { name: body.name, idempotencyKey: body.idempotencyKey, ...(body.startedAt ? { startedAt: body.startedAt } : {}) };
-    return reply.code(201).send(await options.repository.startWorkout(getUserId(request), payload));
+    return reply.code(201).send(await options.repository.startWorkout(requireRequestUserId(request), payload));
   });
   app.get("/v1/workouts/active", async (request) => {
-    return options.repository.getActiveWorkout(getUserId(request));
+    return options.repository.getActiveWorkout(requireRequestUserId(request));
   });
   app.get("/v1/workouts/history", async (request) => {
     const limit = listQuery.parse(request.query).limit;
-    return options.repository.workoutHistory(getUserId(request), limit);
+    return options.repository.workoutHistory(requireRequestUserId(request), limit);
   });
   app.get("/v1/workouts/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
-    return options.repository.getWorkout(getUserId(request), id);
+    return options.repository.getWorkout(requireRequestUserId(request), id);
   });
   app.post("/v1/workouts/:id/sets", async (request, reply) => {
     const id = uuidParam.parse(request.params).id;
     const body = workoutSetInputSchema.parse(request.body);
-    return reply.code(201).send(await options.repository.addWorkoutSet(getUserId(request), id, body));
+    return reply.code(201).send(await options.repository.addWorkoutSet(requireRequestUserId(request), id, body));
   });
   app.patch("/v1/workout-sets/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const patch = workoutSetPatchSchema.parse(request.body);
-    return options.repository.updateWorkoutSet(getUserId(request), id, patch);
+    return options.repository.updateWorkoutSet(requireRequestUserId(request), id, patch);
   });
   app.delete("/v1/workout-sets/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
-    return options.repository.deleteWorkoutSet(getUserId(request), id);
+    return options.repository.deleteWorkoutSet(requireRequestUserId(request), id);
   });
   app.post("/v1/workouts/:id/finish", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const body = z.object({ finishedAt: z.coerce.date().optional() }).parse(request.body ?? {});
-    return options.repository.finishWorkout(getUserId(request), id, body.finishedAt);
+    return options.repository.finishWorkout(requireRequestUserId(request), id, body.finishedAt);
   });
   app.get("/v1/exercises/previous", async (request) => {
     const query = z.object({ name: z.string().min(1), before: z.coerce.date().optional() }).parse(request.query);
-    return options.repository.previousExercisePerformance(getUserId(request), query.name, query.before);
+    return options.repository.previousExercisePerformance(requireRequestUserId(request), query.name, query.before);
   });
   app.get("/v1/exercises/history", async (request) => {
     const query = z.object({ name: z.string().min(1), limit: z.coerce.number().int().min(1).max(500).default(100) }).parse(request.query);
-    return options.repository.exerciseHistory(getUserId(request), query.name, query.limit);
+    return options.repository.exerciseHistory(requireRequestUserId(request), query.name, query.limit);
   });
 
   app.get("/v1/settings", async (request) => {
-    return options.repository.getSettings(getUserId(request));
+    return options.repository.getSettings(requireRequestUserId(request));
   });
   app.patch("/v1/settings", async (request) => {
     const patch = settingsPatchSchema.parse(request.body);
-    return options.repository.updateSettings(getUserId(request), patch);
+    return options.repository.updateSettings(requireRequestUserId(request), patch);
   });
   app.get("/v1/notification-preferences", async (request) => {
-    return options.repository.listNotificationPreferences(getUserId(request));
+    return options.repository.listNotificationPreferences(requireRequestUserId(request));
   });
   app.put("/v1/notification-preferences/:type", async (request) => {
     const type = z.string().parse((request.params as { type?: unknown }).type);
     const preference = notificationPreferenceSchema.parse({ ...(request.body as object), type });
-    return options.repository.upsertNotificationPreference(getUserId(request), preference);
+    return options.repository.upsertNotificationPreference(requireRequestUserId(request), preference);
   });
 
   return app;

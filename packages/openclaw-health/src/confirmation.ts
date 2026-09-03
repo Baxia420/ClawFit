@@ -27,6 +27,9 @@ export function sanitizeUserFacingError(text: string | null | undefined): string
   if (text.includes("UNAUTHORIZED_GROUP:") || text.includes("This WhatsApp group is not authorized for ClawFit health tracking.")) {
     return "This WhatsApp group is not authorized for ClawFit health tracking.";
   }
+  if (text.includes("MISSING_CONVERSATION_IDENTITY:") || text.includes("Missing WhatsApp conversation context")) {
+    return "Missing WhatsApp conversation context. Request cannot be processed.";
+  }
 
   const hasRawError =
     /RESOURCE_EXHAUSTED/i.test(text) ||

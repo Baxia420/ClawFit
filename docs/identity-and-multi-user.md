@@ -105,14 +105,24 @@ HealthRepository (explicitly user-scoped operation)
 ```
 
 ### Machine Token Separation & Security Boundaries
-- **Web Machine Token (`HEALTH_API_WEB_TOKEN`)**: Used exclusively by the Web backend. Binds to the Primary User compatibility context temporarily. Any attempt by the Web client to supply `x-clawfit-sender-*` headers is denied with HTTP 403 `FORBIDDEN`.
-- **OpenClaw Machine Token (`HEALTH_API_OPENCLAW_TOKEN`)**: Used exclusively by the OpenClaw Gateway. Injects `x-clawfit-sender-provider` and `x-clawfit-sender-id` from `toolContext.requesterSenderId`.
+- **Web Machine Token (`HEALTH_API_WEB_TOKEN`)**: Used exclusively by the Web backend. Binds to the Primary User compatibility context temporarily. Any attempt by the Web client to supply `x-clawfit-sender-*` or `x-clawfit-conversation-*` headers is denied with HTTP 403 `FORBIDDEN`.
+- **OpenClaw Machine Token (`HEALTH_API_OPENCLAW_TOKEN`)**: Used exclusively by the OpenClaw Gateway. Injects `x-clawfit-sender-provider`, `x-clawfit-sender-id`, and `x-clawfit-conversation-id`.
+- **Distinct Token Requirement**: The Health API enforces that `HEALTH_API_WEB_TOKEN` and `HEALTH_API_OPENCLAW_TOKEN` are both configured, at least 24 characters, and different from each other. Startup fails immediately if they are equal.
+- **Fail-Closed Context**: Handlers invoke `requireRequestUserId(request)`. If authenticated user context is missing, the request fails with an error rather than silently defaulting to the Primary User.
+- **Conversation Context Enforcement**: All OpenClaw health requests require both `x-clawfit-sender-id` and `x-clawfit-conversation-id`. Missing conversation context fails closed with HTTP 403 `MISSING_CONVERSATION_IDENTITY`.
+- **Log Privacy & Redaction**: The Fastify logger explicitly redacts `x-clawfit-sender-id` and `x-clawfit-conversation-id` alongside `Authorization` tokens to prevent leaking phone numbers, LIDs, and group JIDs in application logs.
 - **Arbitrary Impersonation Prohibited**: The API rejects or ignores user-supplied user IDs (`x-user-id`, `?userId=`). User context is derived strictly by resolving the authenticated sender.
 
 ### Conversation & Group Allowlisting
-- WhatsApp group messages (identified by conversation target ending with `@g.us`) are checked against `CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS`.
+- WhatsApp group messages (identified by conversation target containing `@g.us`) are checked against `CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS`.
 - Unapproved groups are blocked with `"This WhatsApp group is not authorized for ClawFit health tracking."`
-- Direct messages require an active, recognized sender.
+- Direct messages require an active, recognized sender and recognized conversation target.
+- OpenClaw WhatsApp channel configuration (`scripts/setup-openclaw.ts`):
+  - `channels.whatsapp.dmPolicy = "allowlist"`
+  - `channels.whatsapp.allowFrom = [PrimaryE164, PartnerE164]`
+  - `channels.whatsapp.groupPolicy = "allowlist"`
+  - `channels.whatsapp.groupAllowFrom = [PrimaryE164, PartnerE164]`
+  - `channels.whatsapp.groups = { "<allowedGroupJid>": { requireMention: false } }`
 
 ### External Identity Normalization & Resolution
 - Identifiers are normalized via `normalizeWhatsAppIdentifier()`:
@@ -132,13 +142,34 @@ No first-message auto-enrollment is permitted.
 
 ---
 
-## 6. Future Milestones Roadmap
+## 6. Manual WhatsApp Acceptance Test Plan (Post-Stage 3)
+
+> [!IMPORTANT]
+> This acceptance test must be executed manually against live WhatsApp once Stage 3 persistent hosting is complete. Do not insert real phone numbers or group JIDs into repository files or test artifacts.
+
+| Test ID | Scenario | Input / Action | Expected Result |
+|---|---|---|---|
+| **MAT-01** | Primary DM routing | Primary user sends "log 2 boiled eggs" in bot DM | Draft is scoped to Primary user; confirmation logs meal to Primary history only. |
+| **MAT-02** | Partner DM routing | Partner user sends "log 1 chicken breast" in bot DM | Draft is scoped to Partner user; confirmation logs meal to Partner history only. |
+| **MAT-03** | Primary group meal routing | Primary user posts "had a protein shake" in approved group | Bot responds to Primary; draft is owned by Primary. Partner's daily totals are unchanged. |
+| **MAT-04** | Partner group meal routing | Partner user posts "had a bowl of oats" in approved group | Bot responds to Partner; draft is owned by Partner. Primary's daily totals are unchanged. |
+| **MAT-05** | Simultaneous pending meals | Both users post food in the shared group at the same time | Two separate pending meal drafts exist in the database, isolated by `userId` and conversation scope. |
+| **MAT-06** | Independent confirmations | Primary confirms ("yes, log it") while Partner asks for changes | Primary's meal logs immediately; Partner's draft remains pending and updates correctly. |
+| **MAT-07** | Simultaneous workouts | Primary starts workout "Push Day"; Partner starts "Leg Day" | Both workouts remain active concurrently in DB under distinct `userId`s without collision. |
+| **MAT-08** | Unknown sender denial | Third party in group or DM messages the bot | Bot replies: "This WhatsApp account isn't linked to a ClawFit profile yet." No data is exposed. |
+| **MAT-09** | Unauthorized group denial | Bot is added to an unapproved group and messaged | Bot replies: "This WhatsApp group is not authorized for ClawFit health tracking." No operations run. |
+| **MAT-10** | Restart/reconnect persistence | Restart API and OpenClaw gateway; send confirmation | Unconfirmed pending meal draft persists in DB and confirms cleanly after restart. |
+
+---
+
+## 7. Future Milestones Roadmap
 
 The following stages are explicitly future work:
 
 - **Stage 3 — Always-On OpenClaw Hosting**:
   - Transitioning OpenClaw gateway from local execution to persistent hosted infrastructure (e.g. VPS).
-  - Resilient webhook delivery and socket reconnection.
-- **Stage 4 — Shared Dashboard**:
-  - Web UI views for viewing partner nutrition, workouts, and household streaks.
-  - Permissions model for household shared data visibility.
+  - Production process supervision, log rotation, and automated reconnects.
+- **Stage 4 — Two-User Shared Dashboard**:
+  - Web UI partner view allowing mutual read access to daily nutrition and workouts within the household.
+  - Multi-user web authentication.
+  - Household shared data visibility and permissions.

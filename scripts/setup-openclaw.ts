@@ -32,11 +32,21 @@ run("config", "set", "agents.defaults.compaction", JSON.stringify({ mode: "safeg
 run("config", "set", "messages.suppressToolErrors", "true", "--strict-json");
 
 const whatsappAllowFrom = parseWhatsAppAllowFrom(process.env.CLAWFIT_WHATSAPP_ALLOW_FROM);
+const allowedGroupIds = parseWhatsAppAllowedGroupIds(process.env.CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS);
+
 if (whatsappAllowFrom.length > 0) {
   run("config", "set", "channels.whatsapp.dmPolicy", "allowlist");
-  run("config", "set", "channels.whatsapp.groupPolicy", "disabled");
   run("config", "set", "channels.whatsapp.allowFrom", JSON.stringify(whatsappAllowFrom), "--strict-json");
   run("config", "set", "channels.whatsapp.groupAllowFrom", JSON.stringify(whatsappAllowFrom), "--strict-json");
+
+  if (allowedGroupIds.length > 0) {
+    run("config", "set", "channels.whatsapp.groupPolicy", "allowlist");
+    const groupsConfig = Object.fromEntries(allowedGroupIds.map((id) => [id, { requireMention: false }]));
+    run("config", "set", "channels.whatsapp.groups", JSON.stringify(groupsConfig), "--strict-json");
+  } else {
+    run("config", "set", "channels.whatsapp.groupPolicy", "disabled");
+    run("config", "set", "channels.whatsapp.groups", "{}", "--strict-json");
+  }
 } else {
   console.warn("CLAWFIT_WHATSAPP_ALLOW_FROM is not set; existing WhatsApp sender policy was left unchanged.");
 }
@@ -75,9 +85,20 @@ function parseWhatsAppAllowFrom(value: string | undefined) {
   return [...new Set(entries as string[])];
 }
 
+function parseWhatsAppAllowedGroupIds(value: string | undefined): string[] {
+  if (!value?.trim()) return [];
+  const entries = value.trim().startsWith("[") ? (JSON.parse(value) as unknown) : value.split(",").map((entry) => entry.trim());
+  if (!Array.isArray(entries) || entries.some((entry) => typeof entry !== "string" || !entry)) {
+    throw new Error("CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS must be a comma-separated list or JSON array of WhatsApp group JIDs (e.g. 12345-6789@g.us)");
+  }
+  return [...new Set(entries as string[])];
+}
+
 async function syncGatewayEnv() {
-  const variables = ["GEMINI_API_KEY", "HEALTH_API_TOKEN", "HEALTH_API_URL"] as const;
-  const missing = variables.filter((name) => !process.env[name]);
+  const requiredVars = ["GEMINI_API_KEY", "HEALTH_API_OPENCLAW_TOKEN", "HEALTH_API_URL"] as const;
+  const optionalVars = ["CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS"] as const;
+
+  const missing = requiredVars.filter((name) => !process.env[name]);
   if (missing.length > 0) throw new Error(`Missing required project environment variables: ${missing.join(", ")}`);
 
   const gatewayEnvPath = resolve(homedir(), ".openclaw", ".env");
@@ -89,8 +110,10 @@ async function syncGatewayEnv() {
   }
 
   const lines = content ? content.replace(/\r\n/g, "\n").split("\n") : [];
-  for (const name of variables) {
-    const replacement = `${name}=${process.env[name]}`;
+  for (const name of [...requiredVars, ...optionalVars]) {
+    const value = process.env[name];
+    if (value === undefined) continue;
+    const replacement = `${name}=${value}`;
     const index = lines.findIndex((line) => new RegExp(`^\\s*${name}\\s*=`).test(line));
     if (index === -1) lines.push(replacement);
     else lines[index] = replacement;

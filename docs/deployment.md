@@ -51,7 +51,9 @@ The repository root is required because the API imports `packages/db` and `packa
 Provide these sensitive values in the Render dashboard when the Blueprint prompts for them:
 
 - `DATABASE_URL`: Neon pooled URL.
-- `HEALTH_API_TOKEN`: the same long token used by Web and OpenClaw.
+- `HEALTH_API_WEB_TOKEN`: dedicated token (min 24 chars) used only by Web client (`apps/web`).
+- `HEALTH_API_OPENCLAW_TOKEN`: dedicated token (min 24 chars) used only by OpenClaw Gateway. (Must differ from `HEALTH_API_WEB_TOKEN`).
+- `CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS`: comma-separated list of approved WhatsApp group JIDs (e.g. `123456789-987654@g.us`).
 - `GEMINI_API_KEY`: existing key.
 - `NUTRITION_MODEL_PRIMARY`: only a model verified by `pnpm models:smoke`.
 - `NUTRITION_MODEL_FALLBACK`: optional verified fallback.
@@ -65,7 +67,7 @@ $clawfitApiOrigin = 'https://<render-service>.onrender.com'
 Invoke-RestMethod "$clawfitApiOrigin/health"
 Invoke-RestMethod "$clawfitApiOrigin/ready"
 Invoke-WebRequest "$clawfitApiOrigin/v1/settings" -SkipHttpErrorCheck | Select-Object StatusCode
-$clawfitHeaders = @{ Authorization = "Bearer $env:HEALTH_API_TOKEN" }
+$clawfitHeaders = @{ Authorization = "Bearer $env:HEALTH_API_WEB_TOKEN" }
 Invoke-RestMethod "$clawfitApiOrigin/v1/settings" -Headers $clawfitHeaders
 ```
 
@@ -84,7 +86,7 @@ Import the same GitHub repository as a separate Vercel project:
 Enable access protection appropriate for this private health dashboard. Add server-only variables:
 
 - `HEALTH_API_URL=https://<render-service>.onrender.com`
-- `HEALTH_API_TOKEN=<same token as Render and OpenClaw>`
+- `HEALTH_API_WEB_TOKEN=<dedicated web token matching Render>`
 - `APP_TIMEZONE=Asia/Kuala_Lumpur`
 
 Never create `NEXT_PUBLIC_` versions of secrets. Redeploy after changing environment variables.

@@ -30,7 +30,7 @@ For the production-shaped v1 topology—Render API, Neon PostgreSQL, Vercel web,
 
 ```powershell
 Copy-Item .env.example .env
-# Edit .env and set a long random HEALTH_API_TOKEN.
+# Edit .env and set distinct, long random HEALTH_API_WEB_TOKEN and HEALTH_API_OPENCLAW_TOKEN values.
 docker compose up -d
 pnpm install
 pnpm db:migrate

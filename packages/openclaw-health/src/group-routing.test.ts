@@ -99,6 +99,47 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     expect(JSON.stringify(result)).toContain("This WhatsApp account isn't linked to a ClawFit profile yet.");
   });
 
+  it("blocks tools when WhatsApp conversation context is missing before making an API call", async () => {
+    const fetchMock = vi.fn();
+    const mockApi: any = {
+      registerTool: vi.fn(),
+      on: vi.fn(),
+      runContext: { setRunContext: vi.fn(), getRunContext: vi.fn() },
+    };
+
+    plugin.register(mockApi);
+    const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
+    const findTool = (name: string, toolContext: any) => {
+      for (const fn of registered) {
+        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        if (inst?.name === name) return inst;
+      }
+      throw new Error(`Tool ${name} not found`);
+    };
+
+    const instance = findTool("log_meal", {
+      messageChannel: "whatsapp",
+      requesterSenderId: userAPhone,
+      deliveryContext: undefined, // missing conversation context
+    });
+
+    const result = await instance.execute("call-missing-conv", {
+      label: "Eggs",
+      items: [{ name: "Eggs", portionDescription: "2 eggs" }],
+      calories: { best: 140, low: 130, high: 150 },
+      macros: { proteinG: 12, carbsG: 1, fatG: 10, fiberG: 0 },
+      confidence: "high",
+      uncertaintyReasons: [],
+      occurredAt: new Date().toISOString(),
+      source: "text",
+      rawUserText: "log 2 eggs",
+      idempotencyKey: "meal-no-conv-1",
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).toContain("Missing WhatsApp conversation context");
+  });
+
   it("supports simultaneous meal drafts and confirmations for two users in the same approved group", async () => {
     const drafts = new Map<string, any>();
     const meals = new Map<string, any>();

@@ -5,7 +5,7 @@ metadata:
   openclaw:
     requires:
       env:
-        - HEALTH_API_TOKEN
+        - HEALTH_API_OPENCLAW_TOKEN
 ---
 
 # ClawFit health tracker

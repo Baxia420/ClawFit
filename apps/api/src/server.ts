@@ -31,9 +31,8 @@ const allowedGroupIds = config.CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS
 
 const app = createApp({
   repository,
-  apiToken: config.HEALTH_API_TOKEN,
-  webToken: config.HEALTH_API_WEB_TOKEN ?? config.HEALTH_API_TOKEN,
-  openclawToken: config.HEALTH_API_OPENCLAW_TOKEN ?? config.HEALTH_API_TOKEN,
+  webToken: config.HEALTH_API_WEB_TOKEN,
+  openclawToken: config.HEALTH_API_OPENCLAW_TOKEN,
   allowedGroupIds,
   ...(estimator ? { estimator } : {}),
 });

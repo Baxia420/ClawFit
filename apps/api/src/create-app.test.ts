@@ -202,13 +202,14 @@ describe("Health API", () => {
       expect(res.json().error.message).toContain("Sender headers not permitted for web client");
     });
 
-    it("routes OpenClaw requests for recognized User A to User A", async () => {
+    it("routes OpenClaw requests for recognized User A to User A in DMs", async () => {
       const res = await authApp.inject({
         method: "GET",
         url: "/v1/meals/recent",
         headers: {
           authorization: `Bearer ${openclawToken}`,
           "x-clawfit-sender-id": "+60123456789",
+          "x-clawfit-conversation-id": "+60123456789@s.whatsapp.net",
           "x-clawfit-sender-provider": "whatsapp",
         },
       });
@@ -216,13 +217,14 @@ describe("Health API", () => {
       expect(mockRepo.listRecentMeals).toHaveBeenCalledWith(userA, 20);
     });
 
-    it("routes OpenClaw requests for recognized User B to User B", async () => {
+    it("routes OpenClaw requests for recognized User B to User B in DMs", async () => {
       const res = await authApp.inject({
         method: "GET",
         url: "/v1/meals/recent",
         headers: {
           authorization: `Bearer ${openclawToken}`,
           "x-clawfit-sender-id": "+60198765432",
+          "x-clawfit-conversation-id": "+60198765432@s.whatsapp.net",
           "x-clawfit-sender-provider": "whatsapp",
         },
       });
@@ -237,6 +239,7 @@ describe("Health API", () => {
         headers: {
           authorization: `Bearer ${openclawToken}`,
           "x-clawfit-sender-id": "+60100000000",
+          "x-clawfit-conversation-id": "+60100000000@s.whatsapp.net",
           "x-clawfit-sender-provider": "whatsapp",
         },
       });
@@ -252,6 +255,7 @@ describe("Health API", () => {
         headers: {
           authorization: `Bearer ${openclawToken}`,
           "x-clawfit-sender-id": "+60177778888",
+          "x-clawfit-conversation-id": "+60177778888@s.whatsapp.net",
           "x-clawfit-sender-provider": "whatsapp",
         },
       });
@@ -296,11 +300,11 @@ describe("Health API", () => {
         headers: {
           authorization: `Bearer ${openclawToken}`,
           "x-clawfit-sender-id": "+60123456789",
+          "x-clawfit-conversation-id": approvedGroupId,
           "x-user-id": userB,
         },
       });
       expect(res.statusCode).toBe(200);
-      // Resolved to User A based on sender, completely ignoring User B from query/headers
       expect(mockRepo.listRecentMeals).toHaveBeenCalledWith(userA, 20);
     });
 
@@ -310,10 +314,61 @@ describe("Health API", () => {
         url: "/v1/meals/recent",
         headers: {
           authorization: `Bearer ${openclawToken}`,
+          "x-clawfit-conversation-id": approvedGroupId,
         },
       });
       expect(res.statusCode).toBe(403);
       expect(res.json().error.code).toBe("MISSING_SENDER_IDENTITY");
+    });
+
+    it("rejects OpenClaw user operations when conversation ID header is missing", async () => {
+      const res = await authApp.inject({
+        method: "GET",
+        url: "/v1/meals/recent",
+        headers: {
+          authorization: `Bearer ${openclawToken}`,
+          "x-clawfit-sender-id": "+60123456789",
+        },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error.code).toBe("MISSING_CONVERSATION_IDENTITY");
+    });
+
+    it("fails creation if webToken and openclawToken are equal", () => {
+      const duplicateToken = "duplicate-token-at-least-24-chars";
+      expect(() =>
+        createApp({
+          repository: mockRepo,
+          webToken: duplicateToken,
+          openclawToken: duplicateToken,
+          logger: false,
+        }),
+      ).toThrow("HEALTH_API_WEB_TOKEN and HEALTH_API_OPENCLAW_TOKEN must be configured and different from each other");
+    });
+
+    it("fails closed with 500 error if request.userId is missing rather than defaulting to Primary User", async () => {
+      const isolatedRepo: any = {
+        listRecentMeals: vi.fn().mockResolvedValue([]),
+      };
+      const brokenAuthApp = createApp({
+        repository: isolatedRepo,
+        webToken,
+        openclawToken,
+        logger: false,
+      });
+      // Add a test hook that clears userId after authentication to verify fail-closed invariant
+      brokenAuthApp.addHook("preHandler", async (request) => {
+        request.userId = undefined;
+      });
+
+      const res = await brokenAuthApp.inject({
+        method: "GET",
+        url: "/v1/meals/recent",
+        headers: { authorization: `Bearer ${webToken}` },
+      });
+      expect(res.statusCode).toBe(500);
+      expect(isolatedRepo.listRecentMeals).not.toHaveBeenCalled();
+      await brokenAuthApp.close();
     });
   });
 });
