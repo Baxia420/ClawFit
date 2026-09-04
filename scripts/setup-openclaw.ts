@@ -2,11 +2,16 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadClawFitEnv } from "./load-env.js";
 import { getOpenClawJson, runOpenClaw } from "./openclaw-cli.js";
 
-loadProjectEnv();
+loadClawFitEnv();
 const healthTools = await loadHealthTools();
 await syncGatewayEnv();
+
+// Explicit local gateway configuration (loopback only)
+run("config", "set", "gateway.mode", "local");
+run("config", "set", "gateway.bind", "loopback");
 
 const pluginPath = resolve("packages/openclaw-health");
 const loadPaths = getOpenClawJson<string[]>("plugins.load.paths") ?? [];
@@ -58,15 +63,6 @@ function run(...args: string[]) {
   runOpenClaw(args);
 }
 
-function loadProjectEnv() {
-  const projectEnv = fileURLToPath(new URL("../.env", import.meta.url));
-  try {
-    process.loadEnvFile(projectEnv);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-}
-
 async function loadHealthTools() {
   const policyPath = fileURLToPath(new URL("../openclaw/policy.json", import.meta.url));
   const parsed = JSON.parse(await readFile(policyPath, "utf8")) as { healthTools?: unknown };
@@ -96,7 +92,7 @@ function parseWhatsAppAllowedGroupIds(value: string | undefined): string[] {
 
 async function syncGatewayEnv() {
   const requiredVars = ["GEMINI_API_KEY", "HEALTH_API_OPENCLAW_TOKEN", "HEALTH_API_URL"] as const;
-  const optionalVars = ["CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS"] as const;
+  const optionalVars = ["CLAWFIT_WHATSAPP_ALLOW_FROM", "CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS", "NUTRITION_MODEL_PRIMARY", "NUTRITION_MODEL_FALLBACK"] as const;
 
   const missing = requiredVars.filter((name) => !process.env[name]);
   if (missing.length > 0) throw new Error(`Missing required project environment variables: ${missing.join(", ")}`);

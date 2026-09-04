@@ -1,9 +1,11 @@
-import "dotenv/config";
 import { writeFile } from "node:fs/promises";
+import { loadClawFitEnv } from "./load-env.js";
+
+loadClawFitEnv();
 
 const apiKey = process.env.GEMINI_API_KEY;
 if (!apiKey) {
-  console.error("GEMINI_API_KEY is missing. Add your Google AI Studio key to C:\\ClawBot\\.env, then rerun: pnpm models:smoke");
+  console.error("GEMINI_API_KEY is missing. Configure GEMINI_API_KEY in your environment (.env or ~/.openclaw/.env), then rerun: pnpm models:smoke");
   process.exit(2);
 }
 

@@ -9,14 +9,18 @@ Type=simple
 User=clawfit
 Group=clawfit
 WorkingDirectory=/home/clawfit/app
+Environment=HOME=/home/clawfit
 EnvironmentFile=/home/clawfit/.openclaw/.env
 Environment=NODE_ENV=production
 Environment=OPENCLAW_NO_RESPAWN=1
-Environment=NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache
-ExecStart=/usr/bin/env openclaw gateway run --allow-unconfigured
+Environment=NODE_COMPILE_CACHE=/home/clawfit/.cache/openclaw
+ExecStart=/usr/bin/env openclaw gateway run
 Restart=on-failure
 RestartSec=5s
-StartLimitIntervalSec=60
+RestartPreventExitStatus=78
+SuccessExitStatus=0 143
+KillMode=control-group
+StartLimitIntervalSec=60s
 StartLimitBurst=5
 TimeoutStartSec=90
 TimeoutStopSec=30

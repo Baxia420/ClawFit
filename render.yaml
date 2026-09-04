@@ -27,5 +27,7 @@ services:
         sync: false
       - key: NUTRITION_MODEL_PRIMARY
         sync: false
-      - key: NUTRITION_MODEL_FALLBACK
-        sync: false
+      # Configure NUTRITION_MODEL_FALLBACK only when a verified fallback model is present in .model-smoke.json
+      # - key: NUTRITION_MODEL_FALLBACK
+      #   sync: false
+

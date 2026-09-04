@@ -187,7 +187,12 @@ export function createApp(options: CreateAppOptions) {
   app.get("/ready", async (_request, reply) => {
     try {
       await options.repository.checkReady();
-      return { status: "ready" };
+      return {
+        status: "ready",
+        database: "ok",
+        schema: "ok",
+        estimator: options.estimator ? "configured" : "unconfigured",
+      };
     } catch {
       return reply.code(503).send({ status: "not_ready" });
     }

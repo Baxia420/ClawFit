@@ -23,6 +23,7 @@
     "openclaw:plugin:build": "pnpm --filter @clawfit/openclaw-health build",
     "openclaw:plugin:validate": "pnpm --filter @clawfit/openclaw-health validate",
     "nutrition:manual": "tsx scripts/manual-nutrition-test.ts",
+    "nutrition:smoke": "tsx scripts/manual-nutrition-test.ts --verify-estimator",
     "identity:link": "tsx scripts/link-whatsapp-identity.ts"
   },
   "devDependencies": {

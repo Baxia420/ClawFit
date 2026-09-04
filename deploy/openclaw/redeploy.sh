@@ -1,44 +1,47 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # ClawFit OpenClaw VPS Update / Redeploy Script
-# Run as clawfit user or root: sudo -u clawfit bash redeploy.sh [git-ref]
+# Run as root/operator: sudo bash deploy/openclaw/redeploy.sh [git-ref]
 # ==============================================================================
 
 set -euo pipefail
 
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "Error: redeploy.sh must be run as root: sudo bash deploy/openclaw/redeploy.sh [ref]" >&2
+  exit 1
+fi
+
 APP_DIR="/home/clawfit/app"
 TARGET_REF="${1:-main}"
 
-echo "==> [1/6] Navigating to application directory: ${APP_DIR}..."
-cd "${APP_DIR}"
+if [[ ! -d "${APP_DIR}" ]]; then
+  echo "Error: Application directory ${APP_DIR} does not exist." >&2
+  exit 1
+fi
 
-echo "==> [2/6] Fetching approved git ref: ${TARGET_REF}..."
-git fetch origin
-git checkout "${TARGET_REF}"
-git pull --ff-only origin "${TARGET_REF}" || true
-CURRENT_SHA="$(git rev-parse HEAD)"
+echo "==> [1/5] Updating repository to ref '${TARGET_REF}' as user 'clawfit'..."
+sudo -u clawfit -H bash -c "cd '${APP_DIR}' && git fetch origin && git checkout '${TARGET_REF}' && git pull --ff-only origin '${TARGET_REF}'"
+
+CURRENT_SHA="$(sudo -u clawfit -H bash -c "cd '${APP_DIR}' && git rev-parse HEAD")"
 echo "Checked out commit: ${CURRENT_SHA}"
 
-echo "==> [3/6] Installing dependencies with frozen lockfile..."
-pnpm install --frozen-lockfile
+echo "==> [2/5] Installing dependencies with frozen lockfile..."
+sudo -u clawfit -H bash -c "cd '${APP_DIR}' && pnpm install --frozen-lockfile"
 
-echo "==> [4/6] Building application and packages..."
-pnpm build
+echo "==> [3/5] Building application and packages..."
+sudo -u clawfit -H bash -c "cd '${APP_DIR}' && pnpm build"
 
-echo "==> [5/6] Validating OpenClaw Health plugin..."
-pnpm openclaw:plugin:validate
+echo "==> [4/5] Validating OpenClaw Health plugin..."
+sudo -u clawfit -H bash -c "cd '${APP_DIR}' && pnpm openclaw:plugin:validate"
 
-echo "==> [6/6] Restarting ClawFit OpenClaw service..."
-sudo systemctl restart clawfit-openclaw
-
-echo "Waiting for service to stabilize..."
+echo "==> [5/5] Restarting ClawFit OpenClaw system service..."
+systemctl restart clawfit-openclaw
 sleep 3
-sudo systemctl status clawfit-openclaw --no-pager
-
-echo "Checking WhatsApp channel status..."
-openclaw channels status --channel whatsapp --probe || true
+systemctl is-active --quiet clawfit-openclaw
+systemctl status clawfit-openclaw --no-pager
 
 echo "=============================================================================="
 echo "Redeployment to ${CURRENT_SHA} finished successfully."
+echo "Service is active and running under clawfit:clawfit."
 echo "WhatsApp session credentials preserved in /home/clawfit/.openclaw/credentials/."
 echo "=============================================================================="

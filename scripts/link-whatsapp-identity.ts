@@ -1,13 +1,9 @@
-import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { normalizeWhatsAppIdentifier } from "../packages/health-core/src/index.js";
 import { createDatabase, DEFAULT_PARTNER_USER_ID, DEFAULT_PRIMARY_USER_ID, HealthRepository } from "../packages/db/src/index.js";
+import { loadClawFitEnv } from "./load-env.js";
 
-try {
-  process.loadEnvFile(fileURLToPath(new URL("../.env", import.meta.url)));
-} catch (error) {
-  if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-}
+loadClawFitEnv();
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {

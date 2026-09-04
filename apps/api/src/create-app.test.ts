@@ -24,8 +24,30 @@ describe("Health API", () => {
     const readyApp = createApp({ repository: readyRepo, webToken, openclawToken, logger: false });
     const readyRes = await readyApp.inject({ method: "GET", url: "/ready" });
     expect(readyRes.statusCode).toBe(200);
-    expect(readyRes.json()).toEqual({ status: "ready" });
+    expect(readyRes.json()).toEqual({
+      status: "ready",
+      database: "ok",
+      schema: "ok",
+      estimator: "unconfigured",
+    });
     await readyApp.close();
+
+    const readyAppWithEstimator = createApp({
+      repository: readyRepo,
+      webToken,
+      openclawToken,
+      estimator: { estimate: vi.fn() } as unknown as any,
+      logger: false,
+    });
+    const readyWithEstimatorRes = await readyAppWithEstimator.inject({ method: "GET", url: "/ready" });
+    expect(readyWithEstimatorRes.statusCode).toBe(200);
+    expect(readyWithEstimatorRes.json()).toEqual({
+      status: "ready",
+      database: "ok",
+      schema: "ok",
+      estimator: "configured",
+    });
+    await readyAppWithEstimator.close();
 
     const unreadyRepo = {
       checkReady: vi.fn().mockRejectedValue(new Error("Pre-0004 schema missing")),
