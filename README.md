@@ -101,6 +101,13 @@ Test a text query first (`what have I eaten today?`), then a meal photo, then a 
 
 This is a personal tracking tool, not a medical diagnosis or treatment system. Nutrition values remain estimates.
 
+## Production Deployment & 24/7 Hosting
+
+For always-on WhatsApp health tracking without developer workstation dependence:
+- **Topology**: Always-on Linux VPS (Singapore) running OpenClaw Gateway under systemd + Render Health API (Singapore) + Neon PostgreSQL (Singapore).
+- **Deployment Runbook**: See [docs/deployment.md](docs/deployment.md) for complete runbooks covering VPS bootstrap, systemd configuration, Neon migrations, production identity bootstrap, QR pairing, encrypted backups, and monitoring.
+- **VPS Assets**: Templates and scripts are located in `deploy/openclaw/` (`clawfit-openclaw.service`, `openclaw.env.template`, `bootstrap.sh`, `redeploy.sh`).
+
 ## Environment loading
 
 The API, database migrator, and Next.js app load the repository-root `.env` even though pnpm runs workspace scripts from their package directories. Keep secrets in that single ignored file; do not create package-local copies.

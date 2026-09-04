@@ -53,8 +53,8 @@ export function withPendingMealScope(path: string, scopeKey: string) {
 }
 
 export async function healthFetch<T = unknown>(config: HealthPluginConfig, path: string, options: HealthFetchOptions = {}): Promise<T> {
-  const token = process.env.HEALTH_API_OPENCLAW_TOKEN ?? process.env.HEALTH_API_TOKEN;
-  if (!token) throw new Error("HEALTH_API_OPENCLAW_TOKEN or HEALTH_API_TOKEN is not available to the OpenClaw Gateway");
+  const token = process.env.HEALTH_API_OPENCLAW_TOKEN;
+  if (!token) throw new Error("HEALTH_API_OPENCLAW_TOKEN is not available to the OpenClaw Gateway");
   const apiUrl = config.apiUrl ?? process.env.HEALTH_API_URL ?? "http://127.0.0.1:4000";
   const start = performance.now();
   let response: Response;

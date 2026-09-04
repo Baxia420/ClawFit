@@ -9,7 +9,7 @@ describe("web Health API client", () => {
   });
 
   it("turns fetch failures into a typed, user-safe availability error", async () => {
-    vi.stubEnv("HEALTH_API_TOKEN", "test-token-that-is-at-least-24-chars");
+    vi.stubEnv("HEALTH_API_WEB_TOKEN", "test-token-that-is-at-least-24-chars");
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed: ECONNREFUSED 127.0.0.1")));
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
@@ -22,7 +22,7 @@ describe("web Health API client", () => {
   });
 
   it("does not turn missing configuration into believable empty data", async () => {
-    vi.stubEnv("HEALTH_API_TOKEN", "");
+    vi.stubEnv("HEALTH_API_WEB_TOKEN", "");
 
     const error = await healthApi("/v1/settings").catch((reason: unknown) => reason);
 

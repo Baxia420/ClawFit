@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { createApp } from "./create-app.js";
 import { DEFAULT_PRIMARY_USER_ID, type HealthRepository } from "@clawfit/db";
 
-const token = "test-token-that-is-at-least-24-chars";
+const webToken = "test-token-that-is-at-least-24-chars";
+const openclawToken = "openclaw-test-token-at-least-24-chars";
 const repository = {
   listRecentMeals: vi.fn().mockResolvedValue([]),
   createMeal: vi.fn(),
@@ -10,7 +11,7 @@ const repository = {
 
 describe("Health API", () => {
   it("allows the public health endpoint", async () => {
-    const app = createApp({ repository, apiToken: token, logger: false });
+    const app = createApp({ repository, webToken, openclawToken, logger: false });
     const response = await app.inject({ method: "GET", url: "/health" });
     expect(response.statusCode).toBe(200);
     await app.close();
@@ -20,7 +21,7 @@ describe("Health API", () => {
     const readyRepo = {
       checkReady: vi.fn().mockResolvedValue(true),
     } as unknown as HealthRepository;
-    const readyApp = createApp({ repository: readyRepo, apiToken: token, logger: false });
+    const readyApp = createApp({ repository: readyRepo, webToken, openclawToken, logger: false });
     const readyRes = await readyApp.inject({ method: "GET", url: "/ready" });
     expect(readyRes.statusCode).toBe(200);
     expect(readyRes.json()).toEqual({ status: "ready" });
@@ -29,7 +30,7 @@ describe("Health API", () => {
     const unreadyRepo = {
       checkReady: vi.fn().mockRejectedValue(new Error("Pre-0004 schema missing")),
     } as unknown as HealthRepository;
-    const unreadyApp = createApp({ repository: unreadyRepo, apiToken: token, logger: false });
+    const unreadyApp = createApp({ repository: unreadyRepo, webToken, openclawToken, logger: false });
     const unreadyRes = await unreadyApp.inject({ method: "GET", url: "/ready" });
     expect(unreadyRes.statusCode).toBe(503);
     expect(unreadyRes.json()).toEqual({ status: "not_ready" });
@@ -37,7 +38,7 @@ describe("Health API", () => {
   });
 
   it("requires bearer authentication", async () => {
-    const app = createApp({ repository, apiToken: token, logger: false });
+    const app = createApp({ repository, webToken, openclawToken, logger: false });
     const response = await app.inject({ method: "GET", url: "/v1/meals/recent" });
     expect(response.statusCode).toBe(401);
     expect(response.json().error.code).toBe("UNAUTHORIZED");
@@ -45,8 +46,8 @@ describe("Health API", () => {
   });
 
   it("rejects invalid domain payloads", async () => {
-    const app = createApp({ repository, apiToken: token, logger: false });
-    const response = await app.inject({ method: "POST", url: "/v1/meals", headers: { authorization: `Bearer ${token}` }, payload: { label: "missing nutrition" } });
+    const app = createApp({ repository, webToken, openclawToken, logger: false });
+    const response = await app.inject({ method: "POST", url: "/v1/meals", headers: { authorization: `Bearer ${webToken}` }, payload: { label: "missing nutrition" } });
     expect(response.statusCode).toBe(400);
     expect(response.json().error.code).toBe("INVALID_PAYLOAD");
     await app.close();
@@ -64,11 +65,11 @@ describe("Health API", () => {
       confirmPendingMeal: vi.fn().mockResolvedValue({ id: mealUuid, label: "Eggs" }),
     } as unknown as HealthRepository;
 
-    const app = createApp({ repository: pendingRepo, apiToken: token, logger: false });
+    const app = createApp({ repository: pendingRepo, webToken, openclawToken, logger: false });
     const createRes = await app.inject({
       method: "POST",
       url: "/v1/meals/pending",
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${webToken}` },
       payload: {
         label: "Eggs",
         items: [{ name: "Eggs", portionDescription: "2 eggs" }],
@@ -86,23 +87,23 @@ describe("Health API", () => {
     const latestRes = await app.inject({
       method: "GET",
       url: "/v1/meals/pending/latest?scopeKey=web%3Aprimary",
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${webToken}` },
     });
     expect(latestRes.statusCode).toBe(200);
     expect(latestRes.json().pending.id).toBe(validUuid);
 
-    const editRes = await app.inject({ method: "PATCH", url: `/v1/meals/pending/${validUuid}`, headers: { authorization: `Bearer ${token}` }, payload: { scopeKey: "web:primary", label: "Two eggs" } });
+    const editRes = await app.inject({ method: "PATCH", url: `/v1/meals/pending/${validUuid}`, headers: { authorization: `Bearer ${webToken}` }, payload: { scopeKey: "web:primary", label: "Two eggs" } });
     expect(editRes.statusCode).toBe(200);
     expect(pendingRepo.updatePendingMeal).toHaveBeenCalledWith(DEFAULT_PRIMARY_USER_ID, validUuid, "web:primary", { label: "Two eggs" });
 
-    const cancelRes = await app.inject({ method: "DELETE", url: `/v1/meals/pending/${validUuid}?scopeKey=web%3Aprimary`, headers: { authorization: `Bearer ${token}` } });
+    const cancelRes = await app.inject({ method: "DELETE", url: `/v1/meals/pending/${validUuid}?scopeKey=web%3Aprimary`, headers: { authorization: `Bearer ${webToken}` } });
     expect(cancelRes.statusCode).toBe(200);
     expect(pendingRepo.cancelPendingMeal).toHaveBeenCalledWith(DEFAULT_PRIMARY_USER_ID, validUuid, "web:primary");
 
     const confirmRes = await app.inject({
       method: "POST",
       url: `/v1/meals/pending/${validUuid}/confirm`,
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${webToken}` },
       payload: { scopeKey: "web:primary" },
     });
     expect(confirmRes.statusCode).toBe(200);
@@ -112,7 +113,7 @@ describe("Health API", () => {
     const missingScopeRes = await app.inject({
       method: "GET",
       url: "/v1/meals/pending/latest",
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${webToken}` },
     });
     expect(missingScopeRes.statusCode).toBe(400);
 
@@ -126,8 +127,8 @@ describe("Health API", () => {
       listNotificationPreferences: vi.fn().mockResolvedValue([]),
       upsertNotificationPreference: vi.fn().mockImplementation(async (value) => value),
     } as unknown as HealthRepository;
-    const app = createApp({ repository: settingsRepo, apiToken: token, logger: false });
-    const headers = { authorization: `Bearer ${token}` };
+    const app = createApp({ repository: settingsRepo, webToken, openclawToken, logger: false });
+    const headers = { authorization: `Bearer ${webToken}` };
 
     const settingsResponse = await app.inject({ method: "PATCH", url: "/v1/settings", headers, payload: { calorieTarget: 2400, timezone: "Asia/Kuala_Lumpur" } });
     expect(settingsResponse.statusCode).toBe(200);
@@ -332,6 +333,34 @@ describe("Health API", () => {
       });
       expect(res.statusCode).toBe(403);
       expect(res.json().error.code).toBe("MISSING_CONVERSATION_IDENTITY");
+    });
+
+    it("rejects OpenClaw /v1/nutrition/estimate requests lacking conversation identity", async () => {
+      const res = await authApp.inject({
+        method: "POST",
+        url: "/v1/nutrition/estimate",
+        headers: {
+          authorization: `Bearer ${openclawToken}`,
+          "x-clawfit-sender-id": "+60123456789",
+        },
+        payload: { text: "2 eggs" },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error.code).toBe("MISSING_CONVERSATION_IDENTITY");
+    });
+
+    it("rejects OpenClaw /v1/nutrition/estimate requests lacking sender identity", async () => {
+      const res = await authApp.inject({
+        method: "POST",
+        url: "/v1/nutrition/estimate",
+        headers: {
+          authorization: `Bearer ${openclawToken}`,
+          "x-clawfit-conversation-id": approvedGroupId,
+        },
+        payload: { text: "2 eggs" },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error.code).toBe("MISSING_SENDER_IDENTITY");
     });
 
     it("fails creation if webToken and openclawToken are equal", () => {

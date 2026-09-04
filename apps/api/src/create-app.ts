@@ -32,7 +32,6 @@ declare module "fastify" {
 
 export type CreateAppOptions = {
   repository: HealthRepository;
-  apiToken?: string | undefined;
   webToken?: string | undefined;
   openclawToken?: string | undefined;
   allowedGroupIds?: string[] | undefined;
@@ -82,7 +81,7 @@ export function createApp(options: CreateAppOptions) {
     const authorization = request.headers.authorization;
     const provided = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
 
-    const webToken = options.webToken ?? options.apiToken ?? "";
+    const webToken = options.webToken ?? "";
     const openclawToken = options.openclawToken ?? "";
 
     const isWeb = Boolean(webToken && safeEqual(provided, webToken));
@@ -112,11 +111,6 @@ export function createApp(options: CreateAppOptions) {
 
     // OpenClaw client handling
     request.clientType = "openclaw";
-
-    // Public ML estimate route does not require user DB lookup if no sender provided
-    if (request.url === "/v1/nutrition/estimate" && !senderId && !conversationId) {
-      return;
-    }
 
     // OpenClaw requests for health operations require both sender and conversation context
     if (!conversationId) {

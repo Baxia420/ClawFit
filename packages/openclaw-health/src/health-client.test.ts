@@ -25,7 +25,7 @@ describe("OpenClaw Health API client", () => {
   });
 
   it("logs diagnostics but throws a typed user-safe network error", async () => {
-    vi.stubEnv("HEALTH_API_TOKEN", "test-token-that-is-at-least-24-chars");
+    vi.stubEnv("HEALTH_API_OPENCLAW_TOKEN", "test-token-that-is-at-least-24-chars");
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const fetchImpl = vi.fn(async () => {
       throw new TypeError("fetch failed: ECONNREFUSED 127.0.0.1");

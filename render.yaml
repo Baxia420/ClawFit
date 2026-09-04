@@ -2,19 +2,26 @@ services:
   - type: web
     name: claw-fit-api
     runtime: node
+    region: singapore
     buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @clawfit/api build
     startCommand: pnpm --filter @clawfit/api start
     healthCheckPath: /ready
     envVars:
       - key: NODE_VERSION
         value: 24.15.0
+      - key: NODE_ENV
+        value: production
       - key: HOST
         value: 0.0.0.0
       - key: APP_TIMEZONE
         value: Asia/Kuala_Lumpur
       - key: DATABASE_URL
         sync: false
-      - key: HEALTH_API_TOKEN
+      - key: HEALTH_API_WEB_TOKEN
+        sync: false
+      - key: HEALTH_API_OPENCLAW_TOKEN
+        sync: false
+      - key: CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS
         sync: false
       - key: GEMINI_API_KEY
         sync: false

@@ -5,7 +5,6 @@ export const configSchema = z
     DATABASE_URL: z.string().url(),
     HEALTH_API_WEB_TOKEN: z.string().min(24),
     HEALTH_API_OPENCLAW_TOKEN: z.string().min(24),
-    HEALTH_API_TOKEN: z.string().min(24).optional(),
     CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS: z.string().default(""),
     GEMINI_API_KEY: z.string().min(1).optional(),
     NUTRITION_MODEL_PRIMARY: z.string().min(1).optional(),

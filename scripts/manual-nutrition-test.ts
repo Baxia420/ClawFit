@@ -1,8 +1,8 @@
 import "dotenv/config";
 
 const apiUrl = process.env.HEALTH_API_URL ?? "http://127.0.0.1:4000";
-const token = process.env.HEALTH_API_TOKEN;
-if (!token) throw new Error("HEALTH_API_TOKEN is required");
+const token = process.env.HEALTH_API_WEB_TOKEN ?? process.env.HEALTH_API_OPENCLAW_TOKEN;
+if (!token) throw new Error("HEALTH_API_WEB_TOKEN or HEALTH_API_OPENCLAW_TOKEN is required");
 const response = await fetch(new URL("/v1/nutrition/estimate", apiUrl), {
   method: "POST",
   headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
