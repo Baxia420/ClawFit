@@ -171,35 +171,54 @@ Follow this exact numbered 15-step sequence on a fresh Linux VPS. Do not start t
     ```
     Scan the ANSI QR code from the primary WhatsApp mobile app (**Settings** -> **Linked Devices** -> **Link a Device**). Confirm credentials saved to `/home/clawfit/.openclaw/credentials/whatsapp/default/creds.json`.
 
-11. **Discover approved shared WhatsApp group JID**:
+11. **Link production WhatsApp identities to ClawFit user profiles**:
+    Before real WhatsApp health operations are executed, explicitly link the WhatsApp identities to the internal ClawFit profiles against the migrated Neon database:
+    - Primary WhatsApp identity -> `DEFAULT_PRIMARY_USER_ID`
+    - Partner WhatsApp identity -> `DEFAULT_PARTNER_USER_ID`
+
+    Execute via the administrative link tool using environment variables (never commit real numbers):
+    ```bash
+    sudo -u clawfit -H bash -c "cd /home/clawfit/app && \
+      DATABASE_URL='<neon-ssl-url>' \
+      CLAWFIT_PRIMARY_WHATSAPP='+60123456789' \
+      CLAWFIT_PARTNER_WHATSAPP='+60198765432' \
+      pnpm identity:link --from-env"
+    ```
+    > [!NOTE]
+    > Standard phone/E.164 aliases are linked initially so that direct messages and group turns from either approved user resolve immediately to their respective ClawFit profiles. If the live WhatsApp/Baileys runtime presents an additional WhatsApp LID alias (`<digits>@lid`), link that alias using:
+    > `pnpm identity:link --user <primary|partner> --phone "<e164-phone>" --lid "<digits>@lid"`
+    > Do not commit real phone numbers or LIDs to repository files or version control.
+
+12. **Discover approved shared WhatsApp group JID**:
     ```bash
     sudo -u clawfit -H openclaw directory groups list --channel whatsapp
     ```
     Locate the shared group and copy its JID (e.g. `120363xxxxxxxxxxxx@g.us`). If not yet returned by directory, check logs as fallback:
     `sudo journalctl -u clawfit-openclaw -n 50 | grep "@g.us"`.
 
-12. **Add group JID to configuration**:
+13. **Add group JID to configuration**:
     Add `CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS=<group-jid>@g.us` to:
     - `/home/clawfit/.openclaw/.env` on VPS
     - Environment variables on Render Health API dashboard
 
-13. **Rerun OpenClaw configuration**:
+14. **Rerun OpenClaw configuration**:
     ```bash
     sudo -u clawfit -H bash -c "cd /home/clawfit/app && pnpm openclaw:setup"
     ```
     Enables `channels.whatsapp.groupPolicy = "allowlist"` and registers the group with `requireMention: false`.
 
-14. **Start the systemd system service**:
+15. **Start the systemd system service**:
     ```bash
     sudo systemctl start clawfit-openclaw
     sudo systemctl status clawfit-openclaw
     ```
 
-15. **Probe WhatsApp & verify readiness**:
+16. **Probe WhatsApp & verify readiness**:
     ```bash
-    sudo -u clawfit -H openclaw channels status --channel whatsapp --probe
-    # Run nutrition readiness smoke check against Render API:
+    # Run public nutrition readiness smoke check against Render API:
     sudo -u clawfit -H bash -c "cd /home/clawfit/app && pnpm nutrition:smoke"
+    # Probe WhatsApp channel connection:
+    sudo -u clawfit -H openclaw channels status --channel whatsapp --probe
     ```
     Send a test direct message from Primary and Partner WhatsApp numbers to verify the assistant responds.
 
@@ -315,12 +334,17 @@ Configure these in the Render dashboard:
 - `NUTRITION_MODEL_PRIMARY`: `<verified-primary-model-from-.model-smoke.json>`
 - `NUTRITION_MODEL_FALLBACK`: *(Only configure if verified in `.model-smoke.json`)*
 
-### 9.3 Nutrition Estimator Verification Probe
-Before testing WhatsApp meal logging, execute the smoke check:
+### 9.3 Public Nutrition Estimator Readiness Probe
+Before testing WhatsApp meal logging or executing authenticated operations, run the public readiness smoke check:
 ```bash
 pnpm nutrition:smoke
 ```
-This queries `/ready` to confirm `estimator === "configured"` and calls `/v1/nutrition/estimate` to ensure Gemini estimates are functioning end-to-end.
+This queries `/ready` and verifies that `status === "ready"`, `database === "ok"`, `schema === "ok"`, and `estimator === "configured"` without requiring user identity or bearer credentials.
+
+Once WhatsApp identities have been linked in the database, end-to-end estimation can also be verified with real credentials:
+```bash
+CLAWFIT_SENDER_ID="+60123456789" CLAWFIT_CONVERSATION_ID="+60123456789" pnpm nutrition:manual
+```
 
 ---
 
@@ -332,17 +356,21 @@ After applying database migrations, link the real WhatsApp accounts to the inter
 # On workstation with production database access:
 DATABASE_URL="<direct-or-pooled-neon-url>" \
 CLAWFIT_PRIMARY_WHATSAPP="+60123456789" \
-CLAWFIT_PRIMARY_WHATSAPP_LID="12345678901234@lid" \
 CLAWFIT_PARTNER_WHATSAPP="+60198765432" \
-CLAWFIT_PARTNER_WHATSAPP_LID="98765432109876@lid" \
 pnpm identity:link --from-env
 ```
 
 The script verifies:
-- Primary and Partner profiles exist.
-- Phone numbers and LIDs are normalized to E.164 and lowercase LID.
+- Primary and Partner user records exist.
+- Phone numbers are normalized to E.164 format.
 - Console output is masked (`+60****6789 -> user 'primary'`).
 - No secrets or real identities are written to disk.
+
+> [!NOTE]
+> E.164 phone numbers can be linked initially. If the live WhatsApp/Baileys runtime later presents an account LID alias (e.g. `<digits>@lid`), link that alias using:
+> ```bash
+> pnpm identity:link --user primary --phone "+60123456789" --lid "12345678901234@lid"
+> ```
 
 ---
 

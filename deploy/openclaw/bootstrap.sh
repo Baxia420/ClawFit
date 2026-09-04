@@ -17,7 +17,7 @@ timedatectl set-timezone Asia/Kuala_Lumpur || true
 
 echo "==> [2/9] Installing base host prerequisites..."
 apt-get update -y
-apt-get install -y curl ca-certificates git gnupg ufw build-essential
+apt-get install -y curl ca-certificates git gnupg ufw build-essential sudo
 
 echo "==> [3/9] Creating dedicated service user: clawfit..."
 if ! id -u clawfit >/dev/null 2>&1; then
@@ -58,10 +58,12 @@ echo "==> [6/9] Installing OpenClaw CLI pinned version 2026.7.1-2..."
 npm install -g openclaw@2026.7.1-2
 echo "OpenClaw version: $(openclaw --version)"
 
-echo "==> [7/9] Provisioning WhatsApp channel plugin for clawfit..."
-# Provision plugin deterministically under clawfit home directory before pairing
-sudo -u clawfit -H openclaw plugins install @openclaw/whatsapp@2026.7.1 --pin --acknowledge-clawhub-risk || true
-sudo -u clawfit -H openclaw plugins enable whatsapp || true
+echo "==> [7/9] Provisioning WhatsApp channel plugin for clawfit (fail-closed)..."
+# Provision official WhatsApp plugin from ClawHub pinned to 2026.7.1
+if ! sudo -u clawfit -H openclaw plugins inspect whatsapp >/dev/null 2>&1; then
+  sudo -u clawfit -H openclaw plugins install clawhub:@openclaw/whatsapp@2026.7.1 --pin --acknowledge-clawhub-risk
+fi
+sudo -u clawfit -H openclaw plugins enable whatsapp
 sudo -u clawfit -H openclaw plugins inspect whatsapp
 
 echo "==> [8/9] Enforcing UFW firewall security baseline..."
