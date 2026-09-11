@@ -175,3 +175,82 @@ describe("two-user identity migration (0004)", () => {
     }
   });
 });
+
+describe("web auth partial index migration (0005)", () => {
+  it("applies 0005_web_auth.sql and enforces one google identity per user while allowing multiple whatsapp aliases", async () => {
+    const pg = new PGlite();
+    try {
+      for (const name of [
+        "0000_fuzzy_doorman.sql",
+        "0001_cuddly_pending_meals.sql",
+        "0002_mobile_product_foundation.sql",
+        "0003_scope_pending_meals.sql",
+        "0004_two_user_identity.sql",
+      ]) {
+        const sql = await readFile(new URL(`../drizzle/${name}`, import.meta.url), "utf8");
+        await pg.exec(sql.replaceAll("--> statement-breakpoint", ""));
+      }
+
+      // Run 0005 migration
+      const migration = await readFile(new URL("../drizzle/0005_web_auth.sql", import.meta.url), "utf8");
+      await pg.exec(migration.replaceAll("--> statement-breakpoint", ""));
+
+      const primaryUserId = "00000000-0000-0000-0000-000000000002";
+      const partnerUserId = "00000000-0000-0000-0000-000000000003";
+
+      // 1. Linking first Google account for primary user succeeds
+      await pg.exec(`
+        INSERT INTO external_identities (user_id, provider, external_identifier)
+        VALUES ('${primaryUserId}', 'google', 'google-sub-1001');
+      `);
+
+      // 2. Linking a Google account for partner user succeeds
+      await pg.exec(`
+        INSERT INTO external_identities (user_id, provider, external_identifier)
+        VALUES ('${partnerUserId}', 'google', 'google-sub-2002');
+      `);
+
+      // 3. Linking a second Google account for primary user fails with unique index violation
+      await expect(
+        pg.exec(`
+          INSERT INTO external_identities (user_id, provider, external_identifier)
+          VALUES ('${primaryUserId}', 'google', 'google-sub-1002');
+        `),
+      ).rejects.toThrow();
+
+      // 4. Linking multiple WhatsApp aliases for primary user still succeeds (unaffected by google index)
+      await pg.exec(`
+        INSERT INTO external_identities (user_id, provider, external_identifier)
+        VALUES ('${primaryUserId}', 'whatsapp', '+60123456789');
+      `);
+      await pg.exec(`
+        INSERT INTO external_identities (user_id, provider, external_identifier)
+        VALUES ('${primaryUserId}', 'whatsapp', '1234567890@lid');
+      `);
+
+      const count = await pg.query<{ count: string }>(
+        `SELECT COUNT(*) as count FROM external_identities WHERE user_id = '${primaryUserId}'`,
+      );
+      expect(Number(count.rows[0]?.count)).toBe(3); // 1 google + 2 whatsapp
+    } finally {
+      await pg.close();
+    }
+  });
+
+  it("verifies canonical migration metadata chain and 0005 snapshot consistency", async () => {
+    const journalRaw = await readFile(new URL("../drizzle/meta/_journal.json", import.meta.url), "utf8");
+    const journal = JSON.parse(journalRaw) as { entries: Array<{ idx: number; tag: string }> };
+    const entry0005 = journal.entries.find((e) => e.idx === 5 && e.tag === "0005_web_auth");
+    expect(entry0005).toBeDefined();
+
+    const snapshotRaw = await readFile(new URL("../drizzle/meta/0005_snapshot.json", import.meta.url), "utf8");
+    const snapshot = JSON.parse(snapshotRaw) as {
+      tables: Record<string, { indexes: Record<string, { name: string; columns: string[] }> }>;
+    };
+    expect(snapshot.tables).toBeDefined();
+    const extIdentities = snapshot.tables["public.external_identities"] || snapshot.tables["external_identities"];
+    expect(extIdentities).toBeDefined();
+    expect(extIdentities?.indexes["external_identities_user_google_uq"]).toBeDefined();
+  });
+});
+

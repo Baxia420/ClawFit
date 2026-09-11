@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { isFallbackNotice, isMealLogConfirmation, sanitizeUserFacingError } from "./confirmation.js";
 
 describe("meal log confirmation", () => {
-  it.each(["log it", "Log it", "save it", "track this", "yes", "Okay!", "make it 500 and log it", "sure, log it", "please do", "confirm"])("accepts %s", (prompt) => {
+  it.each(["log it", "Log it", "save it", "track this", "yes", "Okay!", "make it 500 and log it", "sure, log it", "please do", "confirm", "log both", "log all"])("accepts %s", (prompt) => {
     expect(isMealLogConfirmation(prompt)).toBe(true);
   });
 

@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Archivo, JetBrains_Mono } from "next/font/google";
+import { auth } from "../auth";
 import { Shell } from "../components/Shell";
 import { ServiceWorkerRegister } from "../components/ServiceWorkerRegister";
 import "./globals.css";
@@ -18,6 +19,15 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = { width: "device-width", initialScale: 1, viewportFit: "cover", themeColor: "#171b18", colorScheme: "light" };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en" className={`${archivo.variable} ${mono.variable}`}><body><div className="grain" /><Shell>{children}</Shell><ServiceWorkerRegister /></body></html>;
+export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  const session = await auth().catch(() => null);
+  return (
+    <html lang="en" className={`${archivo.variable} ${mono.variable}`}>
+      <body>
+        <div className="grain" />
+        <Shell user={session?.user}>{children}</Shell>
+        <ServiceWorkerRegister />
+      </body>
+    </html>
+  );
 }

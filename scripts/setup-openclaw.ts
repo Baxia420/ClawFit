@@ -35,6 +35,36 @@ run("config", "set", "session.reset.idleMinutes", "60", "--strict-json");
 run("config", "set", "session.resetByType.direct", JSON.stringify({ mode: "idle", idleMinutes: 60 }), "--strict-json");
 run("config", "set", "agents.defaults.compaction", JSON.stringify({ mode: "safeguard", reserveTokens: 8192, keepRecentTokens: 4096, maxHistoryShare: 0.5, notifyUser: false }), "--strict-json");
 run("config", "set", "messages.suppressToolErrors", "true", "--strict-json");
+run("config", "set", "messages.inbound.debounceMs", "2000", "--strict-json");
+run("config", "set", "channels.whatsapp.debounceMs", "2000", "--strict-json");
+
+const googleProviderModels = [
+  {
+    id: "gemini-3.5-flash-lite",
+    name: "Gemini 3.5 Flash Lite",
+    reasoning: true,
+    input: ["text", "image"],
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
+  {
+    id: "gemini-3.7-flash",
+    name: "Gemini 3.7 Flash",
+    reasoning: true,
+    input: ["text", "image"],
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
+  {
+    id: "gemini-3.8-flash",
+    name: "Gemini 3.8 Flash",
+    reasoning: true,
+    input: ["text", "image"],
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
+];
+run("config", "set", "models.providers.google.models", JSON.stringify(googleProviderModels), "--strict-json");
 
 const whatsappAllowFrom = parseWhatsAppAllowFrom(process.env.CLAWFIT_WHATSAPP_ALLOW_FROM);
 const allowedGroupIds = parseWhatsAppAllowedGroupIds(process.env.CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS);
@@ -106,8 +136,12 @@ async function syncGatewayEnv() {
   }
 
   const lines = content ? content.replace(/\r\n/g, "\n").split("\n") : [];
+  const defaults: Record<string, string> = {
+    NUTRITION_MODEL_PRIMARY: "gemini-3.8-flash",
+    NUTRITION_MODEL_FALLBACK: "gemini-3.7-flash",
+  };
   for (const name of [...requiredVars, ...optionalVars]) {
-    const value = process.env[name];
+    const value = process.env[name] ?? defaults[name];
     if (value === undefined) continue;
     const replacement = `${name}=${value}`;
     const index = lines.findIndex((line) => new RegExp(`^\\s*${name}\\s*=`).test(line));

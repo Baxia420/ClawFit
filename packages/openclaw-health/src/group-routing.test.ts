@@ -289,4 +289,514 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     expect(userBMealData.label).toBe("Salmon and potatoes");
     expect(userBMealData.userId).toBe(userBPhone);
   });
+
+  it("ensures get_daily_nutrition never invokes the nutrition estimator", async () => {
+    const mockFetch = vi.fn(async (url: URL | RequestInfo) => {
+      const urlStr = url.toString();
+      if (urlStr.includes("/v1/nutrition/daily")) {
+        return new Response(JSON.stringify({
+          date: "2026-09-08",
+          timezone: "Asia/Kuala_Lumpur",
+          meals: [],
+          totals: { calories: 1785, proteinG: 120, carbsG: 200, fatG: 50, fiberG: 25 },
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const mockApi: any = {
+      registerTool: vi.fn(),
+      on: vi.fn(),
+      runContext: { setRunContext: vi.fn(), getRunContext: vi.fn() },
+    };
+    plugin.register(mockApi);
+    const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
+    const findTool = (name: string, toolContext: any) => {
+      for (const fn of registered) {
+        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        if (inst?.name === name) return inst;
+      }
+      throw new Error(`Tool ${name} not found`);
+    };
+
+    const tool = findTool("get_daily_nutrition", {
+      messageChannel: "whatsapp",
+      requesterSenderId: userAPhone,
+      deliveryContext: { to: approvedGroupId },
+    });
+
+    const res = await tool.execute("call-daily", {
+      date: "2026-09-08",
+      timezone: "Asia/Kuala_Lumpur",
+    });
+
+    const data = JSON.parse((res as any).content[0].text);
+    expect(data.totals.calories).toBe(1785);
+
+    // Verify estimator endpoint was NEVER called
+    for (const call of mockFetch.mock.calls) {
+      expect(call[0].toString()).not.toContain("/v1/nutrition/estimate");
+    }
+  });
+
+  it("ensures confirm_pending_meal never invokes the nutrition estimator", async () => {
+    const mockFetch = vi.fn(async (url: URL | RequestInfo) => {
+      const urlStr = url.toString();
+      if (urlStr.includes("/confirm")) {
+        return new Response(JSON.stringify({
+          id: "meal-uuid-1",
+          label: "Confirmed Chicken",
+          calories: { best: 450, low: 400, high: 500 },
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const mockApi: any = {
+      registerTool: vi.fn(),
+      on: vi.fn(),
+      runContext: { setRunContext: vi.fn(), getRunContext: vi.fn() },
+    };
+    plugin.register(mockApi);
+    const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
+    const findTool = (name: string, toolContext: any) => {
+      for (const fn of registered) {
+        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        if (inst?.name === name) return inst;
+      }
+      throw new Error(`Tool ${name} not found`);
+    };
+
+    const tool = findTool("confirm_pending_meal", {
+      messageChannel: "whatsapp",
+      requesterSenderId: userAPhone,
+      deliveryContext: { to: approvedGroupId },
+    });
+
+    const res = await tool.execute("call-confirm", {
+      id: "draft-uuid-1",
+    });
+
+    const data = JSON.parse((res as any).content[0].text);
+    expect(data.status).toBe("confirmed");
+    expect(data.confirmedMealId).toBe("meal-uuid-1");
+
+    // Verify estimator endpoint was NEVER called
+    for (const call of mockFetch.mock.calls) {
+      expect(call[0].toString()).not.toContain("/v1/nutrition/estimate");
+    }
+  });
+
+  it("resolves local media image attachment and forwards base64 buffer to /v1/nutrition/estimate", async () => {
+    const { writeFileSync, unlinkSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    const testImagePath = join(tmpdir(), `clawfit-test-${Date.now()}.jpg`);
+    // Write valid JPEG header bytes
+    const jpegBuffer = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00]);
+    writeFileSync(testImagePath, jpegBuffer);
+
+    let capturedRequestBody: any = null;
+    const mockFetch = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
+      const urlStr = url.toString();
+      if (urlStr.includes("/v1/nutrition/estimate")) {
+        capturedRequestBody = JSON.parse(init?.body as string);
+        return new Response(JSON.stringify({
+          model: "gemini-3.8-flash",
+          fallbackUsed: false,
+          calories: { best: 520, low: 480, high: 560 },
+          label: "Protein bowl",
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      const mockApi: any = {
+        registerTool: vi.fn(),
+        on: vi.fn(),
+        runContext: { setRunContext: vi.fn(), getRunContext: vi.fn() },
+      };
+      plugin.register(mockApi);
+      const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
+      const findTool = (name: string, toolContext: any) => {
+        for (const fn of registered) {
+          const inst = typeof fn === "function" ? fn(toolContext) : fn;
+          if (inst?.name === name) return inst;
+        }
+        throw new Error(`Tool ${name} not found`);
+      };
+
+      const tool = findTool("estimate_nutrition", {
+        messageChannel: "whatsapp",
+        requesterSenderId: userAPhone,
+        deliveryContext: { to: approvedGroupId },
+        authorizedMediaPaths: [testImagePath],
+      });
+
+      const res = await tool.execute("call-estimate-img", {
+        text: "Healthy protein bowl with chicken and greens",
+        imagePath: testImagePath,
+      });
+
+      const data = JSON.parse((res as any).content[0].text);
+      expect(data.model).toBe("gemini-3.8-flash");
+      expect(capturedRequestBody).toBeDefined();
+      expect(capturedRequestBody.text).toBe("Healthy protein bowl with chicken and greens");
+      expect(capturedRequestBody.image).toBeDefined();
+      expect(capturedRequestBody.image.mimeType).toBe("image/jpeg");
+      expect(capturedRequestBody.image.base64).toBe(jpegBuffer.toString("base64"));
+    } finally {
+      try {
+        unlinkSync(testImagePath);
+      } catch {
+        // ignore
+      }
+    }
+  });
+
+  it("supports batch confirmation with count=2 when 2 drafts exist", async () => {
+    const mockFetch = vi.fn(async (url: URL | RequestInfo) => {
+      const urlStr = url.toString();
+      if (urlStr.includes("/v1/meals/pending?") || urlStr.endsWith("/v1/meals/pending")) {
+        return new Response(JSON.stringify({
+          pending: [
+            { id: "draft-1", label: "Meal 1", calories: { best: 250 }, occurredAt: new Date().toISOString() },
+            { id: "draft-2", label: "Meal 2", calories: { best: 45 }, occurredAt: new Date().toISOString() },
+          ],
+        }), { status: 200 });
+      }
+      if (urlStr.includes("/v1/meals/pending/draft-1/confirm")) {
+        return new Response(JSON.stringify({ id: "meal-1", label: "Meal 1", calories: { best: 250 } }), { status: 200 });
+      }
+      if (urlStr.includes("/v1/meals/pending/draft-2/confirm")) {
+        return new Response(JSON.stringify({ id: "meal-2", label: "Meal 2", calories: { best: 45 } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const mockApi: any = {
+      registerTool: vi.fn(),
+      on: vi.fn(),
+      runContext: { setRunContext: vi.fn(), getRunContext: vi.fn() },
+    };
+    plugin.register(mockApi);
+    const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
+    const findTool = (name: string, toolContext: any) => {
+      for (const fn of registered) {
+        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        if (inst?.name === name) return inst;
+      }
+      throw new Error(`Tool ${name} not found`);
+    };
+
+    const tool = findTool("confirm_pending_meal", {
+      messageChannel: "whatsapp",
+      requesterSenderId: userAPhone,
+      deliveryContext: { to: approvedGroupId },
+    });
+
+    const res = await tool.execute("call-batch-2", { count: 2, idempotencyKey: "test-batch-key-12345" });
+    const data = JSON.parse((res as any).content[0].text);
+
+    expect(data.status).toBe("confirmed");
+    expect(data.confirmedMeals).toHaveLength(2);
+    expect(data.confirmedMeals[0].confirmedMealId).toBe("meal-1");
+    expect(data.confirmedMeals[1].confirmedMealId).toBe("meal-2");
+  });
+
+  it("returns ambiguous_drafts error when count=2 and > 2 drafts exist in scope", async () => {
+    const mockFetch = vi.fn(async (url: URL | RequestInfo) => {
+      const urlStr = url.toString();
+      if (urlStr.includes("/v1/meals/pending?") || urlStr.endsWith("/v1/meals/pending")) {
+        return new Response(JSON.stringify({
+          pending: [
+            { id: "draft-1", label: "Meal 1", calories: { best: 250 }, occurredAt: new Date().toISOString() },
+            { id: "draft-2", label: "Meal 2", calories: { best: 45 }, occurredAt: new Date().toISOString() },
+            { id: "draft-3", label: "Meal 3", calories: { best: 600 }, occurredAt: new Date().toISOString() },
+          ],
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const mockApi: any = {
+      registerTool: vi.fn(),
+      on: vi.fn(),
+      runContext: { setRunContext: vi.fn(), getRunContext: vi.fn() },
+    };
+    plugin.register(mockApi);
+    const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
+    const findTool = (name: string, toolContext: any) => {
+      for (const fn of registered) {
+        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        if (inst?.name === name) return inst;
+      }
+      throw new Error(`Tool ${name} not found`);
+    };
+
+    const tool = findTool("confirm_pending_meal", {
+      messageChannel: "whatsapp",
+      requesterSenderId: userAPhone,
+      deliveryContext: { to: approvedGroupId },
+    });
+
+    const res = await tool.execute("call-ambiguous", { count: 2 });
+    const data = JSON.parse((res as any).content[0].text);
+
+    expect(data.error).toBe("ambiguous_drafts");
+    expect(data.message).toContain("3 active unconfirmed meal drafts");
+    expect(data.pendingDrafts).toHaveLength(3);
+  });
+
+  it("reports partial success when one draft confirmation fails and another succeeds", async () => {
+    const mockFetch = vi.fn(async (url: URL | RequestInfo) => {
+      const urlStr = url.toString();
+      if (urlStr.includes("/v1/meals/pending/draft-ok/confirm")) {
+        return new Response(JSON.stringify({ id: "meal-ok", label: "Good meal", calories: { best: 300 } }), { status: 200 });
+      }
+      if (urlStr.includes("/v1/meals/pending/draft-fail/confirm")) {
+        return new Response(JSON.stringify({ error: { code: "NOT_FOUND", message: "Draft expired" } }), { status: 404 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const mockApi: any = {
+      registerTool: vi.fn(),
+      on: vi.fn(),
+      runContext: { setRunContext: vi.fn(), getRunContext: vi.fn() },
+    };
+    plugin.register(mockApi);
+    const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
+    const findTool = (name: string, toolContext: any) => {
+      for (const fn of registered) {
+        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        if (inst?.name === name) return inst;
+      }
+      throw new Error(`Tool ${name} not found`);
+    };
+
+    const tool = findTool("confirm_pending_meal", {
+      messageChannel: "whatsapp",
+      requesterSenderId: userAPhone,
+      deliveryContext: { to: approvedGroupId },
+    });
+
+    const res = await tool.execute("call-partial", { ids: ["draft-ok", "draft-fail"] });
+    const data = JSON.parse((res as any).content[0].text);
+
+    expect(data.status).toBe("partial_success");
+    expect(data.partialSuccess).toBe(true);
+    expect(data.confirmedMeals).toHaveLength(1);
+    expect(data.confirmedMeals[0].confirmedMealId).toBe("meal-ok");
+    expect(data.failures).toHaveLength(1);
+    expect(data.failures[0].pendingDraftId).toBe("draft-fail");
+  });
+
+  it("executes compound confirmation + daily total read with strict write-before-read ordering", async () => {
+    const callOrder: string[] = [];
+    const mockFetch = vi.fn(async (url: URL | RequestInfo) => {
+      const urlStr = url.toString();
+      if (urlStr.includes("/confirm")) {
+        callOrder.push("write:confirm");
+        return new Response(JSON.stringify({ id: "meal-compound-1", label: "Steak and rice", calories: { best: 750 } }), { status: 200 });
+      }
+      if (urlStr.includes("/v1/nutrition/daily")) {
+        callOrder.push("read:daily");
+        return new Response(JSON.stringify({
+          date: "2026-09-08",
+          totals: { caloriesBest: 1785, proteinG: 120, carbsG: 200, fatG: 50, fiberG: 25 },
+          meals: [],
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const mockApi: any = {
+      registerTool: vi.fn(),
+      on: vi.fn(),
+      runContext: { setRunContext: vi.fn(), getRunContext: vi.fn() },
+    };
+    plugin.register(mockApi);
+    const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
+    const findTool = (name: string, toolContext: any) => {
+      for (const fn of registered) {
+        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        if (inst?.name === name) return inst;
+      }
+      throw new Error(`Tool ${name} not found`);
+    };
+
+    const tool = findTool("confirm_pending_meal", {
+      messageChannel: "whatsapp",
+      requesterSenderId: userAPhone,
+      deliveryContext: { to: approvedGroupId },
+    });
+
+    const res = await tool.execute("call-compound", {
+      id: "draft-compound-1",
+      date: "2026-09-08",
+      timezone: "Asia/Kuala_Lumpur",
+    });
+    const data = JSON.parse((res as any).content[0].text);
+
+    // Verify write occurred strictly before read
+    expect(callOrder).toEqual(["write:confirm", "read:daily"]);
+    expect(data.confirmedMealId).toBe("meal-compound-1");
+    expect(data.status).toBe("confirmed");
+    expect(data.dailyNutrition).toBeDefined();
+    expect(data.dailyNutrition.totals.caloriesBest).toBe(1785);
+    expect(data.summaryError).toBeUndefined();
+  });
+
+  it("isolates summary read failure from confirmed meal mutation so retries do not duplicate", async () => {
+    const mockFetch = vi.fn(async (url: URL | RequestInfo) => {
+      const urlStr = url.toString();
+      if (urlStr.includes("/confirm")) {
+        return new Response(JSON.stringify({ id: "meal-isolated-1", label: "Tofu salad", calories: { best: 320 } }), { status: 200 });
+      }
+      if (urlStr.includes("/v1/nutrition/daily")) {
+        return new Response(JSON.stringify({ error: { code: "INTERNAL_ERROR", message: "Database read timeout" } }), { status: 500 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const mockApi: any = {
+      registerTool: vi.fn(),
+      on: vi.fn(),
+      runContext: { setRunContext: vi.fn(), getRunContext: vi.fn() },
+    };
+    plugin.register(mockApi);
+    const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
+    const findTool = (name: string, toolContext: any) => {
+      for (const fn of registered) {
+        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        if (inst?.name === name) return inst;
+      }
+      throw new Error(`Tool ${name} not found`);
+    };
+
+    const tool = findTool("confirm_pending_meal", {
+      messageChannel: "whatsapp",
+      requesterSenderId: userAPhone,
+      deliveryContext: { to: approvedGroupId },
+    });
+
+    const res = await tool.execute("call-summary-fail", {
+      id: "draft-isolated-1",
+      date: "2026-09-08",
+      timezone: "Asia/Kuala_Lumpur",
+    });
+    const data = JSON.parse((res as any).content[0].text);
+
+    // Mutation succeeded and confirmedMealId is intact
+    expect(data.status).toBe("confirmed");
+    expect(data.confirmedMealId).toBe("meal-isolated-1");
+    // Summary error is recorded without failing the confirmation
+    expect(data.summaryError).toBeDefined();
+    expect(data.dailyNutrition).toBeUndefined();
+  });
+
+  it("executes update_meal with post-write daily nutrition read", async () => {
+    const callOrder: string[] = [];
+    const mockFetch = vi.fn(async (url: URL | RequestInfo) => {
+      const urlStr = url.toString();
+      if (urlStr.includes("/v1/meals/meal-update-1")) {
+        callOrder.push("write:patch");
+        return new Response(JSON.stringify({ id: "meal-update-1", label: "Corrected steak", caloriesBest: 800 }), { status: 200 });
+      }
+      if (urlStr.includes("/v1/nutrition/daily")) {
+        callOrder.push("read:daily");
+        return new Response(JSON.stringify({
+          date: "2026-09-08",
+          totals: { caloriesBest: 1835 },
+          meals: [],
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const mockApi: any = {
+      registerTool: vi.fn(),
+      on: vi.fn(),
+      runContext: { setRunContext: vi.fn(), getRunContext: vi.fn() },
+    };
+    plugin.register(mockApi);
+    const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
+    const findTool = (name: string, toolContext: any) => {
+      for (const fn of registered) {
+        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        if (inst?.name === name) return inst;
+      }
+      throw new Error(`Tool ${name} not found`);
+    };
+
+    const tool = findTool("update_meal", {
+      messageChannel: "whatsapp",
+      requesterSenderId: userAPhone,
+      deliveryContext: { to: approvedGroupId },
+    });
+
+    const res = await tool.execute("call-update-summary", {
+      id: "meal-update-1",
+      patch: { label: "Corrected steak", caloriesBest: 800 },
+      date: "2026-09-08",
+      timezone: "Asia/Kuala_Lumpur",
+    });
+    const data = JSON.parse((res as any).content[0].text);
+
+    expect(callOrder).toEqual(["write:patch", "read:daily"]);
+    expect(data.id).toBe("meal-update-1");
+    expect(data.caloriesBest).toBe(800);
+    expect(data.dailyNutrition).toBeDefined();
+    expect(data.dailyNutrition.totals.caloriesBest).toBe(1835);
+  });
+
+  it("produces structured error before inference when requested image is unauthorized", async () => {
+    const mockFetch = vi.fn();
+    vi.stubGlobal("fetch", mockFetch);
+
+    const mockApi: any = {
+      registerTool: vi.fn(),
+      on: vi.fn(),
+      runContext: { setRunContext: vi.fn(), getRunContext: vi.fn() },
+    };
+    plugin.register(mockApi);
+    const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
+    const findTool = (name: string, toolContext: any) => {
+      for (const fn of registered) {
+        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        if (inst?.name === name) return inst;
+      }
+      throw new Error(`Tool ${name} not found`);
+    };
+
+    // Sender A tries to access an unauthorized attachment path
+    const tool = findTool("estimate_nutrition", {
+      messageChannel: "whatsapp",
+      requesterSenderId: userAPhone,
+      deliveryContext: { to: approvedGroupId },
+    });
+
+    const res = await tool.execute("call-unauth-image", {
+      text: "Look at this dish",
+      imagePath: "C:\\secret\\forbidden.jpg",
+    });
+    const data = JSON.parse((res as any).content[0].text);
+
+    expect(data.error).toBe("unauthorized_media");
+    expect(data.message).toBeDefined();
+    // Verify inference was NEVER invoked
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
 });

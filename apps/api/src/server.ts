@@ -34,6 +34,9 @@ const app = createApp({
   webToken: config.HEALTH_API_WEB_TOKEN,
   openclawToken: config.HEALTH_API_OPENCLAW_TOKEN,
   allowedGroupIds,
+  primaryGoogleEmail: config.CLAWFIT_PRIMARY_GOOGLE_EMAIL,
+  partnerGoogleEmail: config.CLAWFIT_PARTNER_GOOGLE_EMAIL,
+  assertionSecret: config.WEB_ASSERTION_SIGNING_SECRET ?? config.HEALTH_API_AUTH_SECRET,
   ...(estimator ? { estimator } : {}),
 });
 

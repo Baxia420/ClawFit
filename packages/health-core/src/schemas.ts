@@ -232,6 +232,74 @@ export type ExternalIdentity = z.infer<typeof externalIdentitySchema>;
 export type ResolveUserInput = z.infer<typeof resolveUserSchema>;
 export type LinkExternalIdentityInput = z.infer<typeof linkExternalIdentitySchema>;
 
+export const togetherMealSummarySchema = z.object({
+  id: z.string().min(1),
+  label: z.string(),
+  caloriesBest: z.number(),
+  proteinG: z.number(),
+  occurredAt: z.string(),
+});
+
+export const togetherExerciseSummarySchema = z.object({
+  id: z.string().min(1),
+  name: z.string(),
+  setCount: z.number(),
+});
+
+export const togetherWorkoutSummarySchema = z.object({
+  id: z.string().min(1),
+  name: z.string(),
+  startedAt: z.string(),
+  finishedAt: z.string().nullable(),
+  setCount: z.number(),
+  volumeKg: z.number(),
+  exercises: z.array(togetherExerciseSummarySchema),
+});
+
+export const togetherTrendPointSchema = z.object({
+  day: z.string(),
+  calories: z.number(),
+  proteinG: z.number(),
+});
+
+export const togetherMemberProgressSchema = z.object({
+  userId: z.string().min(1),
+  displayName: z.string(),
+  isCaller: z.boolean(),
+  goals: z.object({
+    calorieTarget: z.number(),
+    proteinTargetG: z.number(),
+  }),
+  daily: z.object({
+    date: z.string(),
+    calories: z.number(),
+    proteinG: z.number(),
+    mealCount: z.number(),
+    meals: z.array(togetherMealSummarySchema),
+    workouts: z.array(togetherWorkoutSummarySchema),
+  }),
+  trend: z.array(togetherTrendPointSchema).optional(),
+});
+
+export const togetherResponseSchema = z.object({
+  household: z.object({
+    id: z.string().min(1),
+    name: z.string(),
+  }),
+  date: z.string(),
+  timezone: z.string(),
+  members: z.array(togetherMemberProgressSchema),
+});
+
+export const TOGETHER_VIEWING_TIMEZONE = "Asia/Kuala_Lumpur";
+
+export type TogetherMealSummary = z.infer<typeof togetherMealSummarySchema>;
+export type TogetherExerciseSummary = z.infer<typeof togetherExerciseSummarySchema>;
+export type TogetherWorkoutSummary = z.infer<typeof togetherWorkoutSummarySchema>;
+export type TogetherTrendPoint = z.infer<typeof togetherTrendPointSchema>;
+export type TogetherMemberProgress = z.infer<typeof togetherMemberProgressSchema>;
+export type TogetherResponse = z.infer<typeof togetherResponseSchema>;
+
 export const senderHeadersSchema = z.object({
   "x-clawfit-sender-provider": z.string().min(1).default("whatsapp"),
   "x-clawfit-sender-id": z.string().min(1),

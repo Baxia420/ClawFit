@@ -3,6 +3,7 @@ import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type, type Static, type TSchema } from "typebox";
 import { isFallbackNotice, isMealLogConfirmation, sanitizeUserFacingError } from "./confirmation.js";
 import { derivePendingMealScope, healthFetch, withPendingMealScope, type SenderContext } from "./health-client.js";
+import { resolveImagePayload, MediaResolutionError, type MediaAuthorizationContext, type ResolvedImage } from "./media-resolver.js";
 
 const ConfigSchema = Type.Object({
   apiUrl: Type.Optional(Type.String({ default: "http://127.0.0.1:4000" })),
@@ -42,7 +43,6 @@ const PendingMealDraft = Type.Object({
   idempotencyKey: IdempotencyKey,
 });
 const PendingMealLookup = Type.Object({ id: Type.Optional(Id) });
-const PendingMealConfirmation = Type.Object({ id: Id, occurredAt: Type.Optional(Type.String({ format: "date-time" })), idempotencyKey: Type.Optional(IdempotencyKey) });
 
 function createSenderTool<TParams extends TSchema>(
   tool: any,
@@ -142,19 +142,72 @@ const plugin = defineToolPlugin({
   tools: (tool) => [
     createSenderTool(tool, {
       name: "estimate_nutrition",
-      description: "Estimate a difficult or uncertain meal synchronously. This returns a draft only; it does not log anything.",
+      description: "Estimate a difficult or uncertain meal synchronously via the strong nutrition model. This returns a draft only; it does not log anything.",
       parameters: Type.Object({
-        text: Type.String({ description: "Meal description and all visual details available from an attached photo." }),
+        text: Type.String({ description: "Meal description and all visual details available from attached photo(s)." }),
+        imagePath: Type.Optional(Type.String({ description: "Optional local path or media URI (e.g. media://inbound/<id>) of the meal image to analyze." })),
+        imagePaths: Type.Optional(Type.Array(Type.String(), { description: "Optional local paths or media URIs of attached meal images (e.g. package front + nutrition label)." })),
         imageBase64: Type.Optional(Type.String({ description: "Optional raw base64 image data when the active client can provide it." })),
         imageMimeType: Type.Optional(Type.String({ description: "MIME type paired with imageBase64." })),
+        images: Type.Optional(Type.Array(Type.Object({ base64: Type.String(), mimeType: Type.String() }), { description: "Optional multiple images (e.g. package front + nutrition label)." })),
       }),
-      execute: (params, { config, sender, signal }) =>
-        healthFetch(config, "/v1/nutrition/estimate", {
+      execute: async (params, { config, sender, toolContext, signal }) => {
+        const rawCtx = toolContext as Record<string, unknown> | undefined;
+        const authContext: MediaAuthorizationContext = {
+          senderId: sender.senderId,
+          conversationId: sender.conversationId,
+          workspaceDir: typeof rawCtx?.workspaceDir === "string" ? rawCtx.workspaceDir : undefined,
+          ...(rawCtx?.authContext as MediaAuthorizationContext | undefined),
+          ...(Array.isArray(rawCtx?.authorizedMediaPaths) ? { authorizedMediaPaths: rawCtx.authorizedMediaPaths as string[] } : {}),
+          ...(Array.isArray(rawCtx?.authorizedMediaUrls) ? { authorizedMediaUrls: rawCtx.authorizedMediaUrls as string[] } : {}),
+          ...(typeof rawCtx?.mediaPath === "string" ? { mediaPath: rawCtx.mediaPath as string } : {}),
+          ...(Array.isArray(rawCtx?.mediaPaths) ? { mediaPaths: rawCtx.mediaPaths as string[] } : {}),
+          ...(typeof rawCtx?.mediaUrl === "string" ? { mediaUrl: rawCtx.mediaUrl as string } : {}),
+          ...(Array.isArray(rawCtx?.mediaUrls) ? { mediaUrls: rawCtx.mediaUrls as string[] } : {}),
+          ...(Array.isArray(rawCtx?.inboundMedia) ? { inboundMedia: rawCtx.inboundMedia as any } : {}),
+          ...(Array.isArray(rawCtx?.authorizedAttachments)
+            ? { authorizedAttachments: rawCtx.authorizedAttachments as any }
+            : Array.isArray(rawCtx?.attachments)
+              ? { authorizedAttachments: rawCtx.attachments as any }
+              : {}),
+        };
+
+        let resolved: { images?: ResolvedImage[]; image?: ResolvedImage };
+        try {
+          resolved = await resolveImagePayload({
+            imagePath: params.imagePath,
+            imagePaths: params.imagePaths,
+            imageBase64: params.imageBase64,
+            imageMimeType: params.imageMimeType,
+            images: params.images,
+            authContext,
+          });
+        } catch (err) {
+          if (err instanceof MediaResolutionError) {
+            return {
+              error: err.code,
+              message: err.message,
+            };
+          }
+          throw err;
+        }
+
+        return healthFetch(config, "/v1/nutrition/estimate", {
           method: "POST",
-          body: { text: params.text, ...(params.imageBase64 && params.imageMimeType ? { image: { base64: params.imageBase64, mimeType: params.imageMimeType } } : {}) },
+          body: {
+            text: params.text,
+            ...(resolved.images && resolved.images.length > 1
+              ? { images: resolved.images }
+              : resolved.image
+                ? { image: resolved.image }
+                : resolved.images && resolved.images.length === 1 && resolved.images[0]
+                  ? { image: resolved.images[0] }
+                  : {}),
+          },
           sender,
           ...(signal ? { signal } : {}),
-        }),
+        });
+      },
     }),
     createSenderTool(tool, {
       name: "create_pending_meal",
@@ -172,23 +225,226 @@ const plugin = defineToolPlugin({
     }),
     createSenderTool(tool, {
       name: "get_pending_meal",
-      description: "Get this peer's latest unconfirmed pending meal draft (or a scoped draft by ID) across session boundaries.",
+      description: "Get this peer's active unconfirmed pending meal draft(s) across session boundaries. Returns the latest draft and all pending drafts in scope.",
       parameters: PendingMealLookup,
-      execute: (params, { config, sender, toolContext, signal }) => {
+      execute: async (params, { config, sender, toolContext, signal }) => {
         const scopeKey = derivePendingMealScope(toolContext);
-        const path = params.id ? `/v1/meals/pending/${params.id}` : "/v1/meals/pending/latest";
-        return healthFetch(config, withPendingMealScope(path, scopeKey), { sender, ...(signal ? { signal } : {}) });
+        if (params.id) {
+          return healthFetch(config, withPendingMealScope(`/v1/meals/pending/${params.id}`, scopeKey), { sender, ...(signal ? { signal } : {}) });
+        }
+        const list = (await healthFetch(config, withPendingMealScope("/v1/meals/pending", scopeKey), { sender, ...(signal ? { signal } : {}) })) as { pending?: unknown[] };
+        const latest = Array.isArray(list?.pending) && list.pending.length > 0 ? list.pending[0] : null;
+        return {
+          latest,
+          pendingMeals: list?.pending ?? [],
+        };
       },
     }),
     createSenderTool(tool, {
       name: "confirm_pending_meal",
-      description: "Confirm and persist an existing meal draft in this peer's scope by ID. Idempotent on retries.",
-      parameters: PendingMealConfirmation,
+      description: "Confirm and persist one or more existing meal drafts in this peer's scope. If id is omitted and count is omitted, confirms the latest active draft. For 'log both', provide count=2 or ids. Returns canonical confirmed meal ID(s).",
+      parameters: Type.Object({
+        id: Type.Optional(Id),
+        ids: Type.Optional(Type.Array(Id)),
+        count: Type.Optional(Type.Integer({ minimum: 1, maximum: 10, description: "Number of drafts to confirm when user says 'log both' (e.g. count=2)." })),
+        occurredAt: Type.Optional(Type.String({ format: "date-time" })),
+        idempotencyKey: Type.Optional(IdempotencyKey),
+        date: Type.Optional(Type.String({ format: "date", description: "Optional local calendar date (YYYY-MM-DD) to fetch updated daily totals immediately after confirming." })),
+        timezone: Type.Optional(Type.String({ description: "Timezone for daily total calculation (default Asia/Kuala_Lumpur)." })),
+      }),
+      execute: async (params, { config, sender, toolContext, signal }) => {
+        const scopeKey = derivePendingMealScope(toolContext);
+        const targetIds: string[] = [];
+
+        if (params.ids && params.ids.length > 0) {
+          targetIds.push(...params.ids);
+        } else if (params.id) {
+          targetIds.push(params.id);
+        } else if (params.count && params.count > 1) {
+          const listRes = (await healthFetch(config, withPendingMealScope("/v1/meals/pending", scopeKey), { sender, ...(signal ? { signal } : {}) })) as { pending?: Array<{ id: string; label?: string; calories?: { best?: number }; occurredAt?: string }> };
+          const pendingList = Array.isArray(listRes?.pending) ? listRes.pending : [];
+
+          if (pendingList.length === 0) {
+            return { error: "No active unconfirmed meal draft found to confirm." };
+          }
+
+          if (params.count === 2 && pendingList.length > 2) {
+            return {
+              error: "ambiguous_drafts",
+              message: `There are ${pendingList.length} active unconfirmed meal drafts. Please specify which drafts to confirm by ID or meal name.`,
+              pendingDrafts: pendingList.map((d) => ({
+                id: d.id,
+                label: d.label,
+                calories: d.calories?.best,
+                occurredAt: d.occurredAt,
+              })),
+            };
+          }
+
+          const toConfirm = pendingList.slice(0, params.count);
+          targetIds.push(...toConfirm.map((d) => d.id));
+        } else {
+          const latestRes = (await healthFetch(config, withPendingMealScope("/v1/meals/pending/latest", scopeKey), { sender, ...(signal ? { signal } : {}) })) as { pending?: { id: string } | null };
+          if (latestRes?.pending?.id) {
+            targetIds.push(latestRes.pending.id);
+          } else {
+            return { error: "No active unconfirmed meal draft found to confirm." };
+          }
+        }
+
+        if (targetIds.length === 1) {
+          const targetId = targetIds[0]!;
+          const res = (await healthFetch(config, `/v1/meals/pending/${targetId}/confirm`, {
+            method: "POST",
+            body: {
+              scopeKey,
+              ...(params.occurredAt ? { occurredAt: params.occurredAt } : {}),
+              ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}),
+            },
+            sender,
+            ...(signal ? { signal } : {}),
+          })) as { id: string; label?: string; calories?: { best?: number } };
+
+          let dailyNutrition: unknown = undefined;
+          let summaryError: string | undefined = undefined;
+          if (params.date) {
+            try {
+              dailyNutrition = await healthFetch(
+                config,
+                `/v1/nutrition/daily?date=${encodeURIComponent(params.date)}&timezone=${encodeURIComponent(params.timezone ?? "Asia/Kuala_Lumpur")}`,
+                { sender, ...(signal ? { signal } : {}) },
+              );
+            } catch (err) {
+              summaryError = sanitizeUserFacingError((err as Error).message);
+            }
+          }
+
+          return {
+            ...res,
+            confirmedMealId: res.id,
+            pendingDraftId: targetId,
+            status: "confirmed" as const,
+            ...(dailyNutrition ? { dailyNutrition } : {}),
+            ...(summaryError ? { summaryError } : {}),
+            message: `Meal '${res.label ?? "Meal"}' confirmed with canonical ID ${res.id}. Future corrections must use update_meal with confirmedMealId.`,
+          };
+        }
+
+        const confirmedMeals: Array<{
+          confirmedMealId: string;
+          pendingDraftId: string;
+          status: "confirmed";
+          label?: string | undefined;
+          calories?: number | undefined;
+          meal: unknown;
+        }> = [];
+        const failures: Array<{
+          pendingDraftId: string;
+          error: string;
+          status: "failed";
+        }> = [];
+
+        for (const targetId of targetIds) {
+          const idempotencyKey = params.idempotencyKey
+            ? `${params.idempotencyKey}-${targetId}`
+            : undefined;
+
+          try {
+            const res = (await healthFetch(config, `/v1/meals/pending/${targetId}/confirm`, {
+              method: "POST",
+              body: {
+                scopeKey,
+                ...(params.occurredAt ? { occurredAt: params.occurredAt } : {}),
+                ...(idempotencyKey ? { idempotencyKey } : {}),
+              },
+              sender,
+              ...(signal ? { signal } : {}),
+            })) as { id: string; label?: string; calories?: { best?: number } };
+            confirmedMeals.push({
+              confirmedMealId: res.id,
+              pendingDraftId: targetId,
+              status: "confirmed",
+              label: res.label,
+              calories: res.calories?.best,
+              meal: res,
+            });
+          } catch (err) {
+            failures.push({
+              pendingDraftId: targetId,
+              error: sanitizeUserFacingError((err as Error).message),
+              status: "failed",
+            });
+          }
+        }
+
+        let dailyNutrition: unknown = undefined;
+        let summaryError: string | undefined = undefined;
+        if (params.date && confirmedMeals.length > 0) {
+          try {
+            dailyNutrition = await healthFetch(
+              config,
+              `/v1/nutrition/daily?date=${encodeURIComponent(params.date)}&timezone=${encodeURIComponent(params.timezone ?? "Asia/Kuala_Lumpur")}`,
+              { sender, ...(signal ? { signal } : {}) },
+            );
+          } catch (err) {
+            summaryError = sanitizeUserFacingError((err as Error).message);
+          }
+        }
+
+        if (failures.length > 0 && confirmedMeals.length > 0) {
+          return {
+            status: "partial_success",
+            partialSuccess: true,
+            confirmedMeals,
+            failures,
+            ...(dailyNutrition ? { dailyNutrition } : {}),
+            ...(summaryError ? { summaryError } : {}),
+            message: `Partially confirmed: ${confirmedMeals.length} meal(s) confirmed, ${failures.length} failed. Unsuccessful drafts remain pending and can be retried safely.`,
+          };
+        }
+
+        if (failures.length > 0 && confirmedMeals.length === 0) {
+          return {
+            status: "failed",
+            error: "Failed to confirm pending meal(s).",
+            failures,
+          };
+        }
+
+        return {
+          status: "confirmed" as const,
+          confirmedMeals,
+          ...(dailyNutrition ? { dailyNutrition } : {}),
+          ...(summaryError ? { summaryError } : {}),
+          message: `${confirmedMeals.length} meals confirmed. Future corrections must use update_meal with each confirmedMealId.`,
+        };
+      },
+    }),
+    createSenderTool(tool, {
+      name: "update_pending_meal",
+      description: "Correct fields on an unconfirmed meal draft by ID before confirmation. Never call update_meal for unconfirmed drafts.",
+      parameters: Type.Object({
+        id: Id,
+        patch: Type.Partial(
+          Type.Object({
+            label: Type.String(),
+            caloriesBest: Type.Integer({ minimum: 0 }),
+            caloriesLow: Type.Integer({ minimum: 0 }),
+            caloriesHigh: Type.Integer({ minimum: 0 }),
+            proteinG: Type.Number({ minimum: 0 }),
+            carbsG: Type.Number({ minimum: 0 }),
+            fatG: Type.Number({ minimum: 0 }),
+            fiberG: NullableNumber,
+            confidence: Confidence,
+            uncertaintyReasons: Type.Array(Type.String()),
+          }),
+        ),
+      }),
       execute: (params, { config, sender, toolContext, signal }) => {
         const scopeKey = derivePendingMealScope(toolContext);
-        return healthFetch(config, `/v1/meals/pending/${params.id}/confirm`, {
-          method: "POST",
-          body: { scopeKey, ...(params.occurredAt ? { occurredAt: params.occurredAt } : {}), ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}) },
+        return healthFetch(config, `/v1/meals/pending/${params.id}`, {
+          method: "PATCH",
+          body: { ...params.patch, scopeKey },
           sender,
           ...(signal ? { signal } : {}),
         });
@@ -217,7 +473,7 @@ const plugin = defineToolPlugin({
     }),
     createSenderTool(tool, {
       name: "update_meal",
-      description: "Correct an existing meal by ID. Use this for calorie, quantity, macro, confidence, label, or time corrections.",
+      description: "Correct an existing confirmed/logged meal by its canonical confirmed meal ID (from log_meal, confirm_pending_meal, or get_recent_meals). Use this for calorie, quantity, macro, confidence, label, or time/date corrections ('that was yesterday'). For unconfirmed drafts, use update_pending_meal.",
       parameters: Type.Object({
         id: Id,
         patch: Type.Partial(
@@ -235,9 +491,30 @@ const plugin = defineToolPlugin({
             uncertaintyReasons: Type.Array(Type.String()),
           }),
         ),
+        date: Type.Optional(Type.String({ format: "date", description: "Optional local calendar date (YYYY-MM-DD) to fetch updated daily totals immediately after updating." })),
+        timezone: Type.Optional(Type.String({ description: "Timezone for daily total calculation (default Asia/Kuala_Lumpur)." })),
       }),
-      execute: (params, { config, sender, signal }) =>
-        healthFetch(config, `/v1/meals/${params.id}`, { method: "PATCH", body: params.patch, sender, ...(signal ? { signal } : {}) }),
+      execute: async (params, { config, sender, signal }) => {
+        const updated = await healthFetch(config, `/v1/meals/${params.id}`, { method: "PATCH", body: params.patch, sender, ...(signal ? { signal } : {}) });
+        let dailyNutrition: unknown = undefined;
+        let summaryError: string | undefined = undefined;
+        if (params.date) {
+          try {
+            dailyNutrition = await healthFetch(
+              config,
+              `/v1/nutrition/daily?date=${encodeURIComponent(params.date)}&timezone=${encodeURIComponent(params.timezone ?? "Asia/Kuala_Lumpur")}`,
+              { sender, ...(signal ? { signal } : {}) },
+            );
+          } catch (err) {
+            summaryError = sanitizeUserFacingError((err as Error).message);
+          }
+        }
+        return {
+          ...(typeof updated === "object" && updated !== null ? updated : { updated }),
+          ...(dailyNutrition ? { dailyNutrition } : {}),
+          ...(summaryError ? { summaryError } : {}),
+        };
+      },
     }),
     createSenderTool(tool, {
       name: "delete_meal",
@@ -398,7 +675,15 @@ plugin.register = (api) => {
       if (context.sessionKey) {
         api.runContext.setRunContext({ runId: context.sessionKey, namespace: "currentPrompt", value: event.prompt });
       }
-      return { appendSystemContext: healthTrackingGuidance };
+
+      const now = new Date();
+      const klDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kuala_Lumpur" }).format(now);
+      const klTime = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kuala_Lumpur", hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(now);
+      const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      const klYesterday = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kuala_Lumpur" }).format(yesterday);
+      const timeContext = `\nCurrent user local time (Asia/Kuala_Lumpur): ${klDate} ${klTime} (+08:00). Today is ${klDate}. Yesterday was ${klYesterday}.\n`;
+
+      return { appendSystemContext: `${healthTrackingGuidance}\n${timeContext}` };
     },
     { priority: 50 },
   );
@@ -466,20 +751,6 @@ plugin.register = (api) => {
     },
     { priority: 100 },
   );
-
-  api.on(
-    "before_agent_reply",
-    (event) => {
-      if (isFallbackNotice(event.cleanedBody)) {
-        return { handled: true, reply: { text: "" }, reason: "silent-fallback" };
-      }
-      const sanitized = sanitizeUserFacingError(event.cleanedBody);
-      if (sanitized !== event.cleanedBody) {
-        return { handled: true, reply: { text: sanitized } };
-      }
-    },
-    { priority: 100 },
-  );
 };
 
 export default plugin;
@@ -490,8 +761,11 @@ ClawFit health tracking policy:
 - Treat clear workout phrases as actions without unnecessary clarification: "starting push" starts a Push workout; "bench 80 x 8" adds that set; "8 again" reuses the latest exercise and weight; "only got 6" adds another set unless explicitly called a correction. Resolve current state with get_active_workout when needed.
 - Corrections update the existing meal or workout-set ID after resolving it from recent/active state. Never create a replacement. Reuse a stable idempotency key when retrying a create action.
 - Perform only the action in the latest user message. Earlier unanswered or failed user messages are context, not queued actions: never replay them. A retry of the same current action must reuse its original idempotency key.
-- A meal estimate is a draft. For simple quantified foods, form a reasonable estimate without estimate_nutrition. Use estimate_nutrition once only for difficult restaurant/photo/mixed meals. Persist every unconfirmed estimate with create_pending_meal before presenting it. Do not call log_meal until the user confirms, unless their first message explicitly asks to log/save/track it.
-- A bare "yes" or "log it" applies only to the latest pending draft in the current peer scope. Resolve it with get_pending_meal and call confirm_pending_meal; never use conversation history as authority and never invoke an unrelated workout tool.
-- Show calorie best/low/high, macros, confidence, and meaningful uncertainty. Use get_daily_nutrition for daily food/totals rather than calculating them yourself.
+- ALL food and meal estimation (including food photos, restaurant meals, mixed dishes, and food descriptions) MUST use estimate_nutrition. The dedicated strong nutrition model (Gemini 3.8 Flash / 3.7 Flash) performs nutritional calculation; never guess or compute calories/macros mentally. Persist every unconfirmed estimate with create_pending_meal before presenting it to the user. Do not call log_meal until the user confirms, unless their first message explicitly asks to log/save/track it.
+- When an image of a product and an image of its nutrition label are both available, inspect both; printed nutrition label values take precedence over visual estimation.
+- On user confirmation ("log it", "log both", "yes", "save it"): DO NOT re-run estimate_nutrition. Confirm the relevant draft(s) with confirm_pending_meal. For a single draft, "log it" confirms that pending meal; for multiple items, "log both" confirms the active drafts.
+- Updating unconfirmed drafts before confirmation: use update_pending_meal. Updating confirmed/logged meals: use update_meal with the confirmed meal ID (confirmedMealId). Never use a pending draft ID with update_meal.
+- Date corrections ("that was yesterday", "move meals to yesterday", "I ate this last night"): Use the local calendar date for yesterday in Asia/Kuala_Lumpur. If meals were already logged today, update their occurredAt via update_meal to yesterday's date. If confirming a pending draft from yesterday, pass occurredAt with yesterday's timestamp to confirm_pending_meal.
+- For "What did I eat today?" or calorie totals, make a single call to get_daily_nutrition with today's local date and return a direct, concise summary.
 - Use deterministic volume and estimated 1RM returned by the tools. Nutrition is an estimate, not medical advice.
 `;

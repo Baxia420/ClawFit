@@ -4,6 +4,7 @@ export type NutritionModelRequest = {
   model: string;
   prompt: string;
   image?: { mimeType: string; base64: string };
+  images?: { mimeType: string; base64: string }[];
 };
 
 export interface NutritionModelClient {
@@ -20,6 +21,15 @@ export class NutritionEstimationError extends Error {
   }
 }
 
+export function isRetryableNutritionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  // Unrecoverable errors: bad client arguments, schema validation errors on request, or shared auth/credential failures
+  if (/API_KEY_INVALID|PERMISSION_DENIED|UNAUTHENTICATED|INVALID_ARGUMENT|\b401\b|\b403\b|\b400\b/i.test(message)) {
+    return false;
+  }
+  return true;
+}
+
 export class NutritionEstimator {
   constructor(
     private readonly client: NutritionModelClient,
@@ -28,7 +38,11 @@ export class NutritionEstimator {
     if (models.length === 0) throw new Error("At least one nutrition model is required");
   }
 
-  async estimate(input: { text: string; image?: { mimeType: string; base64: string } }): Promise<{
+  async estimate(input: {
+    text: string;
+    image?: { mimeType: string; base64: string };
+    images?: { mimeType: string; base64: string }[];
+  }): Promise<{
     estimate: NutritionEstimate;
     model: string;
     fallbackUsed: boolean;
@@ -39,7 +53,11 @@ export class NutritionEstimator {
         const raw = await this.client.generate({
           model,
           prompt: nutritionPrompt(input.text),
-          ...(input.image ? { image: input.image } : {}),
+          ...(input.images && input.images.length > 0
+            ? { images: input.images }
+            : input.image
+              ? { image: input.image }
+              : {}),
         });
         return {
           estimate: nutritionEstimateSchema.parse(normalizeNutritionKeys(raw)),
@@ -47,7 +65,13 @@ export class NutritionEstimator {
           fallbackUsed: index > 0,
         };
       } catch (error) {
-        attempts.push({ model, reason: error instanceof Error ? error.message : "Unknown model error" });
+        const reason = error instanceof Error ? error.message : "Unknown model error";
+        attempts.push({ model, reason });
+
+        // Non-retryable errors (invalid credentials or malformed client payload) abort immediately
+        if (!isRetryableNutritionError(error)) {
+          throw new NutritionEstimationError(`Non-retryable model failure on ${model}: ${reason}`, attempts);
+        }
       }
     }
     throw new NutritionEstimationError("All configured nutrition models failed", attempts);

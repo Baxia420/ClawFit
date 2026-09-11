@@ -4,6 +4,9 @@ import { z, ZodError } from "zod";
 import {
   confirmPendingMealSchema,
   foodPresetPatchSchema,
+  getZonedCalendarDate,
+  isValidCalendarDate,
+  isValidIanaTimezone,
   mealInputSchema,
   mealPatchSchema,
   notificationPreferenceSchema,
@@ -13,19 +16,26 @@ import {
   pendingMealScopeSchema,
   settingsPatchSchema,
   startWorkoutSchema,
+  TOGETHER_VIEWING_TIMEZONE,
+  togetherResponseSchema,
   workoutSetInputSchema,
   workoutSetPatchSchema,
+  zonedDayRange,
 } from "@clawfit/health-core";
-import { ConflictError, DEFAULT_PRIMARY_USER_ID, HealthRepository, NotFoundError } from "@clawfit/db";
+import { ConflictError, DEFAULT_PARTNER_USER_ID, DEFAULT_PRIMARY_USER_ID, HealthRepository, NotFoundError } from "@clawfit/db";
+import { verifyWebAssertion } from "./jwt-assertion.js";
 
 const uuidParam = z.object({ id: z.string().uuid() });
-const dateQuery = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), timezone: z.string().min(1).default("Asia/Kuala_Lumpur") });
+const dateQuery = z.object({
+  date: z.string().refine(isValidCalendarDate, { message: "Invalid calendar date" }),
+  timezone: z.string().trim().refine(isValidIanaTimezone, { message: "Invalid IANA timezone" }).default("Asia/Kuala_Lumpur"),
+});
 const listQuery = z.object({ limit: z.coerce.number().int().min(1).max(100).default(20) });
 
 declare module "fastify" {
   interface FastifyRequest {
     userId?: string | undefined;
-    clientType?: "web" | "openclaw" | undefined;
+    clientType?: "web" | "web_machine" | "openclaw" | undefined;
     startTime?: number | undefined;
   }
 }
@@ -37,11 +47,27 @@ export type CreateAppOptions = {
   allowedGroupIds?: string[] | undefined;
   estimator?: NutritionEstimator | undefined;
   logger?: boolean | undefined;
+  primaryGoogleEmail?: string | undefined;
+  partnerGoogleEmail?: string | undefined;
+  assertionSecret?: string | undefined;
+  authSecret?: string | undefined;
 };
 
 export function createApp(options: CreateAppOptions) {
   if (options.webToken && options.openclawToken && options.webToken === options.openclawToken) {
     throw new Error("HEALTH_API_WEB_TOKEN and HEALTH_API_OPENCLAW_TOKEN must be configured and different from each other");
+  }
+
+  const primaryGoogleEmail = options.primaryGoogleEmail ?? process.env.CLAWFIT_PRIMARY_GOOGLE_EMAIL;
+  const partnerGoogleEmail = options.partnerGoogleEmail ?? process.env.CLAWFIT_PARTNER_GOOGLE_EMAIL;
+  const assertionSecret =
+    options.assertionSecret ??
+    options.authSecret ??
+    process.env.WEB_ASSERTION_SIGNING_SECRET ??
+    process.env.HEALTH_API_AUTH_SECRET;
+
+  if (assertionSecret && options.webToken && assertionSecret === options.webToken) {
+    throw new Error("Assertion signing secret must not be reused as webToken");
   }
 
   const app = Fastify({
@@ -61,7 +87,6 @@ export function createApp(options: CreateAppOptions) {
             ],
           },
   });
-  const compatibilityUserId = DEFAULT_PRIMARY_USER_ID;
 
   app.decorateRequest("userId", undefined);
   app.decorateRequest("clientType", undefined);
@@ -78,18 +103,22 @@ export function createApp(options: CreateAppOptions) {
     (request as unknown as { startTime: number }).startTime = performance.now();
     if (request.url === "/health" || request.url === "/ready") return;
 
+    // Reject forged identity / profile spoofing headers
+    if (request.headers["x-user-id"] || request.headers["x-profile-id"]) {
+      return reply.code(403).send({ error: { code: "FORBIDDEN", message: "User ID override headers not permitted" } });
+    }
+
     const authorization = request.headers.authorization;
     const provided = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
+    if (!provided) {
+      return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "A valid bearer token or assertion is required" } });
+    }
 
     const webToken = options.webToken ?? "";
     const openclawToken = options.openclawToken ?? "";
 
-    const isWeb = Boolean(webToken && safeEqual(provided, webToken));
     const isOpenClaw = Boolean(openclawToken && safeEqual(provided, openclawToken));
-
-    if (!isWeb && !isOpenClaw) {
-      return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "A valid bearer token is required" } });
-    }
+    const isWebMachine = Boolean(webToken && safeEqual(provided, webToken));
 
     const senderProviderHeader = request.headers["x-clawfit-sender-provider"];
     const senderIdHeader = request.headers["x-clawfit-sender-id"];
@@ -99,14 +128,53 @@ export function createApp(options: CreateAppOptions) {
     const senderId = typeof senderIdHeader === "string" ? senderIdHeader : undefined;
     const conversationId = typeof conversationIdHeader === "string" ? conversationIdHeader : undefined;
 
-    // Web client handling
-    if (isWeb && !isOpenClaw) {
+    // Web machine token handling: permitted ONLY for internal auth setup/resolve endpoint
+    if (isWebMachine && !isOpenClaw) {
       if (senderId || senderProvider || conversationId) {
         return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Sender headers not permitted for web client" } });
       }
-      request.clientType = "web";
-      request.userId = compatibilityUserId;
-      return;
+      if (request.url.startsWith("/v1/auth/google/resolve-or-link")) {
+        request.clientType = "web_machine";
+        return;
+      }
+      // Machine token alone CANNOT access user health routes!
+      return reply.code(401).send({
+        error: { code: "UNAUTHORIZED", message: "A signed user assertion is required for web operations" },
+      });
+    }
+
+    // If not OpenClaw, attempt to verify as a signed web assertion
+    if (!isOpenClaw) {
+      if (senderId || senderProvider || conversationId) {
+        return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Sender headers not permitted for web client" } });
+      }
+      if (!assertionSecret) {
+        return reply.code(503).send({
+          error: { code: "SERVICE_UNAVAILABLE", message: "Health API web authentication is not configured" },
+        });
+      }
+      try {
+        const verified = await verifyWebAssertion({
+          secret: assertionSecret,
+          token: provided,
+        });
+
+        const user = await options.repository.getUser(verified.userId).catch(() => null);
+        if (!user || !user.active) {
+          return reply.code(403).send({
+            error: { code: "INACTIVE_USER", message: "This ClawFit profile is inactive or does not exist." },
+          });
+        }
+
+        request.clientType = "web";
+        request.userId = verified.userId;
+        return;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "A valid bearer token or signed assertion is required";
+        return reply.code(401).send({
+          error: { code: "UNAUTHORIZED", message },
+        });
+      }
     }
 
     // OpenClaw client handling
@@ -162,6 +230,12 @@ export function createApp(options: CreateAppOptions) {
     request.userId = resolution.user.id;
   });
 
+  app.addHook("onSend", async (request, reply) => {
+    if (request.url !== "/health" && request.url !== "/ready") {
+      reply.header("Cache-Control", "private, no-cache, no-store, max-age=0, must-revalidate");
+    }
+  });
+
   app.addHook("onResponse", async (request, reply) => {
     const startTime = (request as unknown as { startTime?: number }).startTime;
     if (typeof startTime === "number") {
@@ -179,8 +253,191 @@ export function createApp(options: CreateAppOptions) {
     }
     if (error instanceof NotFoundError) return reply.code(404).send({ error: { code: "NOT_FOUND", message: error.message } });
     if (error instanceof ConflictError) return reply.code(409).send({ error: { code: "CONFLICT", message: error.message } });
+    const maybeFastifyError = error as { statusCode?: number; code?: string; message?: string };
+    if (typeof maybeFastifyError?.statusCode === "number") {
+      return reply.code(maybeFastifyError.statusCode).send({
+        error: {
+          code: maybeFastifyError.code || "REQUEST_ERROR",
+          message: maybeFastifyError.message || "Request failed",
+        },
+      });
+    }
     app.log.error({ err: error }, "request failed");
     return reply.code(500).send({ error: { code: "INTERNAL_ERROR", message: "The request could not be completed" } });
+  });
+
+  const resolveOrLinkGoogleSchema = z.object({
+    providerAccountId: z.string().min(1),
+    email: z.string().email(),
+    emailVerified: z.literal(true),
+    name: z.string().optional(),
+    picture: z.string().optional(),
+  });
+
+  app.post("/v1/auth/google/resolve-or-link", async (request, reply) => {
+    if (request.clientType !== "web_machine") {
+      return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "Web machine token required" } });
+    }
+
+    const parseResult = resolveOrLinkGoogleSchema.safeParse(request.body);
+    if (!parseResult.success) {
+      return reply.code(403).send({ error: { code: "UNVERIFIED_EMAIL", message: "Google account email is not verified" } });
+    }
+    const body = parseResult.data;
+
+    const primaryEmail = (primaryGoogleEmail ?? "").toLowerCase().trim();
+    const partnerEmail = (partnerGoogleEmail ?? "").toLowerCase().trim();
+
+    // Missing approval configuration must not grant access
+    if (!primaryEmail && !partnerEmail) {
+      return reply.code(403).send({
+        error: { code: "CONFIGURATION_ERROR", message: "Google account approval is not configured on the server" },
+      });
+    }
+
+    // Reject ambiguous configuration such as identical primary and partner email addresses
+    if (primaryEmail && partnerEmail && primaryEmail === partnerEmail) {
+      return reply.code(403).send({
+        error: { code: "CONFIGURATION_ERROR", message: "Primary and partner Google emails cannot be identical" },
+      });
+    }
+
+    // Allowlist check occurs FIRST, before returning existing resolution or linking
+    const normalizedEmail = body.email.toLowerCase().trim();
+    let expectedUserId: string | null = null;
+    if (primaryEmail && normalizedEmail === primaryEmail) {
+      expectedUserId = DEFAULT_PRIMARY_USER_ID;
+    } else if (partnerEmail && normalizedEmail === partnerEmail) {
+      expectedUserId = DEFAULT_PARTNER_USER_ID;
+    }
+
+    if (!expectedUserId) {
+      return reply.code(403).send({
+        error: { code: "UNAPPROVED_ACCOUNT", message: "This Google account is not authorized to access ClawFit" },
+      });
+    }
+
+    const targetUser = await options.repository.getUser(expectedUserId).catch(() => null);
+    if (!targetUser || !targetUser.active) {
+      return reply.code(403).send({ error: { code: "INACTIVE_USER", message: "This ClawFit profile is inactive" } });
+    }
+
+    const existingResolution = await options.repository.resolveUser({
+      provider: "google",
+      externalIdentifier: body.providerAccountId,
+    });
+
+    if (existingResolution.resolved) {
+      // Validate that immutable Google subject resolves to the intended existing ClawFit user
+      if (existingResolution.user.id !== expectedUserId) {
+        return reply.code(403).send({
+          error: {
+            code: "ACCOUNT_MISMATCH",
+            message: "This Google identity is permanently bound to a different ClawFit profile",
+          },
+        });
+      }
+
+      if (!existingResolution.user.active) {
+        return reply.code(403).send({ error: { code: "INACTIVE_USER", message: "This ClawFit profile is inactive" } });
+      }
+
+      return reply.send({
+        resolved: true,
+        user: {
+          id: existingResolution.user.id,
+          displayName: existingResolution.user.displayName,
+          role: existingResolution.user.role,
+          active: existingResolution.user.active,
+        },
+        linked: false,
+      });
+    }
+
+    if (existingResolution.reason === "user_inactive_or_missing") {
+      return reply.code(403).send({ error: { code: "INACTIVE_USER", message: "This ClawFit profile is inactive" } });
+    }
+
+    // Attempt to link identity with deterministic concurrency handling
+    try {
+      await options.repository.linkExternalIdentity({
+        userId: expectedUserId,
+        provider: "google",
+        externalIdentifier: body.providerAccountId,
+        metadata: {
+          email: body.email,
+          name: body.name ?? "",
+          picture: body.picture ?? "",
+        },
+      });
+
+      return reply.send({
+        resolved: true,
+        user: {
+          id: targetUser.id,
+          displayName: targetUser.displayName,
+          role: targetUser.role,
+          active: targetUser.active,
+        },
+        linked: true,
+      });
+    } catch (err: unknown) {
+      if (options.logger !== false) {
+        app.log.warn({ err, providerAccountId: body.providerAccountId }, "Google account linking conflict or failure encountered; attempting resolution recheck");
+      }
+
+      try {
+        const recheck = await options.repository.resolveUser({
+          provider: "google",
+          externalIdentifier: body.providerAccountId,
+        });
+
+        if (recheck.resolved) {
+          if (recheck.user.id !== expectedUserId) {
+            return reply.code(403).send({
+              error: {
+                code: "ACCOUNT_MISMATCH",
+                message: "This Google identity is permanently bound to a different ClawFit profile",
+              },
+            });
+          }
+
+          if (!recheck.user.active) {
+            return reply.code(403).send({
+              error: { code: "INACTIVE_USER", message: "This ClawFit profile is inactive" },
+            });
+          }
+
+          return reply.send({
+            resolved: true,
+            user: {
+              id: recheck.user.id,
+              displayName: recheck.user.displayName,
+              role: recheck.user.role,
+              active: recheck.user.active,
+            },
+            linked: true,
+          });
+        }
+      } catch (recheckErr: unknown) {
+        if (options.logger !== false) {
+          app.log.error({ err: recheckErr }, "Error during post-conflict identity resolution recheck");
+        }
+        return reply.code(500).send({
+          error: {
+            code: "INTERNAL_ERROR",
+            message: "An unexpected error occurred while verifying the account link",
+          },
+        });
+      }
+
+      return reply.code(409).send({
+        error: {
+          code: "IDENTITY_CONFLICT",
+          message: "The Google account could not be linked due to an unresolved identity conflict",
+        },
+      });
+    }
   });
 
   app.get("/health", async () => ({ status: "ok" }));
@@ -198,16 +455,51 @@ export function createApp(options: CreateAppOptions) {
     }
   });
 
-  app.post("/v1/nutrition/estimate", async (request) => {
+  const NUTRITION_ESTIMATE_BODY_LIMIT = 16 * 1024 * 1024; // 16 MiB total request budget
+
+  app.post("/v1/nutrition/estimate", { bodyLimit: NUTRITION_ESTIMATE_BODY_LIMIT }, async (request) => {
     if (!options.estimator) throw new ConflictError("Nutrition estimator is not configured");
+    const imageSchema = z.object({
+      mimeType: z.enum(["image/jpeg", "image/png", "image/webp", "image/heic"]),
+      base64: z.string().max(6_000_000), // ~4.5 MiB per image budget
+    });
     const body = z
       .object({
         text: z.string().max(4_000).default(""),
-        image: z.object({ mimeType: z.enum(["image/jpeg", "image/png", "image/webp", "image/heic"]), base64: z.string().max(16_000_000) }).optional(),
+        image: imageSchema.optional(),
+        images: z.array(imageSchema).max(4).optional(),
       })
-      .refine((value) => value.text.length > 0 || value.image, "Text or image is required")
+      .refine((value) => value.text.length > 0 || value.image || (value.images && value.images.length > 0), "Text or image is required")
       .parse(request.body);
-    return options.estimator.estimate({ text: body.text, ...(body.image ? { image: body.image } : {}) });
+
+    const imageCount = body.images && body.images.length > 0 ? body.images.length : body.image ? 1 : 0;
+    const correlationId = request.id;
+
+    const result = await options.estimator.estimate({
+      text: body.text,
+      ...(body.images && body.images.length > 0 ? { images: body.images } : body.image ? { image: body.image } : {}),
+    });
+
+    // Safely record estimator execution metadata without logging image data, user secrets, or message text:
+    request.log.info(
+      {
+        correlationId,
+        estimatorModelId: result.model,
+        fallbackUsed: result.fallbackUsed,
+        imageCount,
+        hasText: body.text.length > 0,
+      },
+      "nutrition estimation completed",
+    );
+
+    return {
+      estimate: result.estimate,
+      model: result.model,
+      estimatorModelId: result.model,
+      fallbackUsed: result.fallbackUsed,
+      correlationId,
+      ...result.estimate,
+    };
   });
 
   app.post("/v1/meals", async (request, reply) => {
@@ -217,6 +509,11 @@ export function createApp(options: CreateAppOptions) {
   app.post("/v1/meals/pending", async (request, reply) => {
     const input = pendingMealInputSchema.parse(request.body);
     return reply.code(201).send(await options.repository.createPendingMeal(requireRequestUserId(request), input));
+  });
+  app.get("/v1/meals/pending", async (request) => {
+    const scopeKey = pendingMealScopeSchema.parse(request.query).scopeKey;
+    const limit = listQuery.parse(request.query).limit;
+    return { pending: await options.repository.listPendingMeals(requireRequestUserId(request), scopeKey, undefined, limit) };
   });
   app.get("/v1/meals/pending/latest", async (request) => {
     const scopeKey = pendingMealScopeSchema.parse(request.query).scopeKey;
@@ -267,10 +564,80 @@ export function createApp(options: CreateAppOptions) {
     return { ...result, date: query.date };
   });
   app.get("/v1/nutrition/trend", async (request) => {
-    const query = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query);
-    const end = new Date();
-    const start = new Date(end.getTime() - query.days * 86_400_000);
-    return options.repository.nutritionTrend(requireRequestUserId(request), start, end);
+    const query = z.object({
+      days: z.coerce.number().int().min(1).max(365).default(30),
+      timezone: z.string().trim().refine(isValidIanaTimezone, { message: "Invalid IANA timezone" }).optional(),
+      date: z.string().refine(isValidCalendarDate, { message: "Invalid calendar date" }).optional(),
+    }).parse(request.query);
+    const userId = requireRequestUserId(request);
+    const settings = await options.repository.getSettings(userId);
+    const timezone = query.timezone || settings.timezone || "Asia/Kuala_Lumpur";
+
+    const todayStr = query.date ?? getZonedCalendarDate(new Date(), timezone);
+
+    const { end } = zonedDayRange(todayStr, timezone);
+    const startDate = new Date(`${todayStr}T12:00:00Z`);
+    startDate.setUTCDate(startDate.getUTCDate() - (query.days - 1));
+    const startStr = startDate.toISOString().slice(0, 10);
+    const { start } = zonedDayRange(startStr, timezone);
+
+    return options.repository.nutritionTrend(userId, start, end, timezone);
+  });
+
+  app.get("/v1/together", async (request, reply) => {
+    const query = z
+      .object({
+        date: z
+          .string()
+          .refine(isValidCalendarDate, { message: "Invalid calendar date" })
+          .optional(),
+        timezone: z
+          .string()
+          .trim()
+          .refine(isValidIanaTimezone, { message: "Invalid IANA timezone" })
+          .optional(),
+        days: z
+          .coerce
+          .number()
+          .int()
+          .refine((d) => d === 7 || d === 30, { message: "Days must be 7 or 30" })
+          .default(7),
+      })
+      .parse(request.query);
+
+    const callerUserId = requireRequestUserId(request);
+    const callerUser = await options.repository.getUser(callerUserId).catch(() => null);
+    if (!callerUser || !callerUser.active) {
+      return reply.code(403).send({
+        error: {
+          code: "INACTIVE_USER",
+          message: "Caller account is inactive or does not exist",
+        },
+      });
+    }
+
+    // Together dashboard uses one explicit internal viewing timezone (TOGETHER_VIEWING_TIMEZONE = "Asia/Kuala_Lumpur")
+    // consistently across all members, ensuring both callers receive identical member totals.
+    const timezone = TOGETHER_VIEWING_TIMEZONE;
+    const dateStr = query.date ?? getZonedCalendarDate(new Date(), timezone);
+
+    const data = await options.repository.getTogetherDashboardData(
+      callerUserId,
+      dateStr,
+      timezone,
+      query.days,
+    );
+
+    if (!data) {
+      return reply.code(403).send({
+        error: {
+          code: "NO_HOUSEHOLD",
+          message: "Caller does not belong to any active household",
+        },
+      });
+    }
+
+    return togetherResponseSchema.parse(data);
   });
 
   app.post("/v1/food-presets", async (request, reply) => {
@@ -358,28 +725,4 @@ function safeEqual(left: string, right: string) {
   const leftBuffer = Buffer.from(left);
   const rightBuffer = Buffer.from(right);
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
-}
-
-function zonedDayRange(date: string, timezone: string) {
-  const next = new Date(`${date}T12:00:00Z`);
-  next.setUTCDate(next.getUTCDate() + 1);
-  const nextDate = next.toISOString().slice(0, 10);
-  return { start: zonedDateToUtc(date, timezone), end: zonedDateToUtc(nextDate, timezone) };
-}
-
-function zonedDateToUtc(date: string, timezone: string) {
-  const target = new Date(`${date}T00:00:00Z`);
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: timezone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(target);
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  const represented = Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day), Number(values.hour), Number(values.minute), Number(values.second));
-  return new Date(target.getTime() - (represented - target.getTime()));
 }

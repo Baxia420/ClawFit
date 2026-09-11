@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useState } from "react";
+import { useRouter } from "next/navigation";
 import type { NotificationPreference, NotificationType, Settings } from "../lib/api";
 
 const notificationMeta: Record<NotificationType, { label: string; description: string; defaultTime: string }> = {
@@ -22,6 +23,7 @@ const dayLabels = [
 ];
 
 export function SettingsForm({ initialSettings, savedPreferences }: { initialSettings: Settings; savedPreferences: NotificationPreference[] }) {
+  const router = useRouter();
   const [settings, setSettings] = useState({ ...initialSettings, preferredUnits: "metric" as const });
   const [preferences, setPreferences] = useState(() => Object.entries(notificationMeta).map(([type, meta]) => savedPreferences.find((item) => item.type === type) ?? {
     type: type as NotificationType,
@@ -52,7 +54,8 @@ export function SettingsForm({ initialSettings, savedPreferences }: { initialSet
       const response = await fetch("/api/settings", { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       const payload = (await response.json()) as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "Save failed");
-      setStatus(key === "goals" ? "Goals and locale saved." : `${notificationMeta[key as NotificationType].label} saved.`);
+      setStatus(key === "goals" ? "Goals saved." : `${notificationMeta[key as NotificationType].label} saved.`);
+      router.refresh();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Save failed");
     } finally {
@@ -66,11 +69,10 @@ export function SettingsForm({ initialSettings, savedPreferences }: { initialSet
 
   return <div className="settings-stack">
     <form className="panel settings-panel" onSubmit={saveSettings}>
-      <div className="panel-title"><span>01 / GOALS & LOCALE</span><strong>authoritative defaults</strong></div>
+      <div className="panel-title"><span>01 / GOALS</span><strong>authoritative defaults</strong></div>
       <div className="settings-grid">
         <label>Calorie target<input type="number" min="500" max="10000" value={settings.calorieTarget} onChange={(event) => setSettings({ ...settings, calorieTarget: Number(event.target.value) })} /><small>KCAL / DAY</small></label>
         <label>Protein target<input type="number" min="10" max="1000" value={settings.proteinTargetG} onChange={(event) => setSettings({ ...settings, proteinTargetG: Number(event.target.value) })} /><small>GRAMS / DAY</small></label>
-        <label>Timezone<input value={settings.timezone} onChange={(event) => setSettings({ ...settings, timezone: event.target.value })} /><small>IANA NAME</small></label>
         <label>Preferred units<select value="metric" disabled><option value="metric">Metric / kg</option></select><small>V1 / KG ONLY</small></label>
       </div>
       <footer><button type="submit" disabled={busy === "goals"}>SAVE GOALS</button></footer>

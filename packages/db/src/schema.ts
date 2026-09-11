@@ -47,6 +47,7 @@ export const externalIdentities = pgTable(
   },
   (table) => [
     uniqueIndex("external_identities_provider_identifier_uq").on(table.provider, table.externalIdentifier),
+    uniqueIndex("external_identities_user_google_uq").on(table.userId).where(sql`${table.provider} = 'google'`),
     index("external_identities_user_id_idx").on(table.userId),
   ],
 );

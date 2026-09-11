@@ -8,7 +8,11 @@ export class GeminiNutritionClient implements NutritionModelClient {
 
   async generate(request: NutritionModelRequest): Promise<unknown> {
     const parts: Record<string, unknown>[] = [{ text: request.prompt }];
-    if (request.image) {
+    if (request.images && request.images.length > 0) {
+      for (const img of request.images) {
+        parts.push({ inlineData: { mimeType: img.mimeType, data: img.base64 } });
+      }
+    } else if (request.image) {
       parts.push({ inlineData: { mimeType: request.image.mimeType, data: request.image.base64 } });
     }
     const response = await this.fetchImpl(

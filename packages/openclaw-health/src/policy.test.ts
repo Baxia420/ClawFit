@@ -9,5 +9,7 @@ describe("OpenClaw health-tool policy", () => {
     expect(new Set(policy.healthTools).size).toBe(policy.healthTools.length);
     expect([...policy.healthTools].sort()).toEqual([...manifest.contracts.tools].sort());
     expect(policy.healthTools).toContain("create_pending_meal");
+    expect(policy.healthTools).toContain("update_pending_meal");
   });
 });
+

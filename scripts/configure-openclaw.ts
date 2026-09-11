@@ -58,31 +58,67 @@ if (report.results) {
   }
 }
 
+// Register Google models in the OpenClaw Google provider model registry
+const googleProviderModels = [
+  {
+    id: "gemini-3.5-flash-lite",
+    name: "Gemini 3.5 Flash Lite",
+    reasoning: true,
+    input: ["text", "image"],
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
+  {
+    id: "gemini-3.7-flash",
+    name: "Gemini 3.7 Flash",
+    reasoning: true,
+    input: ["text", "image"],
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
+  {
+    id: "gemini-3.8-flash",
+    name: "Gemini 3.8 Flash",
+    reasoning: true,
+    input: ["text", "image"],
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
+];
+
+runOpenClaw(["config", "set", "models.providers.google.models", JSON.stringify(googleProviderModels), "--strict-json"]);
+
 const primaryId = `google/${defaultModel}`;
-const fallbackIds = verifiedFallbacks.map((m) => `google/${m}`);
+// General agent fallback strategy:
+// Do NOT use heavy models (3.7/3.8) as generic fallbacks for the normal chat/orchestrator.
+// Only configure low-cost fallback if evidence in .model-smoke.json supports it.
+const candidateLiteFallback = "gemini-3.1-flash-lite";
+const hasLiteFallbackSmoke = Boolean(
+  report.results?.[candidateLiteFallback]?.status === "available" &&
+  report.results?.[candidateLiteFallback]?.toolCalling === "pass"
+);
+
+const generalFallbacks: string[] = [];
+if (hasLiteFallbackSmoke) {
+  generalFallbacks.push(`google/${candidateLiteFallback}`);
+} else {
+  console.log(`[Evidence Note] .model-smoke.json lacks live smoke evidence for ${candidateLiteFallback}. Fallbacks kept empty (${JSON.stringify(generalFallbacks)}) to prevent unverified model invocations.`);
+}
 
 runOpenClaw(["config", "set", "agents.defaults.model.primary", primaryId]);
-runOpenClaw(["config", "set", "agents.defaults.model.fallbacks", JSON.stringify(fallbackIds), "--strict-json"]);
+runOpenClaw(["config", "set", "agents.defaults.model.fallbacks", JSON.stringify(generalFallbacks), "--strict-json"]);
 
-// Only configure the verified primary model and verified fallback models into OpenClaw
+// Configure allowed agent models in OpenClaw
 const configuredModels: Record<string, Record<string, never>> = {
   [primaryId]: {},
+  ...(hasLiteFallbackSmoke ? { [`google/${candidateLiteFallback}`]: {} } : {}),
 };
-for (const fallback of fallbackIds) {
-  configuredModels[fallback] = {};
-}
 runOpenClaw(["config", "set", "agents.defaults.models", JSON.stringify(configuredModels), "--strict-json", "--merge"]);
 
 console.log(`Configured OpenClaw primary model: ${primaryId}`);
-if (fallbackIds.length > 0) {
-  console.log(`Configured OpenClaw verified fallbacks: ${JSON.stringify(fallbackIds)}`);
-} else {
-  console.log("No additional verified fallback models available (no unverified models were configured).");
-}
-console.log(`Verified Nutrition Primary model: ${nutritionPrimary}`);
-if (report.selected?.nutritionFallback) {
-  console.log(`Verified Nutrition Fallback model: ${report.selected.nutritionFallback}`);
-} else {
-  console.log("No verified Nutrition Fallback model available.");
-}
-console.log("\nModel configuration completed using ONLY smoke-verified models from .model-smoke.json.");
+console.log(`Configured OpenClaw general fallback: ${JSON.stringify(generalFallbacks)}`);
+console.log(`Registered Google provider models: gemini-3.5-flash-lite, gemini-3.7-flash, gemini-3.8-flash`);
+console.log(`\nNutrition Model Routing (Health API):`);
+console.log(`  Primary:  ${process.env.NUTRITION_MODEL_PRIMARY || "gemini-3.8-flash"}`);
+console.log(`  Fallback: ${process.env.NUTRITION_MODEL_FALLBACK || "gemini-3.7-flash"}`);
+console.log("\nModel configuration completed successfully.");

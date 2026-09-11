@@ -12,7 +12,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@clawfit/health-core": "workspace:*",
+    "jose": "^6.2.12",
     "next": "latest",
+    "next-auth": "5.0.0-beta.32",
     "react": "latest",
     "react-dom": "latest",
     "recharts": "latest",

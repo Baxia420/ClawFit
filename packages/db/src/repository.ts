@@ -1,9 +1,11 @@
 import { and, asc, desc, eq, gt, gte, ilike, isNull, lt, sql } from "drizzle-orm";
 import {
+  canAccessResource,
   estimatedOneRepMax,
   normalizeWhatsAppIdentifier,
   sumNutrition,
   workoutVolume,
+  zonedDayRange,
   type CreateUserInput,
   type FoodPresetPatch,
   type LinkExternalIdentityInput,
@@ -14,6 +16,8 @@ import {
   type PendingMealPatch,
   type ResolveUserInput,
   type SettingsPatch,
+  type TogetherMemberProgress,
+  type TogetherResponse,
   type WorkoutSetInput,
   type WorkoutSetPatch,
 } from "@clawfit/health-core";
@@ -23,14 +27,15 @@ import {
   externalIdentities,
   foodPresets,
   householdMembers,
+  households,
   mealItems,
   meals,
   notificationPreferences,
   pendingMealEstimates,
   userSettings,
   users,
-  workouts,
   workoutSets,
+  workouts,
 } from "./schema.js";
 
 export const DEFAULT_HOUSEHOLD_ID = "00000000-0000-0000-0000-000000000001";
@@ -46,6 +51,39 @@ export class ConflictError extends Error {
 }
 
 export type HydratedMeal = typeof meals.$inferSelect & { items: (typeof mealItems.$inferSelect)[] };
+
+export interface ConfirmPendingMealSummaryOptions {
+  date?: string | undefined;
+  timezone?: string | undefined;
+  start?: Date | undefined;
+  end?: Date | undefined;
+}
+
+export interface ConfirmPendingMealTarget {
+  id: string;
+  scopeKey: string;
+  occurredAt?: Date | undefined;
+  idempotencyKey?: string | undefined;
+}
+
+export interface CompoundConfirmationResult {
+  status: "confirmed" | "partial_success" | "failed";
+  partialSuccess?: boolean | undefined;
+  confirmedMeals: HydratedMeal[];
+  failures: Array<{
+    pendingDraftId: string;
+    error: string;
+    status: "failed";
+  }>;
+  dailyNutrition?: { date: string; totals: ReturnType<typeof sumNutrition>; meals: (typeof meals.$inferSelect)[] } | undefined;
+  summaryError?: string | undefined;
+}
+
+export interface CompoundUpdateMealResult {
+  meal: HydratedMeal;
+  dailyNutrition?: { date: string; totals: ReturnType<typeof sumNutrition>; meals: (typeof meals.$inferSelect)[] } | undefined;
+  summaryError?: string | undefined;
+}
 
 export class HealthRepository {
   constructor(private readonly db: HealthDatabase) {}
@@ -96,6 +134,17 @@ export class HealthRepository {
     return partnerMember[0]?.user ?? null;
   }
 
+  async getHouseholdForUser(userId: string) {
+    const membership = await this.db.query.householdMembers.findFirst({
+      where: eq(householdMembers.userId, userId),
+    });
+    if (!membership) return null;
+    const household = await this.db.query.households.findFirst({
+      where: eq(households.id, membership.householdId),
+    });
+    return household ? { household, membership } : null;
+  }
+
   async linkExternalIdentity(input: LinkExternalIdentityInput) {
     const user = await this.db.query.users.findFirst({ where: eq(users.id, input.userId) });
     if (!user) throw new NotFoundError("User not found");
@@ -112,6 +161,15 @@ export class HealthRepository {
         throw new ConflictError(`External identifier '${externalIdentifier}' is already mapped to another user`);
       }
       return existing;
+    }
+
+    if (input.provider === "google") {
+      const userGoogle = await this.db.query.externalIdentities.findFirst({
+        where: and(eq(externalIdentities.provider, "google"), eq(externalIdentities.userId, input.userId)),
+      });
+      if (userGoogle) {
+        throw new ConflictError(`User ${input.userId} is already linked to Google account`);
+      }
     }
 
     const [created] = await this.db
@@ -257,6 +315,25 @@ export class HealthRepository {
     return pending ?? null;
   }
 
+  async listPendingMeals(
+    userId: string,
+    scopeKey: string,
+    now: Date = new Date(),
+    limit = 10,
+  ): Promise<(typeof pendingMealEstimates.$inferSelect)[]> {
+    return this.db.query.pendingMealEstimates.findMany({
+      where: and(
+        eq(pendingMealEstimates.userId, userId),
+        eq(pendingMealEstimates.confirmed, false),
+        eq(pendingMealEstimates.scopeKey, scopeKey),
+        isNull(pendingMealEstimates.cancelledAt),
+        gt(pendingMealEstimates.expiresAt, now),
+      ),
+      orderBy: desc(pendingMealEstimates.createdAt),
+      limit,
+    });
+  }
+
   async updatePendingMeal(userId: string, id: string, scopeKey: string, patch: PendingMealPatch): Promise<typeof pendingMealEstimates.$inferSelect> {
     const current = await this.getPendingMeal(userId, id, scopeKey);
     if (current.confirmed) throw new ConflictError("A confirmed meal draft cannot be edited");
@@ -362,6 +439,75 @@ export class HealthRepository {
     });
   }
 
+  async confirmPendingMealsWithSummary(
+    userId: string,
+    targets: ConfirmPendingMealTarget[],
+    summaryOptions?: ConfirmPendingMealSummaryOptions,
+    now: Date = new Date(),
+  ): Promise<CompoundConfirmationResult> {
+    const confirmedMeals: HydratedMeal[] = [];
+    const failures: Array<{ pendingDraftId: string; error: string; status: "failed" }> = [];
+
+    for (const target of targets) {
+      try {
+        const confirmed = await this.confirmPendingMeal(
+          userId,
+          target.id,
+          {
+            scopeKey: target.scopeKey,
+            ...(target.occurredAt ? { occurredAt: target.occurredAt } : {}),
+            ...(target.idempotencyKey ? { idempotencyKey: target.idempotencyKey } : {}),
+          },
+          now,
+        );
+        confirmedMeals.push(confirmed);
+      } catch (err) {
+        failures.push({
+          pendingDraftId: target.id,
+          error: (err as Error).message,
+          status: "failed",
+        });
+      }
+    }
+
+    const overallStatus: "confirmed" | "partial_success" | "failed" =
+      failures.length === 0 && confirmedMeals.length > 0
+        ? "confirmed"
+        : failures.length > 0 && confirmedMeals.length > 0
+          ? "partial_success"
+          : "failed";
+
+    let dailyNutrition: { date: string; totals: ReturnType<typeof sumNutrition>; meals: (typeof meals.$inferSelect)[] } | undefined;
+    let summaryError: string | undefined;
+
+    if (confirmedMeals.length > 0 && summaryOptions) {
+      let range: { start: Date; end: Date } | undefined;
+      if (summaryOptions.start && summaryOptions.end) {
+        range = { start: summaryOptions.start, end: summaryOptions.end };
+      } else if (summaryOptions.date) {
+        range = zonedDayRange(summaryOptions.date, summaryOptions.timezone ?? "Asia/Kuala_Lumpur");
+      }
+
+      if (range) {
+        try {
+          const res = await this.dailyNutrition(userId, range.start, range.end);
+          dailyNutrition = summaryOptions.date ? { ...res, date: summaryOptions.date } : res;
+        } catch (err) {
+          summaryError = (err as Error).message;
+        }
+      }
+    }
+
+    return {
+      status: overallStatus,
+      ...(overallStatus === "partial_success" ? { partialSuccess: true } : {}),
+      confirmedMeals,
+      failures,
+      ...(dailyNutrition ? { dailyNutrition } : {}),
+      ...(summaryError ? { summaryError } : {}),
+    };
+  }
+
   async getMeal(userId: string, id: string): Promise<HydratedMeal> {
     const result = await this.getMealWith(this.db, userId, id);
     if (!result) throw new NotFoundError("Meal not found");
@@ -378,7 +524,20 @@ export class HealthRepository {
     const current = await this.db.query.meals.findFirst({
       where: and(eq(meals.id, id), eq(meals.userId, userId)),
     });
-    if (!current) throw new NotFoundError("Meal not found");
+    if (!current) {
+      const pending = await this.db.query.pendingMealEstimates.findFirst({
+        where: and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.userId, userId)),
+      });
+      if (pending) {
+        if (pending.confirmed && pending.mealId) {
+          return this.updateMeal(userId, pending.mealId, patch);
+        }
+        throw new ConflictError(
+          `Cannot update meal with pending draft ID '${id}' before confirmation. Use update_pending_meal, or confirm the draft with confirm_pending_meal first.`
+        );
+      }
+      throw new NotFoundError("Meal not found");
+    }
     const nextLow = patch.caloriesLow ?? current.caloriesLow;
     const nextBest = patch.caloriesBest ?? current.caloriesBest;
     const nextHigh = patch.caloriesHigh ?? current.caloriesHigh;
@@ -392,6 +551,42 @@ export class HealthRepository {
       .returning();
     if (!updated) throw new NotFoundError("Meal not found");
     return this.getMeal(userId, id);
+  }
+
+  async updateMealWithSummary(
+    userId: string,
+    id: string,
+    patch: MealPatch,
+    summaryOptions?: ConfirmPendingMealSummaryOptions,
+  ): Promise<CompoundUpdateMealResult> {
+    const meal = await this.updateMeal(userId, id, patch);
+
+    let dailyNutrition: { date: string; totals: ReturnType<typeof sumNutrition>; meals: (typeof meals.$inferSelect)[] } | undefined;
+    let summaryError: string | undefined;
+
+    if (summaryOptions) {
+      let range: { start: Date; end: Date } | undefined;
+      if (summaryOptions.start && summaryOptions.end) {
+        range = { start: summaryOptions.start, end: summaryOptions.end };
+      } else if (summaryOptions.date) {
+        range = zonedDayRange(summaryOptions.date, summaryOptions.timezone ?? "Asia/Kuala_Lumpur");
+      }
+
+      if (range) {
+        try {
+          const res = await this.dailyNutrition(userId, range.start, range.end);
+          dailyNutrition = summaryOptions.date ? { ...res, date: summaryOptions.date } : res;
+        } catch (err) {
+          summaryError = (err as Error).message;
+        }
+      }
+    }
+
+    return {
+      meal,
+      ...(dailyNutrition ? { dailyNutrition } : {}),
+      ...(summaryError ? { summaryError } : {}),
+    };
   }
 
   async deleteMeal(userId: string, id: string): Promise<{ id: string }> {
@@ -412,8 +607,8 @@ export class HealthRepository {
     return { date: start.toISOString().slice(0, 10), totals: sumNutrition(rows), meals: rows };
   }
 
-  async nutritionTrend(userId: string, start: Date, end: Date): Promise<{ day: Date; calories_best: number; calories_low: number; calories_high: number; protein_g: number }[]> {
-    const day = sql<Date>`date_trunc('day', ${meals.occurredAt})`;
+  async nutritionTrend(userId: string, start: Date, end: Date, timezone: string = "UTC"): Promise<{ day: string; calories_best: number; calories_low: number; calories_high: number; protein_g: number }[]> {
+    const day = sql<string>`to_char(${meals.occurredAt} AT TIME ZONE ${timezone}, 'YYYY-MM-DD')`;
     return this.db
       .select({
         day: day.as("day"),
@@ -424,8 +619,8 @@ export class HealthRepository {
       })
       .from(meals)
       .where(and(eq(meals.userId, userId), gte(meals.occurredAt, start), lt(meals.occurredAt, end)))
-      .groupBy(day)
-      .orderBy(day);
+      .groupBy(sql`1`)
+      .orderBy(sql`1`);
   }
 
   async savePreset(userId: string, name: string, estimate: MealInput): Promise<typeof foodPresets.$inferSelect> {
@@ -714,6 +909,143 @@ export class HealthRepository {
       .returning();
     if (!saved) throw new Error("Notification preference upsert returned no record");
     return saved;
+  }
+
+  async getTogetherDashboardData(
+    callerUserId: string,
+    dateStr: string,
+    timezone: string = "Asia/Kuala_Lumpur",
+    trendDays: number = 7,
+  ): Promise<TogetherResponse | null> {
+    const caller = await this.db.query.users.findFirst({
+      where: eq(users.id, callerUserId),
+    });
+    if (!caller || !caller.active) {
+      return null;
+    }
+
+    const membershipInfo = await this.getHouseholdForUser(callerUserId);
+    if (!membershipInfo) {
+      return null;
+    }
+
+    const { household } = membershipInfo;
+
+    const memberRows = await this.db
+      .select({
+        user: users,
+        member: householdMembers,
+      })
+      .from(householdMembers)
+      .innerJoin(users, eq(householdMembers.userId, users.id))
+      .where(and(eq(householdMembers.householdId, household.id), eq(users.active, true)))
+      .orderBy(
+        sql`CASE WHEN ${householdMembers.userId} = ${callerUserId} THEN 0 ELSE 1 END`,
+        asc(users.createdAt),
+      );
+
+    const { start: dayStart, end: dayEnd } = zonedDayRange(dateStr, timezone);
+
+    const startDate = new Date(`${dateStr}T12:00:00Z`);
+    startDate.setUTCDate(startDate.getUTCDate() - (trendDays - 1));
+    const trendStartStr = startDate.toISOString().slice(0, 10);
+    const { start: trendStart } = zonedDayRange(trendStartStr, timezone);
+
+    const membersData: TogetherMemberProgress[] = [];
+
+    for (const row of memberRows) {
+      const memberUser = row.user;
+      const isCaller = memberUser.id === callerUserId;
+
+      const authorized = canAccessResource(
+        { userId: callerUserId, householdId: household.id },
+        { ownerUserId: memberUser.id, householdId: household.id, type: "partner_overview" },
+        "read",
+      );
+      if (!authorized) {
+        continue;
+      }
+
+      const settings = await this.getSettings(memberUser.id);
+
+      const dayMeals = await this.db
+        .select()
+        .from(meals)
+        .where(and(eq(meals.userId, memberUser.id), gte(meals.occurredAt, dayStart), lt(meals.occurredAt, dayEnd)))
+        .orderBy(asc(meals.occurredAt));
+
+      const totals = sumNutrition(dayMeals);
+
+      const dayWorkouts = await this.db
+        .select({ id: workouts.id })
+        .from(workouts)
+        .where(
+          and(
+            eq(workouts.userId, memberUser.id),
+            eq(workouts.status, "finished"),
+            gte(workouts.startedAt, dayStart),
+            lt(workouts.startedAt, dayEnd),
+          ),
+        )
+        .orderBy(asc(workouts.startedAt));
+
+      const hydratedWorkouts = await Promise.all(
+        dayWorkouts.map((w) => this.getWorkout(memberUser.id, w.id)),
+      );
+
+      const trendPoints = await this.nutritionTrend(memberUser.id, trendStart, dayEnd, timezone);
+
+      membersData.push({
+        userId: memberUser.id,
+        displayName: memberUser.displayName,
+        isCaller,
+        goals: {
+          calorieTarget: settings.calorieTarget,
+          proteinTargetG: settings.proteinTargetG,
+        },
+        daily: {
+          date: dateStr,
+          calories: totals.caloriesBest,
+          proteinG: totals.proteinG,
+          mealCount: dayMeals.length,
+          meals: dayMeals.map((m) => ({
+            id: m.id,
+            label: m.label,
+            caloriesBest: m.caloriesBest,
+            proteinG: m.proteinG,
+            occurredAt: m.occurredAt.toISOString(),
+          })),
+          workouts: hydratedWorkouts.map((hw) => ({
+            id: hw.workout.id,
+            name: hw.workout.name,
+            startedAt: hw.workout.startedAt.toISOString(),
+            finishedAt: hw.workout.finishedAt ? hw.workout.finishedAt.toISOString() : null,
+            setCount: hw.setCount,
+            volumeKg: hw.volumeKg,
+            exercises: hw.exercises.map((e) => ({
+              id: e.id,
+              name: e.name,
+              setCount: e.sets.length,
+            })),
+          })),
+        },
+        trend: trendPoints.map((tp) => ({
+          day: tp.day,
+          calories: tp.calories_best,
+          proteinG: tp.protein_g,
+        })),
+      });
+    }
+
+    return {
+      household: {
+        id: household.id,
+        name: household.name,
+      },
+      date: dateStr,
+      timezone,
+      members: membersData,
+    };
   }
 
   async checkReady() {

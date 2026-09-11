@@ -20,6 +20,7 @@
     "@clawfit/health-core": "workspace:*",
     "dotenv": "latest",
     "fastify": "latest",
+    "jose": "^6.2.12",
     "zod": "latest"
   },
   "devDependencies": {

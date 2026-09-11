@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { z, ZodError } from "zod";
+import { auth } from "../../../auth";
 import { handleAssistantCommand } from "../../../lib/assistant";
 import type { AssistantMeal, AssistantResult } from "../../../lib/assistant-types";
 import { HealthApiError, HealthApiNetworkError, healthApiRequest } from "../../../lib/api";
-import { WEB_PENDING_MEAL_SCOPE, withWebPendingMealScope } from "../../../lib/pending-scope";
+import { resolveWebPendingMealScope, withWebPendingMealScope } from "../../../lib/pending-scope";
 
 export const runtime = "nodejs";
 
@@ -31,23 +32,29 @@ const actionSchema = z.discriminatedUnion("action", [
 export async function POST(request: Request) {
   if (!isSameOrigin(request)) return NextResponse.json({ error: "Cross-origin requests are not allowed" }, { status: 403 });
 
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+  }
+  const userId = session.user.id;
+
   try {
     const contentType = request.headers.get("content-type") ?? "";
-    if (contentType.startsWith("multipart/form-data")) return handleMultipart(request);
+    if (contentType.startsWith("multipart/form-data")) return handleMultipart(request, userId);
 
     const payload = (await request.json()) as unknown;
     if (typeof payload === "object" && payload !== null && "action" in payload && payload.action !== "command") {
-      return handleAction(actionSchema.parse(payload));
+      return handleAction(actionSchema.parse(payload), userId);
     }
     const command = commandSchema.parse(payload);
     if (!command.message) return NextResponse.json({ error: "A message is required" }, { status: 400 });
-    return NextResponse.json(await runCommand(command));
+    return NextResponse.json(await runCommand(command, userId));
   } catch (error) {
     return assistantError(error);
   }
 }
 
-async function handleMultipart(request: Request) {
+async function handleMultipart(request: Request, userId: string) {
   const form = await request.formData();
   const command = commandSchema.parse({ action: "command", message: form.get("message"), requestId: form.get("requestId") });
   const image = form.get("image");
@@ -55,25 +62,46 @@ async function handleMultipart(request: Request) {
   if (image.size > 8 * 1024 * 1024) throw new Error("Meal photos must be 8 MB or smaller");
   if (!imageTypes.includes(image.type as (typeof imageTypes)[number])) throw new Error("Use a JPEG, PNG, WebP, or HEIC image");
   const base64 = Buffer.from(await image.arrayBuffer()).toString("base64");
-  return NextResponse.json(await runCommand({ ...command, image: { mimeType: image.type as (typeof imageTypes)[number], base64 } }));
+  return NextResponse.json(await runCommand({ ...command, image: { mimeType: image.type as (typeof imageTypes)[number], base64 } }, userId));
 }
 
-async function runCommand(command: z.infer<typeof commandSchema> & { image?: { mimeType: (typeof imageTypes)[number]; base64: string } }) {
-  return handleAssistantCommand(command, { request: healthApiRequest });
+async function runCommand(
+  command: z.infer<typeof commandSchema> & { image?: { mimeType: (typeof imageTypes)[number]; base64: string } },
+  userId: string,
+) {
+  const scopeKey = resolveWebPendingMealScope(userId);
+  return handleAssistantCommand(
+    command,
+    { request: (path, init) => healthApiRequest(path, { ...init, userId }) },
+    undefined,
+    scopeKey,
+  );
 }
 
-async function handleAction(action: z.infer<typeof actionSchema>) {
+async function handleAction(action: z.infer<typeof actionSchema>, userId: string) {
+  const scopeKey = resolveWebPendingMealScope(userId);
   if (action.action === "confirm") {
-    const meal = await healthApiRequest<AssistantMeal>(`/v1/meals/pending/${action.pendingId}/confirm`, { method: "POST", body: JSON.stringify({ scopeKey: WEB_PENDING_MEAL_SCOPE }) });
+    const meal = await healthApiRequest<AssistantMeal>(`/v1/meals/pending/${action.pendingId}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ scopeKey }),
+      userId,
+    });
     const result: AssistantResult = { kind: "meal_logged", message: `${meal.label} is logged. Your dashboard is updated.`, meal };
     return NextResponse.json(result);
   }
   if (action.action === "cancel") {
-    await healthApiRequest(withWebPendingMealScope(`/v1/meals/pending/${action.pendingId}`), { method: "DELETE" });
+    await healthApiRequest(withWebPendingMealScope(`/v1/meals/pending/${action.pendingId}`, scopeKey), {
+      method: "DELETE",
+      userId,
+    });
     const result: AssistantResult = { kind: "message", message: "Meal draft cancelled. Nothing was logged." };
     return NextResponse.json(result);
   }
-  const meal = await healthApiRequest<AssistantMeal>(`/v1/meals/pending/${action.pendingId}`, { method: "PATCH", body: JSON.stringify({ scopeKey: WEB_PENDING_MEAL_SCOPE, ...action.patch }) });
+  const meal = await healthApiRequest<AssistantMeal>(`/v1/meals/pending/${action.pendingId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ scopeKey, ...action.patch }),
+    userId,
+  });
   const result: AssistantResult = { kind: "meal_draft", message: "Estimate updated. Review it, then log when ready.", meal };
   return NextResponse.json(result);
 }

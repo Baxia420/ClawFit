@@ -21,25 +21,47 @@ const notificationSchema = z.object({
   configuration: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
 });
 
+import { auth } from "../../../auth";
+
 export async function PATCH(request: Request) {
-  return proxyValidated(request, settingsSchema, "/v1/settings", "PATCH");
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+  }
+  return proxyValidated(request, settingsSchema, "/v1/settings", "PATCH", session.user.id);
 }
 
 export async function PUT(request: Request) {
   if (!isSameOrigin(request)) return NextResponse.json({ error: "Cross-origin requests are not allowed" }, { status: 403 });
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+  }
   try {
     const preference = notificationSchema.parse(await request.json());
-    return NextResponse.json(await healthApiRequest(`/v1/notification-preferences/${preference.type}`, { method: "PUT", body: JSON.stringify(preference) }));
+    return NextResponse.json(
+      await healthApiRequest(`/v1/notification-preferences/${preference.type}`, {
+        method: "PUT",
+        body: JSON.stringify(preference),
+        userId: session.user.id,
+      }),
+    );
   } catch (error) {
     return settingsError(error);
   }
 }
 
-async function proxyValidated(request: Request, schema: typeof settingsSchema, path: string, method: string) {
+async function proxyValidated(
+  request: Request,
+  schema: typeof settingsSchema,
+  path: string,
+  method: string,
+  userId: string,
+) {
   if (!isSameOrigin(request)) return NextResponse.json({ error: "Cross-origin requests are not allowed" }, { status: 403 });
   try {
     const payload = schema.parse(await request.json());
-    return NextResponse.json(await healthApiRequest(path, { method, body: JSON.stringify(payload) }));
+    return NextResponse.json(await healthApiRequest(path, { method, body: JSON.stringify(payload), userId }));
   } catch (error) {
     return settingsError(error);
   }

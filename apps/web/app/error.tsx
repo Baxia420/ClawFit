@@ -8,7 +8,7 @@ export default function ErrorPage({ error, reset }: { error: Error & { digest?: 
   }, [error]);
 
   return <div className="page service-error">
-    <header className="page-header compact"><div><span className="kicker">AUTHORITATIVE DATA / UNAVAILABLE</span><h1>Signal<br /><em>interrupted.</em></h1></div></header>
-    <section className="panel"><div className="panel-title"><span>HEALTH API</span><strong>nothing was changed</strong></div><div className="service-error-body"><p>ClawFit could not reach its health service, so it has not substituted zeros or empty history.</p><button type="button" onClick={reset}>RETRY CONNECTION</button></div></section>
+    <header className="page-header compact"><div><span className="kicker">SERVICE STATUS</span><h1>Signal<br /><em>interrupted.</em></h1></div></header>
+    <section className="panel"><div className="panel-title"><span>SERVICE NOTICE</span><strong>temporarily unavailable</strong></div><div className="service-error-body"><p>ClawFit could not connect to the health service. Please check your connection or try again shortly.</p><button type="button" onClick={reset}>RETRY CONNECTION</button></div></section>
   </div>;
 }
