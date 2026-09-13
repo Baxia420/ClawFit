@@ -390,18 +390,21 @@ export function MealLogFlow({ timezone = "Asia/Kuala_Lumpur" }: { timezone?: str
           expectedVersion: activeDraft.version,
         }),
       });
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("Draft was updated on the server")) {
+        throw err;
+      }
       const reconciled = await reconcileAuthoritativeDraft(activeDraft.id);
       if (reconciled && reconciled.version > activeDraft.version) {
-        return reconciled;
+        throw new Error("Draft was updated on the server. Please review the updated draft before continuing.");
       }
       throw new Error("Unable to synchronize metadata before confirmation. Please retry.");
     }
 
     if (!res.ok) {
       if (res.status === 409) {
-        const reconciled = await reconcileAuthoritativeDraft(activeDraft.id);
-        if (reconciled) return reconciled;
+        await reconcileAuthoritativeDraft(activeDraft.id);
+        throw new Error("Draft was updated on the server. Please review the updated draft before continuing.");
       }
       throw new Error("Unable to synchronize metadata before confirmation. Please retry.");
     }
@@ -777,6 +780,8 @@ export function MealLogFlow({ timezone = "Asia/Kuala_Lumpur" }: { timezone?: str
       setPresets([]);
       isMetaDirtyRef.current = false;
       lastSyncedMetaRef.current = { date, time, notes, text: `Preset: ${preset.name}`, revisionHistoryLen: 0 };
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to initialize preset draft on server.");
     } finally {
       setMutationState("idle");
     }
@@ -957,6 +962,8 @@ export function MealLogFlow({ timezone = "Asia/Kuala_Lumpur" }: { timezone?: str
       setDraft(newDraft);
       isMetaDirtyRef.current = false;
       lastSyncedMetaRef.current = { date, time, notes, text: mealName, revisionHistoryLen: 0 };
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to initialize manual draft on server.");
     } finally {
       setMutationState("idle");
     }
