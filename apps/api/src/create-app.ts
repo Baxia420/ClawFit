@@ -1,15 +1,18 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import Fastify, { type FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
 import {
+  classifyNutritionErrorCode,
   confirmPendingMealSchema,
   foodPresetPatchSchema,
+  getActionableMessageForNutritionError,
   getZonedCalendarDate,
   isValidCalendarDate,
   isValidIanaTimezone,
   mealInputSchema,
   mealPatchSchema,
   notificationPreferenceSchema,
+  NutritionEstimationError,
   NutritionEstimator,
   pendingMealInputSchema,
   pendingMealPatchSchema,
@@ -247,12 +250,23 @@ export function createApp(options: CreateAppOptions) {
     }
   });
 
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     if (error instanceof ZodError) {
       return reply.code(400).send({ error: { code: "INVALID_PAYLOAD", message: "Request validation failed", details: error.issues } });
     }
     if (error instanceof NotFoundError) return reply.code(404).send({ error: { code: "NOT_FOUND", message: error.message } });
     if (error instanceof ConflictError) return reply.code(409).send({ error: { code: "CONFLICT", message: error.message } });
+    if (error instanceof NutritionEstimationError) {
+      const safeMessage = getActionableMessageForNutritionError(error.code);
+      return reply.code(error.statusCode).send({
+        error: {
+          code: error.code,
+          message: safeMessage,
+          safeReference: request.id,
+          attempts: error.attempts.map((a) => ({ model: a.model, code: a.code, latencyMs: a.latencyMs })),
+        },
+      });
+    }
     const maybeFastifyError = error as { statusCode?: number; code?: string; message?: string };
     if (typeof maybeFastifyError?.statusCode === "number") {
       return reply.code(maybeFastifyError.statusCode).send({
@@ -457,7 +471,7 @@ export function createApp(options: CreateAppOptions) {
 
   const NUTRITION_ESTIMATE_BODY_LIMIT = 16 * 1024 * 1024; // 16 MiB total request budget
 
-  app.post("/v1/nutrition/estimate", { bodyLimit: NUTRITION_ESTIMATE_BODY_LIMIT }, async (request) => {
+  app.post("/v1/nutrition/estimate", { bodyLimit: NUTRITION_ESTIMATE_BODY_LIMIT }, async (request, reply) => {
     if (!options.estimator) throw new ConflictError("Nutrition estimator is not configured");
     const imageSchema = z.object({
       mimeType: z.enum(["image/jpeg", "image/png", "image/webp", "image/heic"]),
@@ -465,6 +479,7 @@ export function createApp(options: CreateAppOptions) {
     });
     const body = z
       .object({
+        operationId: z.string().min(8).max(200).optional(),
         text: z.string().max(4_000).default(""),
         image: imageSchema.optional(),
         images: z.array(imageSchema).max(4).optional(),
@@ -472,34 +487,110 @@ export function createApp(options: CreateAppOptions) {
       .refine((value) => value.text.length > 0 || value.image || (value.images && value.images.length > 0), "Text or image is required")
       .parse(request.body);
 
+    const userId = requireRequestUserId(request);
     const imageCount = body.images && body.images.length > 0 ? body.images.length : body.image ? 1 : 0;
     const correlationId = request.id;
 
-    const result = await options.estimator.estimate({
-      text: body.text,
-      ...(body.images && body.images.length > 0 ? { images: body.images } : body.image ? { image: body.image } : {}),
-    });
+    const operationId = body.operationId ?? `op_${randomUUID()}`;
+    const inputHash = createHash("sha256")
+      .update(
+        JSON.stringify({
+          text: body.text.trim(),
+          images: (body.images ?? (body.image ? [body.image] : [])).map((img) => ({
+            mimeType: img.mimeType,
+            hash: createHash("sha256").update(img.base64).digest("hex"),
+          })),
+        }),
+      )
+      .digest("hex");
 
-    // Safely record estimator execution metadata without logging image data, user secrets, or message text:
-    request.log.info(
-      {
-        correlationId,
+    const opState =
+      typeof options.repository.getOrStartNutritionOperation === "function"
+        ? await options.repository.getOrStartNutritionOperation(userId, operationId, inputHash)
+        : { status: "started" as const };
+
+    if (opState.status === "completed" && opState.result) {
+      request.log.info({ correlationId, operationId, cached: true }, "nutrition estimation returned from durable cache");
+      return opState.result;
+    }
+
+    if (opState.status === "in_progress") {
+      return reply.code(409).send({
+        error: {
+          code: "OPERATION_IN_PROGRESS",
+          message: "Nutrition estimation is already running for this operation. Please wait.",
+          safeReference: correlationId,
+        },
+      });
+    }
+
+    try {
+      const result = await options.estimator.estimate({
+        text: body.text,
+        ...(body.images && body.images.length > 0 ? { images: body.images } : body.image ? { image: body.image } : {}),
+        signal: request.raw.signal,
+      });
+
+      // Safely record estimator execution metadata without logging image data, user secrets, or message text:
+      request.log.info(
+        {
+          correlationId,
+          operationId,
+          estimatorModelId: result.model,
+          fallbackUsed: result.fallbackUsed,
+          imageCount,
+          hasText: body.text.length > 0,
+          usage: result.usage,
+        },
+        "nutrition estimation completed",
+      );
+
+      const responsePayload = {
+        operationId,
+        estimate: result.estimate,
+        model: result.model,
         estimatorModelId: result.model,
         fallbackUsed: result.fallbackUsed,
-        imageCount,
-        hasText: body.text.length > 0,
-      },
-      "nutrition estimation completed",
-    );
+        correlationId,
+        usage: result.usage,
+        ...result.estimate,
+      };
 
-    return {
-      estimate: result.estimate,
-      model: result.model,
-      estimatorModelId: result.model,
-      fallbackUsed: result.fallbackUsed,
-      correlationId,
-      ...result.estimate,
-    };
+      if (typeof options.repository.completeNutritionOperation === "function") {
+        const ownerToken = "ownerToken" in opState && typeof (opState as { ownerToken?: unknown }).ownerToken === "string"
+          ? (opState as { ownerToken: string }).ownerToken
+          : undefined;
+        if (ownerToken) {
+          await options.repository.completeNutritionOperation(userId, operationId, ownerToken, responsePayload);
+        } else {
+          await options.repository.completeNutritionOperation(userId, operationId, responsePayload);
+        }
+      }
+      return responsePayload;
+    } catch (error) {
+      const code = error instanceof NutritionEstimationError ? error.code : classifyNutritionErrorCode(error);
+      const safeMsg = getActionableMessageForNutritionError(code);
+      if (typeof options.repository.failNutritionOperation === "function") {
+        const ownerToken = "ownerToken" in opState && typeof (opState as { ownerToken?: unknown }).ownerToken === "string"
+          ? (opState as { ownerToken: string }).ownerToken
+          : undefined;
+        const errPayload = {
+          code,
+          message: safeMsg,
+          safeReference: correlationId,
+        };
+        if (ownerToken) {
+          await options.repository
+            .failNutritionOperation(userId, operationId, ownerToken, errPayload)
+            .catch(() => {});
+        } else {
+          await options.repository
+            .failNutritionOperation(userId, operationId, errPayload)
+            .catch(() => {});
+        }
+      }
+      throw error;
+    }
   });
 
   app.post("/v1/meals", async (request, reply) => {
@@ -527,7 +618,10 @@ export function createApp(options: CreateAppOptions) {
   app.patch("/v1/meals/pending/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const body = pendingMealPatchSchema.and(pendingMealScopeSchema).parse(request.body);
-    const { scopeKey, ...patch } = body;
+    const { scopeKey, expectedVersion, ...patch } = body;
+    if (expectedVersion !== undefined) {
+      return options.repository.updatePendingMeal(requireRequestUserId(request), id, scopeKey, patch, expectedVersion);
+    }
     return options.repository.updatePendingMeal(requireRequestUserId(request), id, scopeKey, patch);
   });
   app.delete("/v1/meals/pending/:id", async (request) => {
@@ -700,6 +794,17 @@ export function createApp(options: CreateAppOptions) {
   app.get("/v1/exercises/history", async (request) => {
     const query = z.object({ name: z.string().min(1), limit: z.coerce.number().int().min(1).max(500).default(100) }).parse(request.query);
     return options.repository.exerciseHistory(requireRequestUserId(request), query.name, query.limit);
+  });
+
+  app.get("/v1/me", async (request) => {
+    const userId = requireRequestUserId(request);
+    const user = await options.repository.getUser(userId);
+    return {
+      id: user.id,
+      displayName: user.displayName,
+      role: user.role,
+      active: user.active,
+    };
   });
 
   app.get("/v1/settings", async (request) => {

@@ -12,7 +12,13 @@ export function isMealLogConfirmation(prompt: string | null | undefined): boolea
 
 export function isFallbackNotice(text: string | null | undefined): boolean {
   if (!text || typeof text !== "string") return false;
-  return /^(↪️\s*)?Model Fallback/i.test(text.trim()) || text.includes("selected google/") || text.includes("selected gemini");
+  const trimmed = text.trim();
+  return (
+    /^(?:↪️\s*)?Model Fallback/i.test(trimmed) ||
+    /^(?:↪️\s*)?\[Fallback\]/i.test(trimmed) ||
+    /^(?:↪️\s*)?Fallback:/i.test(trimmed) ||
+    /^(?:↪️\s*)?(?:Model\s+)?Fallback:?\s*(?:selected\s+)?(?:google|gemini)/i.test(trimmed)
+  );
 }
 
 export function sanitizeUserFacingError(text: string | null | undefined): string {

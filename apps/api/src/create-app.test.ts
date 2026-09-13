@@ -1,7 +1,8 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { SignJWT } from "jose";
 import { createApp } from "./create-app.js";
-import { DEFAULT_PARTNER_USER_ID, DEFAULT_PRIMARY_USER_ID, type HealthRepository, NotFoundError } from "@clawfit/db";
+import { ConflictError, DEFAULT_PARTNER_USER_ID, DEFAULT_PRIMARY_USER_ID, type HealthRepository, NotFoundError } from "@clawfit/db";
+import { NutritionEstimationError } from "@clawfit/health-core";
 
 const webToken = "test-token-that-is-at-least-24-chars";
 const openclawToken = "openclaw-test-token-at-least-24-chars";
@@ -28,6 +29,9 @@ const repository = {
   getUser: vi.fn().mockResolvedValue({ id: DEFAULT_PRIMARY_USER_ID, active: true, displayName: "Primary User", role: "primary" }),
   listRecentMeals: vi.fn().mockResolvedValue([]),
   createMeal: vi.fn(),
+  getOrStartNutritionOperation: vi.fn().mockResolvedValue({ status: "started" }),
+  completeNutritionOperation: vi.fn().mockResolvedValue(undefined),
+  failNutritionOperation: vi.fn().mockResolvedValue(undefined),
 } as unknown as HealthRepository;
 
 describe("Health API", () => {
@@ -216,12 +220,41 @@ describe("Health API", () => {
     expect(res.json().estimatorModelId).toBe("gemini-3.8-flash");
     expect(res.json().fallbackUsed).toBe(false);
     expect(res.json().correlationId).toBeDefined();
-    expect(mockEstimator.estimate).toHaveBeenCalledWith({
-      text: "Protein bar package and label",
-      images: [
-        { mimeType: "image/jpeg", base64: "dGVzdC1wYWNrYWdl" },
-        { mimeType: "image/jpeg", base64: "dGVzdC1udXRyaXRpb24tbGFiZWw=" },
-      ],
+    expect(mockEstimator.estimate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "Protein bar package and label",
+        images: [
+          { mimeType: "image/jpeg", base64: "dGVzdC1wYWNrYWdl" },
+          { mimeType: "image/jpeg", base64: "dGVzdC1udXRyaXRpb24tbGFiZWw=" },
+        ],
+      }),
+    );
+    await app.close();
+  });
+
+  it("returns user profile info on GET /v1/me", async () => {
+    const mockRepo = {
+      getUser: vi.fn().mockResolvedValue({
+        id: DEFAULT_PRIMARY_USER_ID,
+        displayName: "Mahin",
+        role: "primary",
+        active: true,
+      }),
+    } as unknown as HealthRepository;
+
+    const app = createApp({ repository: mockRepo, webToken, openclawToken, assertionSecret, logger: false });
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/me",
+      headers: { authorization: `Bearer ${validWebAssertion}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      id: DEFAULT_PRIMARY_USER_ID,
+      displayName: "Mahin",
+      role: "primary",
+      active: true,
     });
     await app.close();
   });
@@ -660,6 +693,9 @@ describe("Health API", () => {
       const testRepo = {
         getUser: vi.fn().mockResolvedValue({ id: DEFAULT_PRIMARY_USER_ID, active: true }),
         createPendingMeal: vi.fn(),
+        getOrStartNutritionOperation: vi.fn().mockResolvedValue({ status: "started" }),
+        completeNutritionOperation: vi.fn().mockResolvedValue(undefined),
+        failNutritionOperation: vi.fn().mockResolvedValue(undefined),
       } as unknown as HealthRepository;
 
       const app = createApp({
@@ -1672,6 +1708,251 @@ describe("Health API", () => {
 
         await app.close();
       });
+    });
+  });
+
+  describe("POST /v1/nutrition/estimate", () => {
+    const mockEstimateResult = {
+      estimate: {
+        label: "Grilled chicken with rice",
+        items: [
+          { name: "chicken breast", portionDescription: "200g grilled", calories: 330, proteinG: 62, carbsG: 0, fatG: 7, fiberG: 0 },
+          { name: "white rice", portionDescription: "1 cup cooked", calories: 205, proteinG: 4, carbsG: 45, fatG: 0.5, fiberG: 0.5 },
+        ],
+        calories: { best: 535, low: 480, high: 600 },
+        macros: { proteinG: 66, carbsG: 45, fatG: 7.5, fiberG: 0.5 },
+        confidence: "high" as const,
+        uncertaintyReasons: [],
+      },
+      model: "gemini-3.8-flash",
+      fallbackUsed: false,
+      usage: { promptTokens: 150, candidatesTokens: 80, totalTokens: 230 },
+      attempts: [{ model: "gemini-3.8-flash", reason: "", code: "PROVIDER_TRANSIENT" as const, latencyMs: 120 }],
+    };
+
+    it("requires estimator to be configured", async () => {
+      const app = createApp({ repository, webToken, openclawToken, assertionSecret, logger: false });
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/nutrition/estimate",
+        headers: { authorization: `Bearer ${validWebAssertion}` },
+        payload: { text: "chicken and rice" },
+      });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.message).toContain("not configured");
+      await app.close();
+    });
+
+    it("completes estimation, tracks operationId, and returns item nutrients", async () => {
+      const mockRepo = {
+        getUser: vi.fn().mockResolvedValue({ id: DEFAULT_PRIMARY_USER_ID, active: true }),
+        getOrStartNutritionOperation: vi.fn().mockResolvedValue({ status: "started" }),
+        completeNutritionOperation: vi.fn().mockResolvedValue(undefined),
+        failNutritionOperation: vi.fn().mockResolvedValue(undefined),
+      } as unknown as HealthRepository;
+
+      const mockEstimator = {
+        estimate: vi.fn().mockResolvedValue(mockEstimateResult),
+      };
+
+      const app = createApp({
+        repository: mockRepo,
+        webToken,
+        openclawToken,
+        assertionSecret,
+        estimator: mockEstimator as any,
+        logger: false,
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/nutrition/estimate",
+        headers: { authorization: `Bearer ${validWebAssertion}` },
+        payload: { text: "chicken and rice", operationId: "op-test-12345678" },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const json = res.json();
+      expect(json.operationId).toBe("op-test-12345678");
+      expect(json.items).toHaveLength(2);
+      expect(json.items[0].calories).toBe(330);
+      expect(json.items[0].proteinG).toBe(62);
+      expect(json.usage).toEqual({ promptTokens: 150, candidatesTokens: 80, totalTokens: 230 });
+      expect(mockRepo.getOrStartNutritionOperation).toHaveBeenCalledWith(
+        DEFAULT_PRIMARY_USER_ID,
+        "op-test-12345678",
+        expect.any(String),
+      );
+      expect(mockRepo.completeNutritionOperation).toHaveBeenCalledWith(
+        DEFAULT_PRIMARY_USER_ID,
+        "op-test-12345678",
+        expect.objectContaining({ operationId: "op-test-12345678" }),
+      );
+      await app.close();
+    });
+
+    it("returns cached completed result on duplicate operationId without calling estimator", async () => {
+      const cachedPayload = {
+        operationId: "op-test-cached",
+        estimate: mockEstimateResult.estimate,
+        model: "gemini-3.8-flash",
+        correlationId: "prev-req-id",
+        ...mockEstimateResult.estimate,
+      };
+
+      const mockRepo = {
+        getUser: vi.fn().mockResolvedValue({ id: DEFAULT_PRIMARY_USER_ID, active: true }),
+        getOrStartNutritionOperation: vi.fn().mockResolvedValue({ status: "completed", result: cachedPayload }),
+      } as unknown as HealthRepository;
+
+      const mockEstimator = { estimate: vi.fn() };
+
+      const app = createApp({
+        repository: mockRepo,
+        webToken,
+        openclawToken,
+        assertionSecret,
+        estimator: mockEstimator as any,
+        logger: false,
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/nutrition/estimate",
+        headers: { authorization: `Bearer ${validWebAssertion}` },
+        payload: { text: "chicken and rice", operationId: "op-test-cached" },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().operationId).toBe("op-test-cached");
+      expect(mockEstimator.estimate).not.toHaveBeenCalled();
+      await app.close();
+    });
+
+    it("returns 409 OPERATION_IN_PROGRESS when operation is concurrently executing", async () => {
+      const mockRepo = {
+        getUser: vi.fn().mockResolvedValue({ id: DEFAULT_PRIMARY_USER_ID, active: true }),
+        getOrStartNutritionOperation: vi.fn().mockResolvedValue({ status: "in_progress" }),
+      } as unknown as HealthRepository;
+
+      const mockEstimator = { estimate: vi.fn() };
+
+      const app = createApp({
+        repository: mockRepo,
+        webToken,
+        openclawToken,
+        assertionSecret,
+        estimator: mockEstimator as any,
+        logger: false,
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/nutrition/estimate",
+        headers: { authorization: `Bearer ${validWebAssertion}` },
+        payload: { text: "chicken and rice", operationId: "op-running-1234" },
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.code).toBe("OPERATION_IN_PROGRESS");
+      expect(mockEstimator.estimate).not.toHaveBeenCalled();
+      await app.close();
+    });
+
+    it("returns 409 CONFLICT if operationId was already used with different input", async () => {
+      const mockRepo = {
+        getUser: vi.fn().mockResolvedValue({ id: DEFAULT_PRIMARY_USER_ID, active: true }),
+        getOrStartNutritionOperation: vi.fn().mockRejectedValue(new ConflictError("Operation ID already used with different input")),
+      } as unknown as HealthRepository;
+
+      const app = createApp({
+        repository: mockRepo,
+        webToken,
+        openclawToken,
+        assertionSecret,
+        estimator: { estimate: vi.fn() } as any,
+        logger: false,
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/nutrition/estimate",
+        headers: { authorization: `Bearer ${validWebAssertion}` },
+        payload: { text: "different food", operationId: "op-reused-1234" },
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.code).toBe("CONFLICT");
+      await app.close();
+    });
+
+    it("translates NutritionEstimationError to typed error codes and actionable messages", async () => {
+      const cases = [
+        {
+          err: new NutritionEstimationError("Rate limit exceeded", [{ model: "gemini-3.8-flash", reason: "429 RESOURCE_EXHAUSTED", code: "QUOTA_OR_RATE_LIMIT" }], "QUOTA_OR_RATE_LIMIT", 429),
+          expectedStatus: 429,
+          expectedCode: "QUOTA_OR_RATE_LIMIT",
+        },
+        {
+          err: new NutritionEstimationError("Timed out", [{ model: "gemini-3.8-flash", reason: "aborted", code: "TIMEOUT_OR_CANCELLED" }], "TIMEOUT_OR_CANCELLED", 504),
+          expectedStatus: 504,
+          expectedCode: "TIMEOUT_OR_CANCELLED",
+        },
+        {
+          err: new NutritionEstimationError("Blocked by safety", [{ model: "gemini-3.8-flash", reason: "SAFETY", code: "MODEL_OUTPUT_BLOCKED" }], "MODEL_OUTPUT_BLOCKED", 422),
+          expectedStatus: 422,
+          expectedCode: "MODEL_OUTPUT_BLOCKED",
+        },
+        {
+          err: new NutritionEstimationError("Config error", [{ model: "gemini-3.8-flash", reason: "API_KEY_INVALID", code: "CREDENTIALS_OR_CONFIG" }], "CREDENTIALS_OR_CONFIG", 503),
+          expectedStatus: 503,
+          expectedCode: "CREDENTIALS_OR_CONFIG",
+        },
+      ];
+
+      for (const { err, expectedStatus, expectedCode } of cases) {
+        const mockRepo = {
+          getUser: vi.fn().mockResolvedValue({ id: DEFAULT_PRIMARY_USER_ID, active: true }),
+          getOrStartNutritionOperation: vi.fn().mockResolvedValue({ status: "started" }),
+          failNutritionOperation: vi.fn().mockResolvedValue(undefined),
+        } as unknown as HealthRepository;
+
+        const mockEstimator = {
+          estimate: vi.fn().mockRejectedValue(err),
+        };
+
+        const app = createApp({
+          repository: mockRepo,
+          webToken,
+          openclawToken,
+          assertionSecret,
+          estimator: mockEstimator as any,
+          logger: false,
+        });
+
+        const res = await app.inject({
+          method: "POST",
+          url: "/v1/nutrition/estimate",
+          headers: { authorization: `Bearer ${validWebAssertion}` },
+          payload: { text: "food query", operationId: `op-err-${expectedCode}` },
+        });
+
+        expect(res.statusCode).toBe(expectedStatus);
+        const json = res.json();
+        expect(json.error.code).toBe(expectedCode);
+        expect(typeof json.error.message).toBe("string");
+        expect(typeof json.error.safeReference).toBe("string");
+        expect(json.error.attempts).toBeDefined();
+        // Crucial security check: prompt or user input must never appear in error
+        expect(JSON.stringify(json)).not.toContain("food query");
+
+        expect(mockRepo.failNutritionOperation).toHaveBeenCalledWith(
+          DEFAULT_PRIMARY_USER_ID,
+          `op-err-${expectedCode}`,
+          expect.objectContaining({ code: expectedCode }),
+        );
+        await app.close();
+      }
     });
   });
 });

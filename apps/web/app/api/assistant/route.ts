@@ -40,11 +40,11 @@ export async function POST(request: Request) {
 
   try {
     const contentType = request.headers.get("content-type") ?? "";
-    if (contentType.startsWith("multipart/form-data")) return handleMultipart(request, userId);
+    if (contentType.startsWith("multipart/form-data")) return await handleMultipart(request, userId);
 
     const payload = (await request.json()) as unknown;
     if (typeof payload === "object" && payload !== null && "action" in payload && payload.action !== "command") {
-      return handleAction(actionSchema.parse(payload), userId);
+      return await handleAction(actionSchema.parse(payload), userId);
     }
     const command = commandSchema.parse(payload);
     if (!command.message) return NextResponse.json({ error: "A message is required" }, { status: 400 });
@@ -59,7 +59,7 @@ async function handleMultipart(request: Request, userId: string) {
   const command = commandSchema.parse({ action: "command", message: form.get("message"), requestId: form.get("requestId") });
   const image = form.get("image");
   if (!(image instanceof File) || image.size === 0) throw new Error("Choose an image to upload");
-  if (image.size > 8 * 1024 * 1024) throw new Error("Meal photos must be 8 MB or smaller");
+  if (image.size > 4.5 * 1024 * 1024) throw new Error("Meal photos must be 4.5 MB or smaller");
   if (!imageTypes.includes(image.type as (typeof imageTypes)[number])) throw new Error("Use a JPEG, PNG, WebP, or HEIC image");
   const base64 = Buffer.from(await image.arrayBuffer()).toString("base64");
   return NextResponse.json(await runCommand({ ...command, image: { mimeType: image.type as (typeof imageTypes)[number], base64 } }, userId));
@@ -124,6 +124,9 @@ function assistantError(error: unknown) {
     const status = error.status >= 400 && error.status < 500 ? error.status : 502;
     return NextResponse.json({ error: error.message }, { status });
   }
-  const message = error instanceof Error && /image|photo/i.test(error.message) ? error.message : "Ask ClawFit couldn't complete that request. Nothing was changed.";
+  const message =
+    error instanceof Error && /image|photo/i.test(error.message)
+      ? error.message
+      : "Ask ClawFit couldn't complete that request. Please try again or check your recent meals.";
   return NextResponse.json({ error: message }, { status: 400 });
 }

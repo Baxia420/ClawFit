@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { derivePendingMealScope, HealthApiNetworkError, healthFetch } from "./health-client.js";
+import { derivePendingMealScope, deriveWhatsAppNutritionOperationId, HealthApiNetworkError, healthFetch } from "./health-client.js";
 
 describe("OpenClaw Health API client", () => {
   afterEach(() => {
@@ -62,5 +62,101 @@ describe("OpenClaw Health API client", () => {
         }),
       }),
     );
+  });
+
+  describe("deriveWhatsAppNutritionOperationId", () => {
+    const scopeKey = "openclaw:whatsapp:test-scope";
+    const commonPrefix = "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/"; // 128 chars
+
+    it("produces identical operation IDs on same-request retry", () => {
+      const options = {
+        scopeKey,
+        text: "Chicken rice and iced tea",
+        images: [{ mimeType: "image/jpeg", base64: `${commonPrefix}PhotoContentA12345` }],
+      };
+
+      const first = deriveWhatsAppNutritionOperationId(options);
+      const second = deriveWhatsAppNutritionOperationId(options);
+
+      expect(first).toBe(second);
+      expect(first).toMatch(/^wa_openclaw:whatsapp:test-scope_[a-f0-9]{16}$/);
+    });
+
+    it("differentiates distinct photos that share a base64 prefix", () => {
+      const photoA = `${commonPrefix}UNIQUE_TAIL_FOR_PHOTO_A_APPLES`;
+      const photoB = `${commonPrefix}UNIQUE_TAIL_FOR_PHOTO_B_BANANAS`;
+
+      const idA = deriveWhatsAppNutritionOperationId({
+        scopeKey,
+        text: "My lunch",
+        images: [{ mimeType: "image/jpeg", base64: photoA }],
+      });
+
+      const idB = deriveWhatsAppNutritionOperationId({
+        scopeKey,
+        text: "My lunch",
+        images: [{ mimeType: "image/jpeg", base64: photoB }],
+      });
+
+      expect(idA).not.toBe(idB);
+    });
+
+    it("hashes all images in multi-image input", () => {
+      const img1 = { mimeType: "image/jpeg", base64: `${commonPrefix}FirstCourse` };
+      const img2 = { mimeType: "image/jpeg", base64: `${commonPrefix}SecondCourse` };
+
+      const singleImageId = deriveWhatsAppNutritionOperationId({
+        scopeKey,
+        text: "Two course dinner",
+        images: [img1],
+      });
+
+      const multiImageId = deriveWhatsAppNutritionOperationId({
+        scopeKey,
+        text: "Two course dinner",
+        images: [img1, img2],
+      });
+
+      const multiImageRetryId = deriveWhatsAppNutritionOperationId({
+        scopeKey,
+        text: "Two course dinner",
+        images: [img1, img2],
+      });
+
+      expect(multiImageId).not.toBe(singleImageId);
+      expect(multiImageId).toBe(multiImageRetryId);
+    });
+
+    it("extracts stable logical IDs from incoming messages and distinguishes different messages", () => {
+      const idFromToolCall = deriveWhatsAppNutritionOperationId({
+        scopeKey,
+        toolContext: { toolCallId: "call_abc123" },
+      });
+      expect(idFromToolCall).toBe(`wa_${scopeKey}_call_abc123`);
+
+      const idFromMsgId = deriveWhatsAppNutritionOperationId({
+        scopeKey,
+        toolContext: { messageId: "msg_998877" },
+      });
+      expect(idFromMsgId).toBe(`wa_${scopeKey}_msg_998877`);
+
+      const idFromDeliveryCtx = deriveWhatsAppNutritionOperationId({
+        scopeKey,
+        toolContext: { deliveryContext: { messageId: "delivery_445566" } },
+      });
+      expect(idFromDeliveryCtx).toBe(`wa_${scopeKey}_delivery_445566`);
+
+      expect(idFromMsgId).not.toBe(idFromDeliveryCtx);
+    });
+
+    it("prioritizes explicit operationId when provided", () => {
+      const explicit = "explicit-custom-operation-id";
+      const id = deriveWhatsAppNutritionOperationId({
+        scopeKey,
+        explicitOperationId: explicit,
+        toolContext: { messageId: "msg_123" },
+      });
+      expect(id).toBe(explicit);
+    });
   });
 });

@@ -34,7 +34,7 @@ run("config", "set", "session.reset.mode", "idle");
 run("config", "set", "session.reset.idleMinutes", "60", "--strict-json");
 run("config", "set", "session.resetByType.direct", JSON.stringify({ mode: "idle", idleMinutes: 60 }), "--strict-json");
 run("config", "set", "agents.defaults.compaction", JSON.stringify({ mode: "safeguard", reserveTokens: 8192, keepRecentTokens: 4096, maxHistoryShare: 0.5, notifyUser: false }), "--strict-json");
-run("config", "set", "messages.suppressToolErrors", "true", "--strict-json");
+run("config", "set", "messages.suppressToolErrors", "false", "--strict-json");
 run("config", "set", "messages.inbound.debounceMs", "2000", "--strict-json");
 run("config", "set", "channels.whatsapp.debounceMs", "2000", "--strict-json");
 

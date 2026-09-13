@@ -107,6 +107,7 @@ export const pendingMealEstimates = pgTable(
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
     mealId: uuid("meal_id").references(() => meals.id, { onDelete: "set null" }),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    version: integer("version").notNull().default(1),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -147,11 +148,40 @@ export const notificationPreferences = pgTable(
   (table) => [uniqueIndex("notification_preferences_user_type_uq").on(table.userId, table.type)],
 );
 
+export const nutritionOperationStatusEnum = pgEnum("nutrition_operation_status", ["in_progress", "completed", "failed"]);
+
+export const nutritionOperations = pgTable(
+  "nutrition_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    operationId: varchar("operation_id", { length: 200 }).notNull(),
+    inputHash: varchar("input_hash", { length: 64 }).notNull(),
+    status: nutritionOperationStatusEnum("status").notNull().default("in_progress"),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    error: jsonb("error").$type<{ code: string; message: string; safeReference?: string }>(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    ownerToken: varchar("owner_token", { length: 64 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("nutrition_operations_user_operation_uq").on(table.userId, table.operationId),
+    index("nutrition_operations_expires_at_idx").on(table.expiresAt),
+    index("nutrition_operations_user_created_at_idx").on(table.userId, table.createdAt),
+  ],
+);
+
 export const mealItems = pgTable("meal_items", {
   id: uuid("id").primaryKey().defaultRandom(),
   mealId: uuid("meal_id").notNull().references(() => meals.id, { onDelete: "cascade" }),
   name: varchar("name", { length: 200 }).notNull(),
   portionDescription: varchar("portion_description", { length: 500 }).notNull(),
+  calories: integer("calories"),
+  proteinG: real("protein_g"),
+  carbsG: real("carbs_g"),
+  fatG: real("fat_g"),
+  fiberG: real("fiber_g"),
 });
 
 export const foodPresets = pgTable(

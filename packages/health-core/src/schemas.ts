@@ -13,6 +13,11 @@ const timezoneSchema = z.string().min(1).max(100).refine((value) => {
 export const nutritionItemSchema = z.object({
   name: z.string().min(1).max(200),
   portionDescription: z.string().min(1).max(500),
+  calories: z.number().int().nonnegative().max(20_000).optional(),
+  proteinG: z.number().nonnegative().max(2_000).optional(),
+  carbsG: z.number().nonnegative().max(3_000).optional(),
+  fatG: z.number().nonnegative().max(2_000).optional(),
+  fiberG: z.number().nonnegative().max(500).nullable().optional(),
 });
 
 export const nutritionEstimateSchema = z
@@ -102,6 +107,7 @@ export const confirmPendingMealSchema = z.object({
   scopeKey: z.string().min(3).max(200).regex(/^[a-z0-9][a-z0-9:_-]*$/i),
   occurredAt: z.coerce.date().optional(),
   idempotencyKey: z.string().min(8).max(200).optional(),
+  expectedVersion: z.number().int().positive().optional(),
 });
 
 export const pendingMealScopeSchema = z.object({
@@ -110,6 +116,7 @@ export const pendingMealScopeSchema = z.object({
 
 export const pendingMealPatchSchema = z.object({
   label: z.string().min(1).max(300).optional(),
+  items: z.array(nutritionItemSchema).optional(),
   caloriesBest: z.number().int().nonnegative().max(20_000).optional(),
   caloriesLow: z.number().int().nonnegative().max(20_000).optional(),
   caloriesHigh: z.number().int().nonnegative().max(20_000).optional(),
@@ -117,6 +124,11 @@ export const pendingMealPatchSchema = z.object({
   carbsG: z.number().nonnegative().max(3_000).optional(),
   fatG: z.number().nonnegative().max(2_000).optional(),
   fiberG: z.number().nonnegative().max(500).nullable().optional(),
+  confidence: confidenceSchema.optional(),
+  uncertaintyReasons: z.array(z.string().max(200)).optional(),
+  occurredAt: z.coerce.date().optional(),
+  rawUserText: z.string().max(4_000).nullable().optional(),
+  expectedVersion: z.number().int().positive().optional(),
 });
 
 export const foodPresetPatchSchema = z.object({
@@ -212,6 +224,7 @@ export const linkExternalIdentitySchema = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
+export type NutritionItem = z.infer<typeof nutritionItemSchema>;
 export type Confidence = z.infer<typeof confidenceSchema>;
 export type NutritionEstimate = z.infer<typeof nutritionEstimateSchema>;
 export type MealInput = z.infer<typeof mealInputSchema>;

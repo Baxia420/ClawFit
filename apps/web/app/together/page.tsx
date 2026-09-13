@@ -199,11 +199,6 @@ export default async function TogetherPage({ searchParams }: TogetherPageProps) 
           <span className="kicker">HOUSEHOLD SHARED VIEW &middot; {data.household.name}</span>
           <h1>Together<br /><em>overview.</em></h1>
         </div>
-        <div className="header-code">
-          DATE: {selectedDate}<br />
-          MEMBERS: {data.members.length}<br />
-          STATUS: AUTHORIZED READ-ONLY
-        </div>
       </header>
 
       {/* Date & Range Controls Toolbar */}

@@ -23,22 +23,51 @@ export class GeminiNutritionClient implements NutritionModelClient {
         body: JSON.stringify({
           contents: [{ role: "user", parts }],
           generationConfig: {
-            temperature: 0.2,
             responseMimeType: "application/json",
             responseJsonSchema: nutritionJsonSchema,
           },
         }),
-        signal: AbortSignal.timeout(45_000),
+        signal: request.signal ?? AbortSignal.timeout(45_000),
       },
     );
-    if (!response.ok) throw new Error(`Gemini request failed (${response.status})`);
+    if (!response.ok) {
+      let errorDetails = "";
+      try {
+        const errorJson = (await response.json()) as { error?: { message?: string; status?: string; code?: number } };
+        if (errorJson?.error) {
+          const status = errorJson.error.status ? ` [${errorJson.error.status}]` : "";
+          const msg = errorJson.error.message ? `: ${errorJson.error.message}` : "";
+          errorDetails = `${status}${msg}`;
+        }
+      } catch {
+        // Non-JSON error response; status code is preserved below
+      }
+      throw new Error(`Gemini request failed (${response.status})${errorDetails}`);
+    }
     const payload = (await response.json()) as {
-      candidates?: { content?: { parts?: { text?: string }[] } }[];
+      candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
       promptFeedback?: { blockReason?: string };
+      usageMetadata?: {
+        promptTokenCount?: number;
+        candidatesTokenCount?: number;
+        totalTokenCount?: number;
+      };
     };
     const text = payload.candidates?.[0]?.content?.parts?.find((part) => part.text)?.text;
-    if (!text) throw new Error(payload.promptFeedback?.blockReason ? `Gemini blocked request: ${payload.promptFeedback.blockReason}` : "Gemini returned no JSON text");
-    return JSON.parse(text) as unknown;
+    if (!text) {
+      const blockReason = payload.promptFeedback?.blockReason || payload.candidates?.[0]?.finishReason;
+      throw new Error(blockReason ? `Gemini blocked request: ${blockReason}` : "Gemini returned no JSON text");
+    }
+    const data = JSON.parse(text) as unknown;
+    const usage = payload.usageMetadata
+      ? {
+          promptTokens: typeof payload.usageMetadata.promptTokenCount === "number" ? payload.usageMetadata.promptTokenCount : undefined,
+          candidatesTokens: typeof payload.usageMetadata.candidatesTokenCount === "number" ? payload.usageMetadata.candidatesTokenCount : undefined,
+          totalTokens: typeof payload.usageMetadata.totalTokenCount === "number" ? payload.usageMetadata.totalTokenCount : undefined,
+        }
+      : undefined;
+
+    return { data, usage };
   }
 }
 
@@ -54,7 +83,15 @@ const nutritionJsonSchema = {
         type: "object",
         additionalProperties: false,
         required: ["name", "portion_description"],
-        properties: { name: { type: "string" }, portion_description: { type: "string" } },
+        properties: {
+          name: { type: "string" },
+          portion_description: { type: "string" },
+          calories: { type: ["integer", "null"] },
+          protein_g: { type: ["number", "null"] },
+          carbs_g: { type: ["number", "null"] },
+          fat_g: { type: ["number", "null"] },
+          fiber_g: { type: ["number", "null"] },
+        },
       },
     },
     calories: {

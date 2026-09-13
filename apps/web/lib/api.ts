@@ -4,7 +4,13 @@ import { auth } from "../auth";
 const apiUrl = process.env.HEALTH_API_URL ?? "http://127.0.0.1:4000";
 
 export class HealthApiError extends Error {
-  constructor(message: string, readonly status: number, readonly code?: string) {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly safeReference?: string,
+    readonly attempts?: unknown,
+  ) {
     super(message);
     this.name = "HealthApiError";
   }
@@ -12,7 +18,7 @@ export class HealthApiError extends Error {
 
 export class HealthApiNetworkError extends HealthApiError {
   constructor() {
-    super("ClawFit's health service is temporarily unavailable. Nothing was changed.", 503);
+    super("ClawFit's health service is temporarily unavailable. Status could not be verified.", 503);
     this.name = "HealthApiNetworkError";
   }
 }
@@ -106,20 +112,30 @@ export async function healthApiRequest<T>(path: string, init: HealthApiOptions =
         ...init.headers,
       },
       cache: "no-store",
-      signal: init.signal ?? AbortSignal.timeout(50_000),
+      signal: init.signal
+        ? AbortSignal.any([init.signal, AbortSignal.timeout(55_000)])
+        : AbortSignal.timeout(55_000),
     });
   } catch (error) {
     logNetworkFailure(path, error);
     throw new HealthApiNetworkError();
   }
-  let payload: { error?: { message?: string; code?: string } } & T;
+  let payload: { error?: { message?: string; code?: string; safeReference?: string; attempts?: unknown } } & T;
   try {
-    payload = (await response.json()) as { error?: { message?: string; code?: string } } & T;
+    payload = (await response.json()) as { error?: { message?: string; code?: string; safeReference?: string; attempts?: unknown } } & T;
   } catch (error) {
     logNetworkFailure(path, error, response.status);
     throw new HealthApiNetworkError();
   }
-  if (!response.ok) throw new HealthApiError(payload.error?.message ?? "The Health API request failed", response.status, payload.error?.code);
+  if (!response.ok) {
+    throw new HealthApiError(
+      payload.error?.message ?? "The Health API request failed",
+      response.status,
+      payload.error?.code,
+      payload.error?.safeReference,
+      payload.error?.attempts,
+    );
+  }
   return payload;
 }
 

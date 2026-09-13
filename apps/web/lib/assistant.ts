@@ -144,7 +144,7 @@ export async function handleAssistantCommand(
       uncertaintyReasons: string[];
     } }>("/v1/nutrition/estimate", {
       method: "POST",
-      body: JSON.stringify({ text: message, ...(input.image ? { image: input.image } : {}) }),
+      body: JSON.stringify({ operationId: `ast_${input.requestId}`, text: message, ...(input.image ? { image: input.image } : {}) }),
     });
     const pending = await client.request<AssistantMeal>("/v1/meals/pending", {
       method: "POST",

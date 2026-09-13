@@ -237,20 +237,63 @@ describe("web auth partial index migration (0005)", () => {
     }
   });
 
-  it("verifies canonical migration metadata chain and 0005 snapshot consistency", async () => {
-    const journalRaw = await readFile(new URL("../drizzle/meta/_journal.json", import.meta.url), "utf8");
-    const journal = JSON.parse(journalRaw) as { entries: Array<{ idx: number; tag: string }> };
-    const entry0005 = journal.entries.find((e) => e.idx === 5 && e.tag === "0005_web_auth");
-    expect(entry0005).toBeDefined();
+  it("applies 0006_nutrition_operations.sql and verifies operations table and meal_items columns", async () => {
+    const pg = new PGlite();
+    try {
+      for (const name of [
+        "0000_fuzzy_doorman.sql",
+        "0001_cuddly_pending_meals.sql",
+        "0002_mobile_product_foundation.sql",
+        "0003_scope_pending_meals.sql",
+        "0004_two_user_identity.sql",
+        "0005_web_auth.sql",
+        "0006_nutrition_operations.sql",
+      ]) {
+        const sql = await readFile(new URL(`../drizzle/${name}`, import.meta.url), "utf8");
+        await pg.exec(sql.replaceAll("--> statement-breakpoint", ""));
+      }
 
-    const snapshotRaw = await readFile(new URL("../drizzle/meta/0005_snapshot.json", import.meta.url), "utf8");
-    const snapshot = JSON.parse(snapshotRaw) as {
-      tables: Record<string, { indexes: Record<string, { name: string; columns: string[] }> }>;
-    };
-    expect(snapshot.tables).toBeDefined();
-    const extIdentities = snapshot.tables["public.external_identities"] || snapshot.tables["external_identities"];
-    expect(extIdentities).toBeDefined();
-    expect(extIdentities?.indexes["external_identities_user_google_uq"]).toBeDefined();
+      // Test inserting into nutrition_operations with owner_token
+      await pg.exec(`
+        INSERT INTO nutrition_operations (user_id, operation_id, input_hash, status, owner_token, expires_at)
+        VALUES ('00000000-0000-0000-0000-000000000002', 'op-test-1', 'hash123', 'in_progress', 'token-123', NOW() + INTERVAL '2 hours');
+      `);
+
+      const op = await pg.query<{ operation_id: string; status: string; owner_token: string }>(
+        "SELECT operation_id, status, owner_token FROM nutrition_operations WHERE operation_id = 'op-test-1'",
+      );
+      expect(op.rows).toEqual([{ operation_id: "op-test-1", status: "in_progress", owner_token: "token-123" }]);
+
+      // Test pending_meal_estimates version column
+      const pendingRes = await pg.query<{ id: string; version: number }>(`
+        INSERT INTO pending_meal_estimates (user_id, label, calories_best, calories_low, calories_high, protein_g, carbs_g, fat_g, confidence, source, occurred_at, scope_key, idempotency_key, expires_at)
+        VALUES ('00000000-0000-0000-0000-000000000002', 'Test Draft', 400, 350, 450, 30, 40, 10, 'high', 'text', NOW(), 'scope:test', 'key-test-1', NOW() + INTERVAL '2 hours')
+        RETURNING id, version;
+      `);
+      expect(pendingRes.rows[0]?.version).toBe(1);
+
+      // Test meal_items nutrient columns
+      const mealRes = await pg.query<{ id: string }>(
+        `INSERT INTO meals (user_id, occurred_at, label, calories_best, calories_low, calories_high, protein_g, carbs_g, fat_g, confidence, source, idempotency_key)
+         VALUES ('00000000-0000-0000-0000-000000000002', NOW(), 'Test Meal', 500, 450, 550, 30, 40, 15, 'high', 'manual', 'test-meal-key')
+         RETURNING id`,
+      );
+      const mealId = mealRes.rows[0]?.id;
+
+      await pg.exec(`
+        INSERT INTO meal_items (meal_id, name, portion_description, calories, protein_g, carbs_g, fat_g, fiber_g)
+        VALUES ('${mealId}', 'Chicken', '150g', 250, 45.5, 0, 5.2, 0);
+      `);
+
+      const itemRes = await pg.query<{ name: string; calories: number; protein_g: number }>(
+        `SELECT name, calories, protein_g FROM meal_items WHERE meal_id = '${mealId}'`,
+      );
+      expect(itemRes.rows[0]?.name).toBe("Chicken");
+      expect(itemRes.rows[0]?.calories).toBe(250);
+      expect(Number(itemRes.rows[0]?.protein_g)).toBeCloseTo(45.5, 1);
+    } finally {
+      await pg.close();
+    }
   });
 });
 

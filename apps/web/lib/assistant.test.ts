@@ -115,6 +115,13 @@ describe("web assistant command adapter", () => {
 
     expect(result.kind).toBe("meal_draft");
     expect(result.meal?.caloriesBest).toBe(350);
+    expect(request).toHaveBeenCalledWith(
+      "/v1/nutrition/estimate",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining('"operationId":"ast_req-int-1"'),
+      }),
+    );
     expect(capturedPendingBody).toBeDefined();
     expect(capturedPendingBody.label).toBe("Two poached eggs on sourdough toast");
     expect(capturedPendingBody.calories.best).toBe(350);

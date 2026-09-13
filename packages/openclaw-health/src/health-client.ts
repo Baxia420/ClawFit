@@ -30,7 +30,7 @@ export class HealthApiNetworkError extends Error {
   override name = "HealthApiNetworkError";
 
   constructor() {
-    super("ClawFit's health service is temporarily unavailable. Nothing was changed.");
+    super("ClawFit's health service is temporarily unavailable. Status could not be verified.");
   }
 }
 
@@ -71,12 +71,21 @@ export async function healthFetch<T = unknown>(config: HealthPluginConfig, path:
     headers["x-clawfit-conversation-id"] = options.sender.conversationId;
   }
 
+  let requestSignal: AbortSignal;
+  if (!options.signal) {
+    requestSignal = AbortSignal.timeout(55_000);
+  } else if (typeof AbortSignal.any === "function") {
+    requestSignal = AbortSignal.any([options.signal, AbortSignal.timeout(55_000)]);
+  } else {
+    requestSignal = options.signal;
+  }
+
   try {
     response = await (options.fetchImpl ?? fetch)(new URL(path, apiUrl), {
       method: options.method ?? "GET",
       headers,
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-      signal: options.signal ?? AbortSignal.timeout(30_000),
+      signal: requestSignal,
     });
   } catch (error) {
     console.error("[HEALTH_API_NETWORK] request failed", { path }, error);
@@ -102,4 +111,44 @@ export async function healthFetch<T = unknown>(config: HealthPluginConfig, path:
 function normalizeScopeSegment(value: string) {
   const normalized = value.toLocaleLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
   return normalized || "openclaw";
+}
+
+export type WhatsAppNutritionOperationIdOptions = {
+  toolContext?: Record<string, unknown> | undefined;
+  scopeKey: string;
+  explicitOperationId?: string | undefined;
+  text?: string | undefined;
+  images?: Array<{ mimeType: string; base64: string }> | undefined;
+};
+
+export function deriveWhatsAppNutritionOperationId(options: WhatsAppNutritionOperationIdOptions): string {
+  if (options.explicitOperationId && options.explicitOperationId.trim().length > 0) {
+    return options.explicitOperationId.trim();
+  }
+
+  const rawCtx = options.toolContext as Record<string, unknown> | undefined;
+  const deliveryCtx = rawCtx?.deliveryContext as Record<string, unknown> | undefined;
+
+  const logicalId =
+    (typeof rawCtx?.toolCallId === "string" && rawCtx.toolCallId ? rawCtx.toolCallId : undefined) ??
+    (typeof rawCtx?.tool_call_id === "string" && rawCtx.tool_call_id ? rawCtx.tool_call_id : undefined) ??
+    (typeof rawCtx?.messageId === "string" && rawCtx.messageId ? rawCtx.messageId : undefined) ??
+    (typeof rawCtx?.id === "string" && rawCtx.id ? rawCtx.id : undefined) ??
+    (typeof deliveryCtx?.messageId === "string" && deliveryCtx.messageId ? deliveryCtx.messageId : undefined) ??
+    (typeof rawCtx?.incomingMessageId === "string" && rawCtx.incomingMessageId ? rawCtx.incomingMessageId : undefined) ??
+    (typeof rawCtx?.callId === "string" && rawCtx.callId ? rawCtx.callId : undefined);
+
+  if (logicalId) {
+    return `wa_${options.scopeKey}_${logicalId}`;
+  }
+
+  const hasher = createHash("sha256");
+  hasher.update(`wa:${options.scopeKey}:${options.text ?? ""}`);
+  if (options.images && options.images.length > 0) {
+    for (const img of options.images) {
+      hasher.update(`:${img.mimeType}:${img.base64}`);
+    }
+  }
+  const hashHex = hasher.digest("hex").slice(0, 16);
+  return `wa_${options.scopeKey}_${hashHex}`;
 }

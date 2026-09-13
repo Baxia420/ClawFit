@@ -111,6 +111,30 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         if (typeof token.displayName === "string") {
           session.user.displayName = token.displayName;
         }
+
+        // Dynamically refresh displayName so profile updates take effect without requiring re-login
+        if (session.user.id) {
+          try {
+            const secret = process.env.WEB_ASSERTION_SIGNING_SECRET ?? process.env.HEALTH_API_AUTH_SECRET;
+            if (secret) {
+              const { createWebAssertion } = await import("./lib/api.js");
+              const assertion = await createWebAssertion(session.user.id, session.user.role, session.user.email ?? undefined);
+              const healthApiUrl = process.env.HEALTH_API_URL ?? "http://127.0.0.1:4000";
+              const res = await fetch(`${healthApiUrl}/v1/me`, {
+                headers: { authorization: `Bearer ${assertion}` },
+                signal: AbortSignal.timeout(2_000),
+              });
+              if (res.ok) {
+                const me = (await res.json()) as { displayName?: string };
+                if (me.displayName) {
+                  session.user.displayName = me.displayName;
+                }
+              }
+            }
+          } catch {
+            // Gracefully fall back to token displayName if Health API is offline
+          }
+        }
       }
       return session;
     },

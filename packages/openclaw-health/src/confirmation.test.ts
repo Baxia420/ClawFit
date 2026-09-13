@@ -37,6 +37,8 @@ describe("fallback notice detection", () => {
     "Here is your meal estimate for 3 eggs and toast: 350 kcal.",
     "Logged your Push workout: 3 sets completed.",
     "What have you eaten today?",
+    "I selected gemini for my meal estimation.",
+    "We selected google/gemini as our model preference.",
   ])("identifies normal message: %s", (text) => {
     expect(isFallbackNotice(text)).toBe(false);
   });

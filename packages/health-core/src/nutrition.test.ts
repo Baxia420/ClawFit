@@ -18,12 +18,20 @@ describe("nutrition model boundary", () => {
     expect(nutritionEstimateSchema.safeParse(result.estimate).success).toBe(true);
   });
 
-  it("falls back once when the primary fails with a transient error (e.g. 429 quota or 503 unavailable)", async () => {
-    const generate = vi.fn().mockRejectedValueOnce(new Error("Google Generative AI error (429): RESOURCE_EXHAUSTED")).mockResolvedValueOnce(valid);
+  it("falls back once when the primary fails with a transient error (e.g. 503 UNAVAILABLE or network glitch)", async () => {
+    const generate = vi.fn().mockRejectedValueOnce(new Error("503 UNAVAILABLE: backend temporarily overloaded")).mockResolvedValueOnce(valid);
     const result = await new NutritionEstimator({ generate }, ["gemini-3.8-flash", "gemini-3.7-flash"]).estimate({ text: "meal" });
     expect(result.model).toBe("gemini-3.7-flash");
     expect(result.fallbackUsed).toBe(true);
     expect(generate).toHaveBeenCalledTimes(2);
+  });
+
+  it("aborts immediately without retrying fallback on shared quota exhaustion (e.g. 429 RESOURCE_EXHAUSTED)", async () => {
+    const generate = vi.fn().mockRejectedValue(new Error("Google Generative AI error (429): RESOURCE_EXHAUSTED"));
+    const estimator = new NutritionEstimator({ generate }, ["gemini-3.8-flash", "gemini-3.7-flash"]);
+
+    await expect(estimator.estimate({ text: "meal" })).rejects.toThrow("Non-retryable model failure");
+    expect(generate).toHaveBeenCalledTimes(1);
   });
 
   it("aborts immediately without retrying fallback on non-retryable credential or client errors (e.g. 401 API_KEY_INVALID)", async () => {
@@ -45,7 +53,7 @@ describe("nutrition model boundary", () => {
 
   it("preserves attempts list and throws NutritionEstimationError when all configured models fail", async () => {
     const generate = vi.fn()
-      .mockRejectedValueOnce(new Error("429 RESOURCE_EXHAUSTED"))
+      .mockRejectedValueOnce(new Error("503 UNAVAILABLE"))
       .mockRejectedValueOnce(new Error("503 UNAVAILABLE"));
     const estimator = new NutritionEstimator({ generate }, ["gemini-3.8-flash", "gemini-3.7-flash"]);
 

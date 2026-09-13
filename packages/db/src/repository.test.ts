@@ -1374,6 +1374,525 @@ describe("HealthRepository", () => {
         await pre0004Pg.close();
       }
     });
+
+    describe("nutrition operations", () => {
+      const opId = "test-op-concurrency-1";
+      const inputHash = "hash-1234567890abcdef";
+
+      it("starts operation, caches completion, and enforces identical input hash", async () => {
+        const startResult = await repository.getOrStartNutritionOperation(primaryUserId, opId, inputHash);
+        expect(startResult.status).toBe("started");
+
+        // Concurrent/immediate call with same input receives in_progress
+        const inProgressResult = await repository.getOrStartNutritionOperation(primaryUserId, opId, inputHash);
+        expect(inProgressResult.status).toBe("in_progress");
+
+        // Conflicting input hash throws ConflictError
+        await expect(
+          repository.getOrStartNutritionOperation(primaryUserId, opId, "different-input-hash"),
+        ).rejects.toThrow("already used with different input");
+
+        // Complete the operation
+        const resultData = { estimate: { label: "Completed Meal", calories: 400 } };
+        await repository.completeNutritionOperation(primaryUserId, opId, resultData);
+
+        // Subsequent call returns cached completed result
+        const completedResult = await repository.getOrStartNutritionOperation(primaryUserId, opId, inputHash);
+        expect(completedResult.status).toBe("completed");
+        if (completedResult.status === "completed") {
+          expect(completedResult.result).toEqual(resultData);
+        }
+      });
+
+      it("ensures exactly one caller wins initial acquisition under concurrent race conditions", async () => {
+        const raceOpId = "race-op-initial-1";
+        const raceHash = "race-hash-111";
+
+        // 10 concurrent callers race to start the same operation simultaneously
+        const callers = Array.from({ length: 10 }, () =>
+          repository.getOrStartNutritionOperation(primaryUserId, raceOpId, raceHash),
+        );
+
+        const results = await Promise.all(callers);
+        const startedCount = results.filter((r) => r.status === "started").length;
+        const inProgressCount = results.filter((r) => r.status === "in_progress").length;
+
+        // Exactly one caller wins ownership; all other callers receive in_progress
+        expect(startedCount).toBe(1);
+        expect(inProgressCount).toBe(9);
+      });
+
+      it("ensures exactly one caller wins reclamation race on stale in-progress operations", async () => {
+        const staleOpId = "race-op-stale-1";
+        const staleHash = "stale-hash-222";
+
+        // Initial acquisition at T0
+        const t0 = new Date("2026-09-12T10:00:00.000Z");
+        const first = await repository.getOrStartNutritionOperation(primaryUserId, staleOpId, staleHash, t0);
+        expect(first.status).toBe("started");
+
+        // Call at T0 + 50s (within 70s lease duration) still returns in_progress
+        const t50 = new Date(t0.getTime() + 50_000);
+        const stillLeased = await repository.getOrStartNutritionOperation(primaryUserId, staleOpId, staleHash, t50);
+        expect(stillLeased.status).toBe("in_progress");
+
+        // At T0 + 75s, lease is stale. 5 concurrent callers race to reclaim it.
+        const t75 = new Date(t0.getTime() + 75_000);
+        const reclaims = Array.from({ length: 5 }, () =>
+          repository.getOrStartNutritionOperation(primaryUserId, staleOpId, staleHash, t75),
+        );
+
+        const reclaimResults = await Promise.all(reclaims);
+        const reclaimedCount = reclaimResults.filter((r) => r.status === "started").length;
+        const inProgressCount = reclaimResults.filter((r) => r.status === "in_progress").length;
+
+        // Exactly one caller reclaims ownership; losers receive in_progress
+        expect(reclaimedCount).toBe(1);
+        expect(inProgressCount).toBe(4);
+      });
+
+      it("fences completion and failure with ownership token so stale workers cannot mutate reclaimed operations", async () => {
+        const raceOpId = "owner-token-fenced-op";
+        const raceHash = "owner-token-hash";
+
+        // Worker A acquires at T0
+        const t0 = new Date("2026-09-12T10:00:00.000Z");
+        const workerA = await repository.getOrStartNutritionOperation(primaryUserId, raceOpId, raceHash, t0);
+        expect(workerA.status).toBe("started");
+        if (workerA.status !== "started") return;
+        const tokenA = workerA.ownerToken;
+        expect(tokenA).toBeDefined();
+
+        // Worker B reclaims at T0 + 75s
+        const t75 = new Date(t0.getTime() + 75_000);
+        const workerB = await repository.getOrStartNutritionOperation(primaryUserId, raceOpId, raceHash, t75);
+        expect(workerB.status).toBe("started");
+        if (workerB.status !== "started") return;
+        const tokenB = workerB.ownerToken;
+        expect(tokenB).toBeDefined();
+        expect(tokenB).not.toBe(tokenA);
+
+        // Worker A completes late with stale tokenA
+        const lateResultA = await repository.completeNutritionOperation(
+          primaryUserId,
+          raceOpId,
+          tokenA,
+          { worker: "A", calories: 999 },
+          new Date(t0.getTime() + 80_000),
+        );
+        expect(lateResultA).toBe(false); // Rejected!
+
+        // Worker B's operation is still in_progress
+        const midCheck = await repository.getOrStartNutritionOperation(
+          primaryUserId,
+          raceOpId,
+          raceHash,
+          new Date(t0.getTime() + 85_000),
+        );
+        expect(midCheck.status).toBe("in_progress");
+
+        // Worker B completes with valid tokenB
+        const successB = await repository.completeNutritionOperation(
+          primaryUserId,
+          raceOpId,
+          tokenB,
+          { worker: "B", calories: 500 },
+          new Date(t0.getTime() + 90_000),
+        );
+        expect(successB).toBe(true);
+
+        // Result stored is Worker B's result, not Worker A's
+        const finalResult = await repository.getOrStartNutritionOperation(
+          primaryUserId,
+          raceOpId,
+          raceHash,
+          new Date(t0.getTime() + 95_000),
+        );
+        expect(finalResult.status).toBe("completed");
+        if (finalResult.status === "completed") {
+          expect(finalResult.result).toEqual({ worker: "B", calories: 500 });
+        }
+      });
+
+      it("fences failure with ownership token so stale worker failure cannot cancel a reclaimed operation", async () => {
+        const failOpId = "owner-token-fail-op";
+        const failHash = "owner-token-fail-hash";
+
+        // Worker A acquires at T0
+        const t0 = new Date("2026-09-12T10:00:00.000Z");
+        const workerA = await repository.getOrStartNutritionOperation(primaryUserId, failOpId, failHash, t0);
+        expect(workerA.status).toBe("started");
+        if (workerA.status !== "started") return;
+        const tokenA = workerA.ownerToken;
+
+        // Worker B reclaims at T0 + 75s
+        const t75 = new Date(t0.getTime() + 75_000);
+        const workerB = await repository.getOrStartNutritionOperation(primaryUserId, failOpId, failHash, t75);
+        expect(workerB.status).toBe("started");
+        if (workerB.status !== "started") return;
+        const tokenB = workerB.ownerToken;
+
+        // Worker A fails late with stale tokenA
+        const lateFailA = await repository.failNutritionOperation(
+          primaryUserId,
+          failOpId,
+          tokenA,
+          { code: "TIMEOUT", message: "Late timeout from Worker A" },
+          new Date(t0.getTime() + 80_000),
+        );
+        expect(lateFailA).toBe(false); // Rejected!
+
+        // Worker B is still in_progress and completes successfully
+        const midCheck = await repository.getOrStartNutritionOperation(
+          primaryUserId,
+          failOpId,
+          failHash,
+          new Date(t0.getTime() + 85_000),
+        );
+        expect(midCheck.status).toBe("in_progress");
+
+        const successB = await repository.completeNutritionOperation(
+          primaryUserId,
+          failOpId,
+          tokenB,
+          { worker: "B", calories: 420 },
+          new Date(t0.getTime() + 90_000),
+        );
+        expect(successB).toBe(true);
+      });
+
+      it("reclaims expired completed operations rather than hanging in_progress indefinitely", async () => {
+        const expOpId = "expired-completed-op";
+        const expHash = "expired-completed-hash";
+
+        const t0 = new Date("2026-09-12T10:00:00.000Z");
+        const started = await repository.getOrStartNutritionOperation(primaryUserId, expOpId, expHash, t0);
+        expect(started.status).toBe("started");
+        if (started.status !== "started") return;
+
+        // Complete the operation at T0 + 10s
+        await repository.completeNutritionOperation(
+          primaryUserId,
+          expOpId,
+          started.ownerToken,
+          { cachedData: "original" },
+          new Date(t0.getTime() + 10_000),
+        );
+
+        // At T0 + 1 hour (within 2h expiresAt), returns cached completed result
+        const t1h = new Date(t0.getTime() + 3600_000);
+        const cached = await repository.getOrStartNutritionOperation(primaryUserId, expOpId, expHash, t1h);
+        expect(cached.status).toBe("completed");
+
+        // At T0 + 3 hours (> 2h expiresAt), cache is expired. Re-acquisition MUST reclaim instead of hanging in_progress!
+        const t3h = new Date(t0.getTime() + 3 * 3600_000);
+        const reclaimed = await repository.getOrStartNutritionOperation(primaryUserId, expOpId, expHash, t3h);
+        expect(reclaimed.status).toBe("started");
+        if (reclaimed.status === "started") {
+          expect(reclaimed.ownerToken).toBeDefined();
+        }
+      });
+
+      it("enforces draft versioning on pending meal updates and confirmation", async () => {
+        const draft = await repository.createPendingMeal(primaryUserId, {
+          label: "Versioned Lunch",
+          items: [{ name: "Rice", portionDescription: "1 bowl", calories: 300 }],
+          calories: { best: 300, low: 250, high: 350 },
+          macros: { proteinG: 10, carbsG: 60, fatG: 2, fiberG: 2 },
+          confidence: "high",
+          uncertaintyReasons: [],
+          source: "text",
+          scopeKey: "web:version-test",
+          idempotencyKey: "draft-ver-test-1",
+          occurredAt: new Date("2026-09-12T12:00:00Z"),
+          expiresInSeconds: 7200,
+        });
+
+        expect(draft.version).toBe(1);
+
+        // Update with matching expectedVersion succeeds and increments version to 2
+        const updated = await repository.updatePendingMeal(
+          primaryUserId,
+          draft.id,
+          "web:version-test",
+          { caloriesBest: 350, caloriesLow: 300, caloriesHigh: 400 },
+          1,
+        );
+        expect(updated.version).toBe(2);
+        expect(updated.caloriesBest).toBe(350);
+
+        // Update with stale expectedVersion (1) fails with ConflictError
+        await expect(
+          repository.updatePendingMeal(
+            primaryUserId,
+            draft.id,
+            "web:version-test",
+            { caloriesBest: 400 },
+            1,
+          ),
+        ).rejects.toThrow(/version mismatch/i);
+
+        // Confirm with stale expectedVersion (1) fails with ConflictError
+        await expect(
+          repository.confirmPendingMeal(primaryUserId, draft.id, {
+            scopeKey: "web:version-test",
+            expectedVersion: 1,
+          }),
+        ).rejects.toThrow(/version mismatch/i);
+
+        // Confirm with matching expectedVersion (2) succeeds
+        const confirmed = await repository.confirmPendingMeal(primaryUserId, draft.id, {
+          scopeKey: "web:version-test",
+          expectedVersion: 2,
+        });
+        expect(confirmed.caloriesBest).toBe(350);
+        expect(confirmed.label).toBe("Versioned Lunch");
+      });
+      it("prevents updating or cancelling an already-confirmed pending draft and handles concurrent confirmations safely", async () => {
+        const draft = await repository.createPendingMeal(primaryUserId, {
+          label: "Atomic Lifecycle Bowl",
+          items: [{ name: "Oats", portionDescription: "1 bowl", calories: 400 }],
+          calories: { best: 400, low: 350, high: 450 },
+          macros: { proteinG: 15, carbsG: 70, fatG: 8, fiberG: 8 },
+          confidence: "high",
+          uncertaintyReasons: [],
+          source: "text",
+          scopeKey: "web:atomic-test",
+          idempotencyKey: "draft-atomic-test-1",
+          occurredAt: new Date("2026-09-12T12:00:00Z"),
+          expiresInSeconds: 7200,
+        });
+
+        // 1. Concurrent confirmations resolve to the exact same meal
+        const [confirmA, confirmB] = await Promise.all([
+          repository.confirmPendingMeal(primaryUserId, draft.id, {
+            scopeKey: "web:atomic-test",
+            expectedVersion: 1,
+            idempotencyKey: "confirm-attempt-a",
+          }),
+          repository.confirmPendingMeal(primaryUserId, draft.id, {
+            scopeKey: "web:atomic-test",
+            expectedVersion: 1,
+            idempotencyKey: "confirm-attempt-b",
+          }),
+        ]);
+
+        expect(confirmA.id).toBe(confirmB.id);
+        expect(confirmA.label).toBe("Atomic Lifecycle Bowl");
+        expect(confirmA.caloriesBest).toBe(400);
+
+        // 2. Paused update / late update cannot overwrite a meal confirmed in between
+        await expect(
+          repository.updatePendingMeal(
+            primaryUserId,
+            draft.id,
+            "web:atomic-test",
+            { caloriesBest: 500 },
+            1,
+          ),
+        ).rejects.toThrow(/already confirmed/i);
+
+        // 3. cancelPendingMeal cannot succeed after confirmation
+        await expect(
+          repository.cancelPendingMeal(primaryUserId, draft.id, "web:atomic-test"),
+        ).rejects.toThrow(/already confirmed/i);
+      });
+
+      it("prevents confirmation of an already cancelled draft", async () => {
+        const draft = await repository.createPendingMeal(primaryUserId, {
+          label: "Cancelled Meal",
+          items: [{ name: "Toast", portionDescription: "2 slices", calories: 200 }],
+          calories: { best: 200, low: 180, high: 220 },
+          macros: { proteinG: 6, carbsG: 30, fatG: 2, fiberG: 2 },
+          confidence: "high",
+          uncertaintyReasons: [],
+          source: "text",
+          scopeKey: "web:cancel-test",
+          idempotencyKey: "draft-cancel-test-1",
+          occurredAt: new Date("2026-09-12T12:00:00Z"),
+          expiresInSeconds: 7200,
+        });
+
+        await repository.cancelPendingMeal(primaryUserId, draft.id, "web:cancel-test");
+
+        await expect(
+          repository.confirmPendingMeal(primaryUserId, draft.id, {
+            scopeKey: "web:cancel-test",
+          }),
+        ).rejects.toThrow(/cancelled/i);
+
+        await expect(
+          repository.updatePendingMeal(
+            primaryUserId,
+            draft.id,
+            "web:cancel-test",
+            { caloriesBest: 250 },
+          ),
+        ).rejects.toThrow(/cancelled/i);
+      });
+
+      it("allows logging a second independent meal after confirming the first meal, preserving rejection of cancelling confirmed meals", async () => {
+        // 1. Create first meal draft
+        const draft1 = await repository.createPendingMeal(primaryUserId, {
+          label: "First Meal",
+          items: [{ name: "Oatmeal", portionDescription: "1 bowl", calories: 300 }],
+          calories: { best: 300, low: 280, high: 320 },
+          macros: { proteinG: 10, carbsG: 50, fatG: 5, fiberG: 6 },
+          confidence: "high",
+          uncertaintyReasons: [],
+          source: "text",
+          scopeKey: "web:multi-meal-test",
+          idempotencyKey: "draft-first-meal-1",
+          occurredAt: new Date("2026-09-12T08:00:00Z"),
+          expiresInSeconds: 7200,
+        });
+
+        // 2. Confirm first meal
+        const confirmedMeal1 = await repository.confirmPendingMeal(primaryUserId, draft1.id, {
+          scopeKey: "web:multi-meal-test",
+          idempotencyKey: "confirm-first-meal-1",
+        });
+        expect(confirmedMeal1.label).toBe("First Meal");
+        expect(confirmedMeal1.caloriesBest).toBe(300);
+
+        // 3. Cancelling the confirmed first draft MUST be rejected strictly by server
+        await expect(
+          repository.cancelPendingMeal(primaryUserId, draft1.id, "web:multi-meal-test"),
+        ).rejects.toThrow(/already confirmed/i);
+
+        // 4. "Log another meal" allocates fresh identity and creates second independent meal draft
+        const draft2 = await repository.createPendingMeal(primaryUserId, {
+          label: "Second Independent Meal",
+          items: [{ name: "Chicken Rice", portionDescription: "1 plate", calories: 650 }],
+          calories: { best: 650, low: 600, high: 700 },
+          macros: { proteinG: 35, carbsG: 75, fatG: 20, fiberG: 3 },
+          confidence: "high",
+          uncertaintyReasons: [],
+          source: "text",
+          scopeKey: "web:multi-meal-test",
+          idempotencyKey: "draft-second-meal-1",
+          occurredAt: new Date("2026-09-12T13:00:00Z"),
+          expiresInSeconds: 7200,
+        });
+
+        expect(draft2.id).not.toBe(draft1.id);
+        expect(draft2.version).toBe(1);
+        expect(draft2.confirmed).toBe(false);
+
+        // 5. Confirm second meal independently
+        const confirmedMeal2 = await repository.confirmPendingMeal(primaryUserId, draft2.id, {
+          scopeKey: "web:multi-meal-test",
+          idempotencyKey: "confirm-second-meal-1",
+        });
+        expect(confirmedMeal2.id).not.toBe(confirmedMeal1.id);
+        expect(confirmedMeal2.label).toBe("Second Independent Meal");
+        expect(confirmedMeal2.caloriesBest).toBe(650);
+      });
+
+      it("reconciles authoritative draft state after version conflict or ambiguous retry", async () => {
+        // Initial draft at 600 kcal / version 1
+        const draft = await repository.createPendingMeal(primaryUserId, {
+          label: "Rice Bowl",
+          items: [
+            { name: "Rice", portionDescription: "1 bowl", calories: 200, proteinG: 4, carbsG: 45, fatG: 1, fiberG: 1 },
+            { name: "Chicken", portionDescription: "200g", calories: 400, proteinG: 40, carbsG: 0, fatG: 8, fiberG: 0 },
+          ],
+          calories: { best: 600, low: 550, high: 650 },
+          macros: { proteinG: 44, carbsG: 45, fatG: 9, fiberG: 1 },
+          confidence: "high",
+          uncertaintyReasons: [],
+          source: "text",
+          scopeKey: "web:reconcile-test",
+          idempotencyKey: "draft-reconcile-test-1",
+          occurredAt: new Date("2026-09-12T12:00:00Z"),
+          expiresInSeconds: 7200,
+        });
+        expect(draft.version).toBe(1);
+        expect(draft.caloriesBest).toBe(600);
+
+        // Halve the chicken (400 -> 200 kcal), total drops to 500 kcal, expectedVersion 1
+        const updated = await repository.updatePendingMeal(
+          primaryUserId,
+          draft.id,
+          "web:reconcile-test",
+          {
+            items: [
+              { name: "Rice", portionDescription: "1 bowl", calories: 200, proteinG: 4, carbsG: 45, fatG: 1, fiberG: 1 },
+              { name: "Chicken", portionDescription: "100g (½x)", calories: 200, proteinG: 20, carbsG: 0, fatG: 4, fiberG: 0 },
+            ],
+            caloriesBest: 500,
+            caloriesLow: 450,
+            caloriesHigh: 550,
+            proteinG: 24,
+          },
+          1,
+        );
+        expect(updated.version).toBe(2);
+        expect(updated.caloriesBest).toBe(500);
+
+        // Ambiguous retry or stale client attempting write with expectedVersion 1 receives 409
+        await expect(
+          repository.updatePendingMeal(
+            primaryUserId,
+            draft.id,
+            "web:reconcile-test",
+            { caloriesBest: 500 },
+            1,
+          ),
+        ).rejects.toThrow(/version mismatch/i);
+
+        // Authoritative fetch retrieves complete current state: 500 kcal, version 2, updated items
+        const authoritative = await repository.getPendingMeal(primaryUserId, draft.id, "web:reconcile-test");
+        expect(authoritative.version).toBe(2);
+        expect(authoritative.caloriesBest).toBe(500);
+        expect(authoritative.items).toHaveLength(2);
+
+        // Confirmation requires authoritative version 2
+        await expect(
+          repository.confirmPendingMeal(primaryUserId, draft.id, {
+            scopeKey: "web:reconcile-test",
+            expectedVersion: 1,
+          }),
+        ).rejects.toThrow(/version mismatch/i);
+
+        const confirmed = await repository.confirmPendingMeal(primaryUserId, draft.id, {
+          scopeKey: "web:reconcile-test",
+          expectedVersion: 2,
+        });
+        expect(confirmed.caloriesBest).toBe(500);
+      });
+
+      it("preserves creation identity across retries and returns existing record idempotently", async () => {
+        const createInput = {
+          label: "Retry Safe Meal",
+          items: [{ name: "Protein Shake", portionDescription: "1 bottle", calories: 250 }],
+          calories: { best: 250, low: 240, high: 260 },
+          macros: { proteinG: 30, carbsG: 10, fatG: 3, fiberG: 2 },
+          confidence: "high" as const,
+          uncertaintyReasons: [],
+          source: "manual" as const,
+          scopeKey: "web:idempotent-creation",
+          idempotencyKey: "draft_manual_stable_key_999",
+          occurredAt: new Date("2026-09-12T15:00:00Z"),
+          expiresInSeconds: 7200,
+        };
+
+        // First creation attempt
+        const created1 = await repository.createPendingMeal(primaryUserId, createInput);
+        expect(created1.id).toBeDefined();
+        expect(created1.version).toBe(1);
+
+        // Simulated network drop retry with same idempotency key
+        const created2 = await repository.createPendingMeal(primaryUserId, createInput);
+        expect(created2.id).toBe(created1.id);
+        expect(created2.idempotencyKey).toBe("draft_manual_stable_key_999");
+
+        // Verify exactly one pending meal exists for this scope
+        const pendingList = await repository.listPendingMeals(primaryUserId, "web:idempotent-creation");
+        expect(pendingList).toHaveLength(1);
+        expect(pendingList[0]!.id).toBe(created1.id);
+      });
+    });
   });
 });
 

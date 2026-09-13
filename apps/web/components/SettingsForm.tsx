@@ -69,7 +69,7 @@ export function SettingsForm({ initialSettings, savedPreferences }: { initialSet
 
   return <div className="settings-stack">
     <form className="panel settings-panel" onSubmit={saveSettings}>
-      <div className="panel-title"><span>01 / GOALS</span><strong>authoritative defaults</strong></div>
+      <div className="panel-title"><span>01 / GOALS</span><strong>daily targets</strong></div>
       <div className="settings-grid">
         <label>Calorie target<input type="number" min="500" max="10000" value={settings.calorieTarget} onChange={(event) => setSettings({ ...settings, calorieTarget: Number(event.target.value) })} /><small>KCAL / DAY</small></label>
         <label>Protein target<input type="number" min="10" max="1000" value={settings.proteinTargetG} onChange={(event) => setSettings({ ...settings, proteinTargetG: Number(event.target.value) })} /><small>GRAMS / DAY</small></label>
@@ -79,7 +79,7 @@ export function SettingsForm({ initialSettings, savedPreferences }: { initialSet
     </form>
 
     <section className="panel notification-panel">
-      <div className="panel-title"><span>02 / NOTIFICATION RULES</span><strong>delivery foundation</strong></div>
+      <div className="panel-title"><span>02 / NOTIFICATION RULES</span><strong>reminder schedules</strong></div>
       <div className="notification-list">
         {preferences.map((preference) => {
           const meta = notificationMeta[preference.type];
@@ -91,7 +91,7 @@ export function SettingsForm({ initialSettings, savedPreferences }: { initialSet
         })}
       </div>
     </section>
-    <section className="push-foundation"><span>PUSH / FOUNDATION</span><p>Schedules persist now. Browser subscription and delivery remain inactive until a VAPID-backed sender and scheduler are configured.</p></section>
+    <section className="push-foundation"><span>REMINDERS STATUS</span><p>Your reminder schedules and channel preferences are saved. Automatic push and message delivery will activate in an upcoming release.</p></section>
     {status && <p className="settings-status" role="status">{status}</p>}
   </div>;
 }

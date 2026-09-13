@@ -2,7 +2,7 @@ import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type, type Static, type TSchema } from "typebox";
 import { isFallbackNotice, isMealLogConfirmation, sanitizeUserFacingError } from "./confirmation.js";
-import { derivePendingMealScope, healthFetch, withPendingMealScope, type SenderContext } from "./health-client.js";
+import { derivePendingMealScope, deriveWhatsAppNutritionOperationId, healthFetch, withPendingMealScope, type SenderContext } from "./health-client.js";
 import { resolveImagePayload, MediaResolutionError, type MediaAuthorizationContext, type ResolvedImage } from "./media-resolver.js";
 
 const ConfigSchema = Type.Object({
@@ -150,6 +150,7 @@ const plugin = defineToolPlugin({
         imageBase64: Type.Optional(Type.String({ description: "Optional raw base64 image data when the active client can provide it." })),
         imageMimeType: Type.Optional(Type.String({ description: "MIME type paired with imageBase64." })),
         images: Type.Optional(Type.Array(Type.Object({ base64: Type.String(), mimeType: Type.String() }), { description: "Optional multiple images (e.g. package front + nutrition label)." })),
+        operationId: Type.Optional(Type.String({ description: "Optional stable operation ID for tracking and idempotency." })),
       }),
       execute: async (params, { config, sender, toolContext, signal }) => {
         const rawCtx = toolContext as Record<string, unknown> | undefined;
@@ -192,9 +193,26 @@ const plugin = defineToolPlugin({
           throw err;
         }
 
+        const scopeKey = derivePendingMealScope(toolContext);
+        const effectiveImages: Array<{ mimeType: string; base64: string }> = [];
+        if (resolved.images && resolved.images.length > 0) {
+          effectiveImages.push(...resolved.images);
+        } else if (resolved.image) {
+          effectiveImages.push(resolved.image);
+        }
+
+        const operationId = deriveWhatsAppNutritionOperationId({
+          toolContext: rawCtx,
+          scopeKey,
+          explicitOperationId: params.operationId,
+          text: params.text,
+          images: effectiveImages,
+        });
+
         return healthFetch(config, "/v1/nutrition/estimate", {
           method: "POST",
           body: {
+            operationId,
             text: params.text,
             ...(resolved.images && resolved.images.length > 1
               ? { images: resolved.images }
@@ -767,5 +785,6 @@ ClawFit health tracking policy:
 - Updating unconfirmed drafts before confirmation: use update_pending_meal. Updating confirmed/logged meals: use update_meal with the confirmed meal ID (confirmedMealId). Never use a pending draft ID with update_meal.
 - Date corrections ("that was yesterday", "move meals to yesterday", "I ate this last night"): Use the local calendar date for yesterday in Asia/Kuala_Lumpur. If meals were already logged today, update their occurredAt via update_meal to yesterday's date. If confirming a pending draft from yesterday, pass occurredAt with yesterday's timestamp to confirm_pending_meal.
 - For "What did I eat today?" or calorie totals, make a single call to get_daily_nutrition with today's local date and return a direct, concise summary.
+- In WhatsApp group chats: If a message is casual banter, conversation between members, memes, emojis, or stickers that are not addressed to ClawFit and contain no meal, food, nutrition, or workout tracking request, remain completely silent and produce no output. Only respond when explicitly addressed or when a health, food, meal, or workout command or question is present.
 - Use deterministic volume and estimated 1RM returned by the tools. Nutrition is an estimate, not medical advice.
 `;

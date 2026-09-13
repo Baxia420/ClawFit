@@ -46,7 +46,7 @@ export default async function SettingsPage() {
           <span className="kicker">PERSONAL CONFIG / PRIVATE</span>
           <h1>Rules,<br /><em>not noise.</em></h1>
         </div>
-        <div className="header-code">CHANNELS / STAGED<br />SCHEDULE / PERSISTED</div>
+        <div className="header-code">TARGETS &amp; REMINDERS<br />PREFERENCES SAVED</div>
       </header>
       <SettingsForm initialSettings={settings} savedPreferences={preferences} />
     </div>

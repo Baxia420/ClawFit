@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { AskLauncher } from "../components/AskLauncher";
 import { MealList } from "../components/MealList";
 import { Metric } from "../components/Metric";
@@ -72,7 +73,6 @@ export default async function TodayPage() {
       </header>
       <section className="metric-grid" aria-label="Daily nutrition summary">
         <Metric label="ENERGY / BEST" value={Math.round(totals.caloriesBest)} unit="kcal" accent hint={progress.calorieHint} />
-        <Metric label="UNCERTAINTY" value={`${Math.round(totals.caloriesLow)}–${Math.round(totals.caloriesHigh)}`} unit="kcal" />
         <Metric label="PROTEIN" value={Math.round(totals.proteinG)} unit="g" hint={progress.proteinHint} />
         <Metric label="CARBS / FAT" value={`${Math.round(totals.carbsG)} / ${Math.round(totals.fatG)}`} unit="g" />
       </section>
@@ -92,8 +92,7 @@ export default async function TodayPage() {
           <i><b style={{ width: `${progress.proteinBarWidth}%` }} /></i>
         </div>
         <div className="quick-actions">
-          <AskLauncher label="LOG A MEAL" prompt="I ate " />
-          <AskLauncher label="ADD FOOD PHOTO" prompt="" className="quick-ask secondary" />
+          <Link href="/meals/log" className="quick-ask">LOG A MEAL →</Link>
           <AskLauncher label="ASK CLAWFIT →" className="quick-ask dark" />
         </div>
       </section>

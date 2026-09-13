@@ -9,7 +9,7 @@ type ChatMessage = { id: string; role: "user" | "assistant"; text: string; resul
 const starter: ChatMessage = {
   id: "welcome",
   role: "assistant",
-  text: "I can estimate meals, check nutrition, and log your active workout. Your Health API—not this chat—is the record.",
+  text: "Ask questions, log workouts, or check your nutrition totals anytime.",
 };
 
 export function AssistantDrawer() {
@@ -25,6 +25,7 @@ export function AssistantDrawer() {
   const endRef = useRef<HTMLDivElement>(null);
   const drawerRef = useRef<HTMLElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
+  const lastFailedRequestRef = useRef<{ text: string; hasImage: boolean; requestId: string } | null>(null);
 
   function openDrawer(prompt?: string) {
     openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -89,8 +90,11 @@ export function AssistantDrawer() {
     event.preventDefault();
     const text = message.trim();
     if ((!text && !image) || busy) return;
-    const requestId = crypto.randomUUID();
-    setMessages((current) => [...current, { id: requestId, role: "user", text: text || `Food photo: ${image?.name ?? "image"}` }]);
+    const isRetry = lastFailedRequestRef.current && lastFailedRequestRef.current.text === text && lastFailedRequestRef.current.hasImage === !!image;
+    const requestId = isRetry ? lastFailedRequestRef.current!.requestId : crypto.randomUUID();
+    if (!isRetry) {
+      setMessages((current) => [...current, { id: requestId, role: "user", text: text || `Food photo: ${image?.name ?? "image"}` }]);
+    }
     setMessage("");
     setError("");
     setBusy(true);
@@ -111,11 +115,13 @@ export function AssistantDrawer() {
       }
       const payload = (await response.json()) as AssistantResult & { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "Request failed");
+      lastFailedRequestRef.current = null;
       appendResult(payload);
       if (["meal_logged", "workout", "set_logged"].includes(payload.kind)) router.refresh();
       setImage(null);
       if (fileRef.current) fileRef.current.value = "";
     } catch (caught) {
+      lastFailedRequestRef.current = { text, hasImage: !!image, requestId };
       setError(caught instanceof Error ? caught.message : "Request failed");
     } finally {
       setBusy(false);
@@ -158,7 +164,6 @@ export function AssistantDrawer() {
           <div><span>CLAWFIT / AI</span><strong>Ask ClawFit</strong></div>
           <button type="button" onClick={closeDrawer} aria-label="Close assistant">×</button>
         </header>
-        <div className="assistant-status"><i /> HEALTH API BOUNDARY <span>SERVER-SIDE ONLY</span></div>
         <div className="assistant-feed" aria-live="polite">
           {messages.map((item) => <ChatBubble key={item.id} item={item} busy={busy} onMealAction={mealAction} />)}
           {busy && <div className="chat-bubble assistant"><span className="typing">ESTIMATING / LOGGING</span></div>}

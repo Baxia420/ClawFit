@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, gte, ilike, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, ilike, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import {
   canAccessResource,
   estimatedOneRepMax,
@@ -31,6 +31,7 @@ import {
   mealItems,
   meals,
   notificationPreferences,
+  nutritionOperations,
   pendingMealEstimates,
   userSettings,
   users,
@@ -240,7 +241,18 @@ export class HealthRepository {
         .returning();
       if (!created) throw new Error("Meal insert returned no record");
       if (input.items.length > 0) {
-        await tx.insert(mealItems).values(input.items.map((item) => ({ mealId: created.id, name: item.name, portionDescription: item.portionDescription })));
+        await tx.insert(mealItems).values(
+          input.items.map((item) => ({
+            mealId: created.id,
+            name: item.name,
+            portionDescription: item.portionDescription,
+            calories: item.calories ?? null,
+            proteinG: item.proteinG ?? null,
+            carbsG: item.carbsG ?? null,
+            fatG: item.fatG ?? null,
+            fiberG: item.fiberG ?? null,
+          })),
+        );
       }
       return (await this.getMealWith(tx, userId, created.id))!;
     });
@@ -334,48 +346,114 @@ export class HealthRepository {
     });
   }
 
-  async updatePendingMeal(userId: string, id: string, scopeKey: string, patch: PendingMealPatch): Promise<typeof pendingMealEstimates.$inferSelect> {
-    const current = await this.getPendingMeal(userId, id, scopeKey);
-    if (current.confirmed) throw new ConflictError("A confirmed meal draft cannot be edited");
-    if (current.cancelledAt) throw new ConflictError("A cancelled meal draft cannot be edited");
-    const nextLow = patch.caloriesLow ?? current.caloriesLow;
-    const nextBest = patch.caloriesBest ?? current.caloriesBest;
-    const nextHigh = patch.caloriesHigh ?? current.caloriesHigh;
-    if (nextLow > nextBest || nextBest > nextHigh) {
-      throw new ConflictError("Calorie range must satisfy low <= best <= high");
-    }
-    const [updated] = await this.db
-      .update(pendingMealEstimates)
-      .set({ ...patch, updatedAt: new Date() })
-      .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, scopeKey), eq(pendingMealEstimates.userId, userId)))
-      .returning();
-    if (!updated) throw new NotFoundError("Pending meal estimate not found");
-    return updated;
+  async updatePendingMeal(
+    userId: string,
+    id: string,
+    scopeKey: string,
+    patch: PendingMealPatch,
+    expectedVersion?: number,
+  ): Promise<typeof pendingMealEstimates.$inferSelect> {
+    return this.db.transaction(async (tx) => {
+      const [current] = await tx
+        .select()
+        .from(pendingMealEstimates)
+        .where(
+          and(
+            eq(pendingMealEstimates.id, id),
+            eq(pendingMealEstimates.scopeKey, scopeKey),
+            eq(pendingMealEstimates.userId, userId),
+          ),
+        )
+        .for("update");
+
+      if (!current) throw new NotFoundError("Pending meal estimate not found");
+      if (current.confirmed) throw new ConflictError("A confirmed meal draft cannot be edited (already confirmed)");
+      if (current.cancelledAt) throw new ConflictError("A cancelled meal draft cannot be edited");
+      if (expectedVersion !== undefined && current.version !== expectedVersion) {
+        throw new ConflictError(`Draft version mismatch: server version is ${current.version}, expected ${expectedVersion}`);
+      }
+      const nextLow = patch.caloriesLow ?? current.caloriesLow;
+      const nextBest = patch.caloriesBest ?? current.caloriesBest;
+      const nextHigh = patch.caloriesHigh ?? current.caloriesHigh;
+      if (nextLow > nextBest || nextBest > nextHigh) {
+        throw new ConflictError("Calorie range must satisfy low <= best <= high");
+      }
+      const conditions = [
+        eq(pendingMealEstimates.id, id),
+        eq(pendingMealEstimates.scopeKey, scopeKey),
+        eq(pendingMealEstimates.userId, userId),
+        eq(pendingMealEstimates.confirmed, false),
+        isNull(pendingMealEstimates.cancelledAt),
+        eq(pendingMealEstimates.version, current.version),
+      ];
+      if (expectedVersion !== undefined) {
+        conditions.push(eq(pendingMealEstimates.version, expectedVersion));
+      }
+      const [updated] = await tx
+        .update(pendingMealEstimates)
+        .set({ ...patch, version: current.version + 1, updatedAt: new Date() })
+        .where(and(...conditions))
+        .returning();
+      if (!updated) throw new ConflictError("Draft version mismatch or pending meal already confirmed/cancelled");
+      return updated;
+    });
   }
 
   async cancelPendingMeal(userId: string, id: string, scopeKey: string): Promise<typeof pendingMealEstimates.$inferSelect> {
-    const current = await this.getPendingMeal(userId, id, scopeKey);
-    if (current.confirmed) throw new ConflictError("A confirmed meal draft cannot be cancelled");
-    if (current.cancelledAt) return current;
-    const [cancelled] = await this.db
-      .update(pendingMealEstimates)
-      .set({ cancelledAt: new Date(), updatedAt: new Date() })
-      .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, scopeKey), eq(pendingMealEstimates.userId, userId)))
-      .returning();
-    if (!cancelled) throw new NotFoundError("Pending meal estimate not found");
-    return cancelled;
+    return this.db.transaction(async (tx) => {
+      const [current] = await tx
+        .select()
+        .from(pendingMealEstimates)
+        .where(
+          and(
+            eq(pendingMealEstimates.id, id),
+            eq(pendingMealEstimates.scopeKey, scopeKey),
+            eq(pendingMealEstimates.userId, userId),
+          ),
+        )
+        .for("update");
+
+      if (!current) throw new NotFoundError("Pending meal estimate not found");
+      if (current.confirmed) throw new ConflictError("A confirmed meal draft cannot be cancelled (already confirmed)");
+      if (current.cancelledAt) return current;
+
+      const [cancelled] = await tx
+        .update(pendingMealEstimates)
+        .set({ cancelledAt: new Date(), updatedAt: new Date() })
+        .where(
+          and(
+            eq(pendingMealEstimates.id, id),
+            eq(pendingMealEstimates.scopeKey, scopeKey),
+            eq(pendingMealEstimates.userId, userId),
+            eq(pendingMealEstimates.confirmed, false),
+            isNull(pendingMealEstimates.cancelledAt),
+          ),
+        )
+        .returning();
+      if (!cancelled) throw new ConflictError("Pending meal already confirmed or cancelled");
+      return cancelled;
+    });
   }
 
   async confirmPendingMeal(
     userId: string,
     id: string,
-    options: { scopeKey: string; occurredAt?: Date | undefined; idempotencyKey?: string | undefined },
+    options: { scopeKey: string; occurredAt?: Date | undefined; idempotencyKey?: string | undefined; expectedVersion?: number | undefined },
     now: Date = new Date(),
   ): Promise<HydratedMeal> {
     return this.db.transaction(async (tx) => {
-      const pending = await tx.query.pendingMealEstimates.findFirst({
-        where: and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, options.scopeKey), eq(pendingMealEstimates.userId, userId)),
-      });
+      const [pending] = await tx
+        .select()
+        .from(pendingMealEstimates)
+        .where(
+          and(
+            eq(pendingMealEstimates.id, id),
+            eq(pendingMealEstimates.scopeKey, options.scopeKey),
+            eq(pendingMealEstimates.userId, userId),
+          ),
+        )
+        .for("update");
+
       if (!pending) throw new NotFoundError("Pending meal estimate not found");
       if (pending.cancelledAt) throw new ConflictError("A cancelled meal draft cannot be confirmed");
       if (pending.confirmed && pending.mealId) {
@@ -383,6 +461,9 @@ export class HealthRepository {
         if (existingMeal) return existingMeal;
       }
       if (pending.expiresAt <= now) throw new ConflictError("An expired meal draft cannot be confirmed");
+      if (options.expectedVersion !== undefined && pending.version !== options.expectedVersion) {
+        throw new ConflictError(`Draft version mismatch: server version is ${pending.version}, expected ${options.expectedVersion}`);
+      }
       const mealIdempotencyKey = `confirmed_${pending.id}`;
       const existingByUq = await tx.query.meals.findFirst({
         where: and(eq(meals.userId, userId), eq(meals.idempotencyKey, mealIdempotencyKey)),
@@ -391,7 +472,13 @@ export class HealthRepository {
         await tx
           .update(pendingMealEstimates)
           .set({ confirmed: true, confirmedAt: new Date(), mealId: existingByUq.id, updatedAt: new Date() })
-          .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, options.scopeKey), eq(pendingMealEstimates.userId, userId)));
+          .where(
+            and(
+              eq(pendingMealEstimates.id, id),
+              eq(pendingMealEstimates.scopeKey, options.scopeKey),
+              eq(pendingMealEstimates.userId, userId),
+            ),
+          );
         return (await this.getMealWith(tx, userId, existingByUq.id))!;
       }
 
@@ -414,26 +501,48 @@ export class HealthRepository {
           rawUserText: pending.rawUserText,
           idempotencyKey: mealIdempotencyKey,
         })
+        .onConflictDoNothing({ target: [meals.userId, meals.idempotencyKey] })
         .returning();
 
       const persisted = created ?? (await tx.query.meals.findFirst({ where: and(eq(meals.userId, userId), eq(meals.idempotencyKey, mealIdempotencyKey)) }));
       if (!persisted) throw new Error("Confirmed meal could not be resolved");
 
-      const items = Array.isArray(pending.items) ? pending.items : [];
+      const items = Array.isArray(pending.items) ? (pending.items as Record<string, unknown>[]) : [];
       if (created && items.length > 0) {
         await tx.insert(mealItems).values(
           items.map((item) => ({
             mealId: persisted.id,
-            name: item.name,
-            portionDescription: item.portionDescription,
+            name: String(item.name ?? "Item"),
+            portionDescription: String(item.portionDescription ?? item.portion_description ?? ""),
+            calories: typeof item.calories === "number" ? item.calories : null,
+            proteinG: typeof item.proteinG === "number" ? item.proteinG : typeof item.protein_g === "number" ? item.protein_g : null,
+            carbsG: typeof item.carbsG === "number" ? item.carbsG : typeof item.carbs_g === "number" ? item.carbs_g : null,
+            fatG: typeof item.fatG === "number" ? item.fatG : typeof item.fat_g === "number" ? item.fat_g : null,
+            fiberG: typeof item.fiberG === "number" ? item.fiberG : typeof item.fiber_g === "number" ? item.fiber_g : null,
           })),
         );
       }
 
-      await tx
+      const confirmConditions = [
+        eq(pendingMealEstimates.id, id),
+        eq(pendingMealEstimates.scopeKey, options.scopeKey),
+        eq(pendingMealEstimates.userId, userId),
+        eq(pendingMealEstimates.confirmed, false),
+        isNull(pendingMealEstimates.cancelledAt),
+      ];
+      if (options.expectedVersion !== undefined) {
+        confirmConditions.push(eq(pendingMealEstimates.version, options.expectedVersion));
+      }
+
+      const [updatedPending] = await tx
         .update(pendingMealEstimates)
         .set({ confirmed: true, confirmedAt: new Date(), mealId: persisted.id, updatedAt: new Date() })
-        .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, options.scopeKey), eq(pendingMealEstimates.userId, userId)));
+        .where(and(...confirmConditions))
+        .returning();
+
+      if (!updatedPending && !pending.confirmed) {
+        throw new ConflictError("Pending meal draft state changed concurrently");
+      }
 
       return (await this.getMealWith(tx, userId, persisted.id))!;
     });
@@ -1063,6 +1172,161 @@ export class HealthRepository {
       throw new Error("ClawFit database schema is not ready: required Stage 1 identity bootstrap is missing");
     }
     return true;
+  }
+
+  async getOrStartNutritionOperation(
+    userId: string,
+    operationId: string,
+    inputHash: string,
+    now: Date = new Date(),
+  ): Promise<
+    | { status: "completed"; result: Record<string, unknown> }
+    | { status: "in_progress" }
+    | { status: "started"; ownerToken: string }
+  > {
+    const LEASE_DURATION_MS = 70_000;
+
+    // 1. Attempt atomic initial acquisition via INSERT ... ON CONFLICT DO NOTHING RETURNING
+    const ownerToken = crypto.randomUUID();
+    const [inserted] = await this.db
+      .insert(nutritionOperations)
+      .values({
+        userId,
+        operationId,
+        inputHash,
+        status: "in_progress",
+        ownerToken,
+        createdAt: now,
+        updatedAt: now,
+        expiresAt: new Date(now.getTime() + 7_200 * 1000),
+      })
+      .onConflictDoNothing({ target: [nutritionOperations.userId, nutritionOperations.operationId] })
+      .returning();
+
+    if (inserted) {
+      return { status: "started", ownerToken };
+    }
+
+    // 2. Row already exists: inspect state
+    const existing = await this.db.query.nutritionOperations.findFirst({
+      where: and(eq(nutritionOperations.userId, userId), eq(nutritionOperations.operationId, operationId)),
+    });
+
+    if (!existing) {
+      return { status: "in_progress" };
+    }
+
+    if (existing.inputHash !== inputHash) {
+      throw new ConflictError("Operation ID already used with different input");
+    }
+
+    if (existing.status === "completed" && existing.result && existing.expiresAt > now) {
+      return { status: "completed", result: existing.result };
+    }
+
+    const ageMs = now.getTime() - existing.updatedAt.getTime();
+    if (existing.status === "in_progress" && ageMs < LEASE_DURATION_MS) {
+      return { status: "in_progress" };
+    }
+
+    // 3. Stale lease (in_progress with age >= 70s), retry of failed operation,
+    // OR expired completed operation (expiresAt <= now):
+    // Atomic reclamation using optimistic conditional update on updatedAt
+    const reclaimOwnerToken = crypto.randomUUID();
+    const [reclaimed] = await this.db
+      .update(nutritionOperations)
+      .set({
+        status: "in_progress",
+        inputHash,
+        ownerToken: reclaimOwnerToken,
+        result: null,
+        error: null,
+        updatedAt: now,
+        expiresAt: new Date(now.getTime() + 7_200 * 1000),
+      })
+      .where(
+        and(
+          eq(nutritionOperations.id, existing.id),
+          eq(nutritionOperations.updatedAt, existing.updatedAt),
+          or(
+            ne(nutritionOperations.status, "completed"),
+            lte(nutritionOperations.expiresAt, now),
+          ),
+        ),
+      )
+      .returning();
+
+    if (reclaimed) {
+      return { status: "started", ownerToken: reclaimOwnerToken };
+    }
+
+    // Concurrent caller won the reclamation race or completed the operation
+    return { status: "in_progress" };
+  }
+
+  async completeNutritionOperation(
+    userId: string,
+    operationId: string,
+    ownerTokenOrResult?: string | Record<string, unknown> | undefined,
+    result?: Record<string, unknown>,
+    now: Date = new Date(),
+  ): Promise<boolean> {
+    const ownerToken = typeof ownerTokenOrResult === "string" ? ownerTokenOrResult : undefined;
+    const actualResult = typeof ownerTokenOrResult === "string" ? (result ?? {}) : (ownerTokenOrResult ?? result ?? {});
+    const actualNow = typeof ownerTokenOrResult === "string" ? now : ((result as unknown as Date) ?? new Date());
+
+    const conditions = [
+      eq(nutritionOperations.userId, userId),
+      eq(nutritionOperations.operationId, operationId),
+      eq(nutritionOperations.status, "in_progress"),
+    ];
+    if (ownerToken) {
+      conditions.push(eq(nutritionOperations.ownerToken, ownerToken));
+    }
+    const [updated] = await this.db
+      .update(nutritionOperations)
+      .set({
+        status: "completed",
+        result: actualResult,
+        error: null,
+        updatedAt: actualNow,
+      })
+      .where(and(...conditions))
+      .returning();
+    return !!updated;
+  }
+
+  async failNutritionOperation(
+    userId: string,
+    operationId: string,
+    ownerTokenOrError?: string | { code: string; message: string; safeReference?: string } | undefined,
+    error?: { code: string; message: string; safeReference?: string },
+    now: Date = new Date(),
+  ): Promise<boolean> {
+    const ownerToken = typeof ownerTokenOrError === "string" ? ownerTokenOrError : undefined;
+    const actualError = typeof ownerTokenOrError === "string"
+      ? (error ?? { code: "UNKNOWN", message: "Failed" })
+      : (ownerTokenOrError ?? error ?? { code: "UNKNOWN", message: "Failed" });
+    const actualNow = typeof ownerTokenOrError === "string" ? now : ((error as unknown as Date) ?? new Date());
+
+    const conditions = [
+      eq(nutritionOperations.userId, userId),
+      eq(nutritionOperations.operationId, operationId),
+      eq(nutritionOperations.status, "in_progress"),
+    ];
+    if (ownerToken) {
+      conditions.push(eq(nutritionOperations.ownerToken, ownerToken));
+    }
+    const [updated] = await this.db
+      .update(nutritionOperations)
+      .set({
+        status: "failed",
+        error: actualError,
+        updatedAt: actualNow,
+      })
+      .where(and(...conditions))
+      .returning();
+    return !!updated;
   }
 
   private async getMealWith(db: Pick<HealthDatabase, "query">, userId: string, id: string) {
