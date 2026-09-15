@@ -23,7 +23,11 @@ try {
   process.exit(1);
 }
 
-const models = [config.NUTRITION_MODEL_PRIMARY, config.NUTRITION_MODEL_FALLBACK].filter((model): model is string => Boolean(model));
+const models = [
+  config.NUTRITION_MODEL_PRIMARY,
+  config.NUTRITION_MODEL_FALLBACK,
+  config.NUTRITION_MODEL_EMERGENCY,
+].filter((model): model is string => Boolean(model));
 const estimator = config.GEMINI_API_KEY && models.length > 0 ? new NutritionEstimator(new GeminiNutritionClient(config.GEMINI_API_KEY), models) : undefined;
 const allowedGroupIds = config.CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS
   ? config.CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS.split(",").map((s) => s.trim()).filter(Boolean)

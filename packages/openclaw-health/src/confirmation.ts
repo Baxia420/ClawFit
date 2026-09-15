@@ -1,3 +1,10 @@
+import {
+  HealthApiError,
+  healthFetch,
+  type HealthPluginConfig,
+  type SenderContext,
+} from "./health-client.js";
+
 export function isMealLogConfirmation(prompt: string | null | undefined): boolean {
   if (!prompt || typeof prompt !== "string") return false;
   const trimmed = prompt.trim();
@@ -55,3 +62,167 @@ export function sanitizeUserFacingError(text: string | null | undefined): string
   }
   return text;
 }
+
+export type ConfirmMealDraftInput = {
+  id: string;
+  scopeKey: string;
+  occurredAt?: string | undefined;
+  idempotencyKey?: string | undefined;
+  expectedVersion?: number | undefined;
+};
+
+export type ConfirmMealDraftOptions = {
+  config: HealthPluginConfig;
+  sender?: SenderContext | undefined;
+  signal?: AbortSignal | undefined;
+  fetchImpl?: typeof fetch | undefined;
+};
+
+export type ConfirmMealDraftResult = {
+  success: boolean;
+  status: "confirmed" | "already_confirmed";
+  mealId: string;
+  name?: string | undefined;
+  calories?: number | undefined;
+  message: string;
+  meal: Record<string, unknown>;
+};
+
+export async function confirmMealDraft(
+  input: ConfirmMealDraftInput,
+  options: ConfirmMealDraftOptions,
+): Promise<ConfirmMealDraftResult> {
+  const confirmPath = `/v1/meals/pending/${input.id}/confirm`;
+  const confirmBody = {
+    scopeKey: input.scopeKey,
+    ...(input.occurredAt ? { occurredAt: input.occurredAt } : {}),
+    ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+    ...(input.expectedVersion !== undefined ? { expectedVersion: input.expectedVersion } : {}),
+  };
+
+  try {
+    const res = (await healthFetch<Record<string, unknown>>(options.config, confirmPath, {
+      method: "POST",
+      body: confirmBody,
+      sender: options.sender,
+      signal: options.signal,
+      fetchImpl: options.fetchImpl,
+    })) as Record<string, unknown>;
+
+    const mealId = String(res.id ?? input.id);
+    const name = typeof res.label === "string" ? res.label : undefined;
+    const calories =
+      typeof (res.calories as { best?: number })?.best === "number"
+        ? (res.calories as { best?: number }).best
+        : typeof res.caloriesBest === "number"
+          ? (res.caloriesBest as number)
+          : undefined;
+
+    return {
+      success: true,
+      status: "confirmed",
+      mealId,
+      name,
+      calories,
+      message: "Meal successfully logged to your daily journal.",
+      meal: res,
+    };
+  } catch (error) {
+    const isNotFound =
+      (error instanceof HealthApiError && (error.code === "NOT_FOUND" || error.message.includes("not found"))) ||
+      (error as Error)?.message?.includes("NOT_FOUND") ||
+      (error as Error)?.message?.includes("not found");
+
+    if (!isNotFound) {
+      throw error;
+    }
+
+    // Idempotent fallback lookup: query GET /v1/meals/recent to check whether that exact pendingMealId was already successfully logged
+    try {
+      const recentMeals = await healthFetch<Array<Record<string, unknown>>>(
+        options.config,
+        "/v1/meals/recent?limit=20",
+        {
+          method: "GET",
+          sender: options.sender,
+          signal: options.signal,
+          fetchImpl: options.fetchImpl,
+        },
+      );
+
+      const expectedIdempotencyKey = `confirmed_${input.id}`;
+      const matching = Array.isArray(recentMeals)
+        ? recentMeals.find(
+            (m) =>
+              m.id === input.id ||
+              m.idempotencyKey === expectedIdempotencyKey ||
+              (typeof m.idempotencyKey === "string" && m.idempotencyKey.includes(input.id)),
+          )
+        : undefined;
+
+      if (matching) {
+        const mealId = String(matching.id ?? input.id);
+        const name = typeof matching.label === "string" ? matching.label : undefined;
+        const calories =
+          typeof (matching.calories as { best?: number })?.best === "number"
+            ? (matching.calories as { best?: number }).best
+            : typeof matching.caloriesBest === "number"
+              ? (matching.caloriesBest as number)
+              : undefined;
+
+        return {
+          success: true,
+          status: "already_confirmed",
+          mealId,
+          name,
+          calories,
+          message: "This meal has already been logged.",
+          meal: matching,
+        };
+      }
+    } catch {
+      // Ignore fallback query failure and proceed to direct check
+    }
+
+    // Try direct GET /v1/meals/:id if input.id is already the canonical mealId
+    try {
+      const directMeal = await healthFetch<Record<string, unknown>>(
+        options.config,
+        `/v1/meals/${encodeURIComponent(input.id)}`,
+        {
+          method: "GET",
+          sender: options.sender,
+          signal: options.signal,
+          fetchImpl: options.fetchImpl,
+        },
+      );
+
+      if (directMeal && directMeal.id) {
+        const mealId = String(directMeal.id);
+        const name = typeof directMeal.label === "string" ? directMeal.label : undefined;
+        const calories =
+          typeof (directMeal.calories as { best?: number })?.best === "number"
+            ? (directMeal.calories as { best?: number }).best
+            : typeof directMeal.caloriesBest === "number"
+              ? (directMeal.caloriesBest as number)
+              : undefined;
+
+        return {
+          success: true,
+          status: "already_confirmed",
+          mealId,
+          name,
+          calories,
+          message: "This meal has already been logged.",
+          meal: directMeal,
+        };
+      }
+    } catch {
+      // Not a direct meal either
+    }
+
+    // Never found: rethrow the original error so unauthorized/cross-user/non-existent drafts reject appropriately
+    throw error;
+  }
+}
+

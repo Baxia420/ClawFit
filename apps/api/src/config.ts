@@ -7,8 +7,15 @@ export const configSchema = z
     HEALTH_API_OPENCLAW_TOKEN: z.string().min(24),
     CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS: z.string().default(""),
     GEMINI_API_KEY: z.string().min(1).optional(),
-    NUTRITION_MODEL_PRIMARY: z.string().min(1).default("gemini-3.8-flash"),
-    NUTRITION_MODEL_FALLBACK: z.string().min(1).default("gemini-3.7-flash"),
+    NUTRITION_MODEL_PRIMARY: z.string().min(1).default("gemini-3.8-flash").refine(
+      (m) => !m.includes("3.5-flash-lite"),
+      "Under no circumstances should gemini-3.5-flash-lite be configured as primary model",
+    ),
+    NUTRITION_MODEL_FALLBACK: z.string().min(1).default("gemini-3.7-flash").refine(
+      (m) => !m.includes("3.5-flash-lite"),
+      "Under no circumstances should gemini-3.5-flash-lite be configured as tier-2 fallback model",
+    ),
+    NUTRITION_MODEL_EMERGENCY: z.string().min(1).default("gemini-3.5-flash-lite"),
     APP_TIMEZONE: z.string().min(1).default("Asia/Kuala_Lumpur"),
     PORT: z.coerce.number().int().positive().default(4000),
     HOST: z.string().default("127.0.0.1"),

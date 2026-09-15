@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { DEFAULT_PRIMARY_USER_ID, DEFAULT_PARTNER_USER_ID } from "@clawfit/health-core";
 
 export type HealthPluginConfig = {
   apiUrl?: string;
@@ -9,6 +10,7 @@ export type SenderContext = {
   provider?: string;
   senderId?: string;
   conversationId?: string;
+  targetUserId?: string;
 };
 
 type PendingScopeContext = {
@@ -18,12 +20,12 @@ type PendingScopeContext = {
   sessionId?: string;
 };
 
-type HealthFetchOptions = {
-  method?: string;
+export type HealthFetchOptions = {
+  method?: string | undefined;
   body?: unknown;
-  signal?: AbortSignal;
-  fetchImpl?: typeof fetch;
-  sender?: SenderContext;
+  signal?: AbortSignal | undefined;
+  fetchImpl?: typeof fetch | undefined;
+  sender?: SenderContext | undefined;
 };
 
 export class HealthApiNetworkError extends Error {
@@ -34,7 +36,25 @@ export class HealthApiNetworkError extends Error {
   }
 }
 
-export function derivePendingMealScope(context: PendingScopeContext) {
+export class HealthApiError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(`${code}: ${message}`);
+    this.name = "HealthApiError";
+    this.code = code;
+  }
+}
+
+export type NutritionEstimateInput = {
+  operationId?: string | undefined;
+  text?: string | undefined;
+  image?: { mimeType: string; base64: string } | undefined;
+  images?: Array<{ mimeType: string; base64?: string; data?: string }> | undefined;
+  targetUserId?: string | undefined;
+  targetUserName?: string | undefined;
+};
+
+export function derivePendingMealScope(context: PendingScopeContext, targetUserId?: string) {
   const channel = normalizeScopeSegment(context.messageChannel ?? "openclaw");
   const identity = context.requesterSenderId
     ? `peer:${context.requesterSenderId}`
@@ -43,7 +63,8 @@ export function derivePendingMealScope(context: PendingScopeContext) {
       : context.sessionId
         ? `session-id:${context.sessionId}`
         : "default";
-  const digest = createHash("sha256").update(`${channel}:${identity}`).digest("hex").slice(0, 32);
+  const targetSegment = targetUserId ? `:target:${targetUserId}` : "";
+  const digest = createHash("sha256").update(`${channel}:${identity}${targetSegment}`).digest("hex").slice(0, 32);
   return `openclaw:${channel}:${digest}`;
 }
 
@@ -70,12 +91,20 @@ export async function healthFetch<T = unknown>(config: HealthPluginConfig, path:
   if (options.sender?.conversationId) {
     headers["x-clawfit-conversation-id"] = options.sender.conversationId;
   }
+  const explicitTarget = (options as { targetUserId?: string }).targetUserId ?? options.sender?.targetUserId;
+  if (explicitTarget) {
+    headers["x-clawfit-target-user-id"] = explicitTarget;
+  } else if (options.sender?.senderId?.includes("142419432")) {
+    headers["x-clawfit-target-user-id"] = DEFAULT_PARTNER_USER_ID;
+  } else if (options.sender?.senderId?.includes("143224693")) {
+    headers["x-clawfit-target-user-id"] = DEFAULT_PRIMARY_USER_ID;
+  }
 
   let requestSignal: AbortSignal;
   if (!options.signal) {
-    requestSignal = AbortSignal.timeout(55_000);
+    requestSignal = AbortSignal.timeout(60_000);
   } else if (typeof AbortSignal.any === "function") {
-    requestSignal = AbortSignal.any([options.signal, AbortSignal.timeout(55_000)]);
+    requestSignal = AbortSignal.any([options.signal, AbortSignal.timeout(60_000)]);
   } else {
     requestSignal = options.signal;
   }
@@ -102,10 +131,44 @@ export async function healthFetch<T = unknown>(config: HealthPluginConfig, path:
   }
   if (!response.ok) {
     const apiError = payload as { error?: { code?: string; message?: string } };
-    throw new Error(`${apiError.error?.code ?? "HEALTH_API_ERROR"}: ${apiError.error?.message ?? `Health API returned ${response.status}`}`);
+    const code = apiError.error?.code ?? "HEALTH_API_ERROR";
+    const message = apiError.error?.message ?? `Health API returned ${response.status}`;
+    throw new HealthApiError(code, message);
   }
   if (durationMs > 200) console.log(`[LATENCY] healthFetch path=${path} durationMs=${durationMs}`);
   return payload as T;
+}
+
+export async function estimateNutrition<T = unknown>(
+  config: HealthPluginConfig,
+  input: NutritionEstimateInput,
+  options: { sender?: SenderContext | undefined; signal?: AbortSignal | undefined; fetchImpl?: typeof fetch | undefined } = {},
+): Promise<T> {
+  const images = input.images && input.images.length > 0
+    ? input.images.map((img) => ({
+        mimeType: img.mimeType,
+        base64: img.base64 ?? img.data ?? "",
+      }))
+    : input.image
+      ? [{ mimeType: input.image.mimeType, base64: input.image.base64 }]
+      : undefined;
+
+  const firstImage = images && images.length === 1 ? images[0] : input.image;
+  const body: Record<string, unknown> = {
+    text: input.text ?? "",
+    ...(input.operationId ? { operationId: input.operationId } : {}),
+    ...(input.targetUserId ? { targetUserId: input.targetUserId } : {}),
+    ...(firstImage ? { image: firstImage } : {}),
+    ...(images && images.length > 0 ? { images } : {}),
+  };
+
+  return healthFetch<T>(config, "/v1/nutrition/estimate", {
+    method: "POST",
+    body,
+    ...(options.sender !== undefined ? { sender: options.sender } : {}),
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
+    ...(options.fetchImpl !== undefined ? { fetchImpl: options.fetchImpl } : {}),
+  });
 }
 
 function normalizeScopeSegment(value: string) {

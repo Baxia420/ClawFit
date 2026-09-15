@@ -340,12 +340,101 @@ export async function resolveAndValidateLocalFile(
   }
 }
 
+export async function downscaleOrCompressImage(
+  buffer: Buffer,
+  mimeType: string,
+): Promise<{ buffer: Buffer; mimeType: string }> {
+  const FOUR_MB = 4 * 1024 * 1024;
+  if (buffer.length <= FOUR_MB) {
+    return { buffer, mimeType };
+  }
+
+  try {
+    // @ts-ignore - optional dependency without committed types
+    const sharpImport = await import("sharp");
+    const sharpModule = (sharpImport as any).default ?? sharpImport;
+    if (typeof sharpModule === "function") {
+      const resized = await sharpModule(buffer)
+        .resize({ width: 1280, height: 1280, fit: "inside", withoutEnlargement: true })
+        .jpeg({ quality: 80 })
+        .toBuffer();
+      return { buffer: Buffer.from(resized), mimeType: "image/jpeg" };
+    }
+  } catch {
+    // Sharp not available in runtime
+  }
+
+  return { buffer, mimeType };
+}
+
+export interface InboundMediaInput {
+  mediaPath?: string | undefined;
+  mediaPaths?: string[] | undefined;
+  mediaUrl?: string | undefined;
+  mediaUrls?: string[] | undefined;
+  inboundMedia?: Array<{ id?: string; path?: string; url?: string; senderId?: string; conversationId?: string }> | undefined;
+  attachments?: Array<{ id?: string; path?: string; url?: string; senderId?: string; conversationId?: string }> | undefined;
+  authorizedAttachments?: Array<{ id?: string; path?: string; url?: string; senderId?: string; conversationId?: string }> | undefined;
+  images?: Array<{ data?: string; base64?: string; mimeType?: string }> | undefined;
+  workspaceDir?: string | undefined;
+}
+
+export async function resolveInboundMedia(
+  input: InboundMediaInput,
+  authContext?: MediaAuthorizationContext,
+): Promise<ResolvedImage[]> {
+  const effectiveAuthContext: MediaAuthorizationContext = {
+    ...authContext,
+    ...(input.workspaceDir ? { workspaceDir: input.workspaceDir } : {}),
+    ...(input.mediaPath ? { mediaPath: input.mediaPath } : {}),
+    ...(input.mediaPaths ? { mediaPaths: input.mediaPaths } : {}),
+    ...(input.inboundMedia ? { inboundMedia: input.inboundMedia } : {}),
+    ...(input.attachments ? { authorizedAttachments: input.attachments } : {}),
+    ...(input.authorizedAttachments ? { authorizedAttachments: input.authorizedAttachments } : {}),
+  };
+
+  const rawPaths: string[] = [];
+  if (input.mediaPaths && input.mediaPaths.length > 0) {
+    rawPaths.push(...input.mediaPaths);
+  } else if (input.mediaPath) {
+    rawPaths.push(input.mediaPath);
+  }
+
+  if (input.inboundMedia && input.inboundMedia.length > 0) {
+    for (const item of input.inboundMedia) {
+      const p = item.path ?? item.url;
+      if (p && !rawPaths.includes(p)) rawPaths.push(p);
+    }
+  }
+
+  if (input.attachments && input.attachments.length > 0) {
+    for (const item of input.attachments) {
+      const p = item.path ?? item.url;
+      if (p && !rawPaths.includes(p)) rawPaths.push(p);
+    }
+  }
+
+  const resolved = await resolveImagePayload({
+    imagePaths: rawPaths.length > 0 ? rawPaths : undefined,
+    images: input.images as any,
+    authContext: effectiveAuthContext,
+  });
+
+  if (resolved.images && resolved.images.length > 0) {
+    return resolved.images;
+  }
+  if (resolved.image) {
+    return [resolved.image];
+  }
+  return [];
+}
+
 export async function resolveImagePayload(params: {
   imagePath?: string | undefined;
   imagePaths?: string[] | undefined;
   imageBase64?: string | undefined;
   imageMimeType?: string | undefined;
-  images?: { base64: string; mimeType: string }[] | undefined;
+  images?: Array<{ base64?: string; data?: string; mimeType: string }> | undefined;
   workspaceDir?: string | undefined;
   authContext?: MediaAuthorizationContext | undefined;
 }): Promise<{ images?: ResolvedImage[]; image?: ResolvedImage }> {
@@ -357,7 +446,41 @@ export async function resolveImagePayload(params: {
         }
       : undefined;
 
-  const directImages = params.images ?? (params.imageBase64 && params.imageMimeType ? [{ base64: params.imageBase64, mimeType: params.imageMimeType }] : undefined);
+  // Normalize images items where `data` might be provided instead of `base64`, or could be a path/URI
+  let directImages: Array<{ base64: string; mimeType: string }> | undefined = undefined;
+  const pathCandidatesFromImages: string[] = [];
+
+  if (params.images && params.images.length > 0) {
+    directImages = [];
+    for (const img of params.images) {
+      const rawData = img.data ?? img.base64;
+      if (!rawData) continue;
+
+      // Check if rawData is a file path or media URI (NOT base64)
+      const isPath =
+        !rawData.startsWith("data:") &&
+        rawData.length < 4096 &&
+        (rawData.startsWith("media://") ||
+          rawData.startsWith("file://") ||
+          /^[a-zA-Z]:[\\/]/.test(rawData) ||
+          rawData.startsWith("./") ||
+          rawData.startsWith("../") ||
+          /\.(jpe?g|png|webp|heic)$/i.test(rawData.trim()));
+
+      if (isPath) {
+        pathCandidatesFromImages.push(rawData);
+      } else {
+        const cleanBase64 = rawData.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, "");
+        directImages.push({
+          base64: cleanBase64,
+          mimeType: img.mimeType,
+        });
+      }
+    }
+    if (directImages.length === 0) directImages = undefined;
+  } else if (params.imageBase64 && params.imageMimeType) {
+    directImages = [{ base64: params.imageBase64, mimeType: params.imageMimeType }];
+  }
 
   if (directImages && directImages.length > 0) {
     if (directImages.length > MAX_IMAGES_COUNT) {
@@ -373,7 +496,13 @@ export async function resolveImagePayload(params: {
       if (!["image/jpeg", "image/png", "image/webp", "image/heic"].includes(img.mimeType)) {
         throw new MediaResolutionError("invalid_image_content", `Unsupported MIME type '${img.mimeType}' at index ${idx}.`);
       }
-      const buf = Buffer.from(img.base64, "base64");
+      let buf = Buffer.from(img.base64, "base64");
+      if (buf.length > 4 * 1024 * 1024) {
+        const compressed = await downscaleOrCompressImage(buf, img.mimeType);
+        buf = Buffer.from(compressed.buffer);
+        img.mimeType = compressed.mimeType;
+        img.base64 = buf.toString("base64");
+      }
       if (buf.length > MAX_IMAGE_BYTES) {
         throw new MediaResolutionError("oversized_image", `Direct image payload at index ${idx} exceeds 4.5 MiB raw limit (${buf.length} bytes).`);
       }
@@ -403,6 +532,9 @@ export async function resolveImagePayload(params: {
   } else if (params.imagePath) {
     rawPaths.push(params.imagePath);
   }
+  if (pathCandidatesFromImages.length > 0) {
+    rawPaths.push(...pathCandidatesFromImages);
+  }
 
   if (rawPaths.length === 0) {
     return {};
@@ -416,7 +548,14 @@ export async function resolveImagePayload(params: {
   const loadedImages: ResolvedImage[] = [];
   for (const raw of rawPaths) {
     const loaded = await resolveAndValidateLocalFile(raw, effectiveAuthContext);
-    const byteLength = Buffer.byteLength(loaded.base64, "base64");
+    let buf = Buffer.from(loaded.base64, "base64");
+    if (buf.length > 4 * 1024 * 1024) {
+      const compressed = await downscaleOrCompressImage(buf, loaded.mimeType);
+      buf = Buffer.from(compressed.buffer);
+      loaded.mimeType = compressed.mimeType;
+      loaded.base64 = buf.toString("base64");
+    }
+    const byteLength = buf.length;
     totalRawBytes += byteLength;
     if (totalRawBytes > MAX_TOTAL_REQUEST_BYTES) {
       throw new MediaResolutionError(

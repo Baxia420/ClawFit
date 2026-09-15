@@ -1954,6 +1954,66 @@ describe("Health API", () => {
         await app.close();
       }
     });
+
+    it("accepts a multimodal request with images and passes image parts to the estimator", async () => {
+      const mockRepo = {
+        getUser: vi.fn().mockResolvedValue({ id: DEFAULT_PRIMARY_USER_ID, active: true }),
+        getOrStartNutritionOperation: vi.fn().mockResolvedValue({ status: "started" }),
+        completeNutritionOperation: vi.fn().mockResolvedValue(undefined),
+      } as unknown as HealthRepository;
+
+      const mockEstimator = {
+        estimate: vi.fn().mockResolvedValue({
+          estimate: {
+            label: "Chicken and Rice with Salad",
+            items: [
+              { name: "Chicken", portionDescription: "150g", calories: 240, proteinG: 45, carbsG: 0, fatG: 5, fiberG: 0 },
+            ],
+            calories: { best: 450, low: 400, high: 500 },
+            macros: { proteinG: 45, carbsG: 40, fatG: 10, fiberG: 2 },
+            confidence: "high",
+            uncertaintyReasons: [],
+          },
+          model: "gemini-3.8-flash",
+          fallbackUsed: false,
+          usage: { totalTokens: 350 },
+        }),
+      };
+
+      const app = createApp({
+        repository: mockRepo,
+        webToken,
+        openclawToken,
+        assertionSecret,
+        estimator: mockEstimator as any,
+        logger: false,
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/nutrition/estimate",
+        headers: { authorization: `Bearer ${validWebAssertion}` },
+        payload: {
+          text: "Lunch plate with nutrition facts",
+          images: [
+            { mimeType: "image/jpeg", data: "base64platedata" },
+            { mimeType: "image/png", base64: "base64labeldata" },
+          ],
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(mockEstimator.estimate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: "Lunch plate with nutrition facts",
+          images: [
+            { mimeType: "image/jpeg", base64: "base64platedata" },
+            { mimeType: "image/png", base64: "base64labeldata" },
+          ],
+        }),
+      );
+      await app.close();
+    });
   });
 });
 

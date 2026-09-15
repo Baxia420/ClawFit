@@ -9,8 +9,10 @@ import {
   isPathInside,
   resolveAndValidateLocalFile,
   resolveImagePayload,
+  resolveInboundMedia,
   type MediaAuthorizationContext,
 } from "./media-resolver.js";
+import { InboundMediaDebouncer } from "./index.js";
 
 describe("media-resolver", () => {
   const testWorkspaceDir = path.join(tmpdir(), "clawfit-test-media-workspace");
@@ -398,6 +400,95 @@ describe("media-resolver", () => {
       ).rejects.toThrowError(
         expect.objectContaining({ code: "oversized_image" }),
       );
+    });
+  });
+
+  describe("resolveInboundMedia", () => {
+    it("resolves authorized inbound media files from local storage", async () => {
+      const img1 = path.join(testInboundDir, "inbound-plate.jpg");
+      const img2 = path.join(testInboundDir, "inbound-label.png");
+      writeFileSync(img1, validJpegBuffer);
+      writeFileSync(img2, validPngBuffer);
+
+      const resolved = await resolveInboundMedia(
+        {
+          mediaPaths: [img1, img2],
+          workspaceDir: testWorkspaceDir,
+        },
+        {
+          senderId: "user-test-1",
+          conversationId: "conv-1",
+          authorizedMediaPaths: [img1, img2],
+        },
+      );
+
+      expect(resolved).toHaveLength(2);
+      expect(resolved[0]!.mimeType).toBe("image/jpeg");
+      expect(resolved[1]!.mimeType).toBe("image/png");
+    });
+
+    it("extracts media paths from inboundMedia array structure", async () => {
+      const img1 = path.join(testInboundDir, "dish.jpg");
+      writeFileSync(img1, validJpegBuffer);
+
+      const resolved = await resolveInboundMedia(
+        {
+          inboundMedia: [{ path: img1, senderId: "user-1", conversationId: "conv-1" }],
+          workspaceDir: testWorkspaceDir,
+        },
+        {
+          senderId: "user-1",
+          conversationId: "conv-1",
+          authorizedMediaPaths: [img1],
+        },
+      );
+
+      expect(resolved).toHaveLength(1);
+      expect(resolved[0]!.mimeType).toBe("image/jpeg");
+      expect(resolved[0]!.base64).toBe(validJpegBuffer.toString("base64"));
+    });
+  });
+
+  describe("InboundMediaDebouncer", () => {
+    it("collects rapid companion messages arriving within debounce window", async () => {
+      const debouncer = new InboundMediaDebouncer(100); // 100ms for fast unit testing
+      const senderKey = "group-session-1:+60123456789";
+
+      // First photo arrives
+      debouncer.recordInboundMedia(senderKey, [
+        { path: "/path/to/plate.jpg", mimeType: "image/jpeg" },
+      ]);
+
+      // Start waiting for debounce
+      const debouncePromise = debouncer.waitForDebounce(senderKey);
+
+      // Second companion photo arrives 30ms later from same sender
+      debouncer.recordInboundMedia(senderKey, [
+        { path: "/path/to/nutrition-label.png", mimeType: "image/png" },
+      ]);
+
+      const collected = await debouncePromise;
+      expect(collected).toHaveLength(2);
+      expect(collected[0]!.path).toBe("/path/to/plate.jpg");
+      expect(collected[1]!.path).toBe("/path/to/nutrition-label.png");
+    });
+
+    it("isolates media collections between different senders", async () => {
+      const debouncer = new InboundMediaDebouncer(50);
+      const senderA = "group-1:user-a";
+      const senderB = "group-1:user-b";
+
+      debouncer.recordInboundMedia(senderA, [{ path: "/path/a.jpg" }]);
+      debouncer.recordInboundMedia(senderB, [{ path: "/path/b.jpg" }]);
+
+      const collectedA = debouncer.getCollectedMedia(senderA);
+      const collectedB = debouncer.getCollectedMedia(senderB);
+
+      expect(collectedA).toHaveLength(1);
+      expect(collectedA[0]!.path).toBe("/path/a.jpg");
+
+      expect(collectedB).toHaveLength(1);
+      expect(collectedB[0]!.path).toBe("/path/b.jpg");
     });
   });
 });

@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { derivePendingMealScope, deriveWhatsAppNutritionOperationId, HealthApiNetworkError, healthFetch } from "./health-client.js";
+import {
+  derivePendingMealScope,
+  deriveWhatsAppNutritionOperationId,
+  estimateNutrition,
+  HealthApiNetworkError,
+  healthFetch,
+} from "./health-client.js";
 
 describe("OpenClaw Health API client", () => {
   afterEach(() => {
@@ -157,6 +163,79 @@ describe("OpenClaw Health API client", () => {
         toolContext: { messageId: "msg_123" },
       });
       expect(id).toBe(explicit);
+    });
+  });
+
+  describe("estimateNutrition", () => {
+    it("serializes multi-image payload with images array, auth bearer token, and JSON content-type", async () => {
+      vi.stubEnv("HEALTH_API_OPENCLAW_TOKEN", "valid-openclaw-token-at-least-24-chars");
+      let capturedUrl: string | undefined;
+      let capturedInit: RequestInit | undefined;
+
+      const fetchImpl = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
+        capturedUrl = url.toString();
+        capturedInit = init;
+        return new Response(JSON.stringify({ caloriesBest: 520, confidence: "high" }), { status: 200 });
+      });
+
+      const config = { apiUrl: "http://127.0.0.1:4000" };
+      const images = [
+        { mimeType: "image/jpeg", base64: "dGVzdC1qcGVnLTE=" },
+        { mimeType: "image/png", base64: "dGVzdC1wbmctMg==" },
+      ];
+
+      const result = await estimateNutrition(
+        config,
+        {
+          text: "Plate of sushi and packaging",
+          images,
+          operationId: "op-multi-img-123",
+        },
+        {
+          fetchImpl,
+          sender: { senderId: "+60123456789", conversationId: "group-1" },
+        },
+      );
+
+      expect(result).toEqual({ caloriesBest: 520, confidence: "high" });
+      expect(capturedUrl).toContain("/v1/nutrition/estimate");
+      expect(capturedInit?.method).toBe("POST");
+
+      const headers = capturedInit?.headers as Record<string, string>;
+      expect(headers.authorization).toBe("Bearer valid-openclaw-token-at-least-24-chars");
+      expect(headers["content-type"]).toBe("application/json");
+      expect(headers["x-clawfit-sender-id"]).toBe("+60123456789");
+
+      const body = JSON.parse(capturedInit?.body as string);
+      expect(body.text).toBe("Plate of sushi and packaging");
+      expect(body.operationId).toBe("op-multi-img-123");
+      expect(body.images).toHaveLength(2);
+      expect(body.images[0]).toEqual({ mimeType: "image/jpeg", base64: "dGVzdC1qcGVnLTE=" });
+      expect(body.images[1]).toEqual({ mimeType: "image/png", base64: "dGVzdC1wbmctMg==" });
+    });
+
+    it("supports backward-compatible single image payload forwarding body.image and body.images", async () => {
+      vi.stubEnv("HEALTH_API_OPENCLAW_TOKEN", "valid-openclaw-token-at-least-24-chars");
+      let capturedInit: RequestInit | undefined;
+
+      const fetchImpl = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+        capturedInit = init;
+        return new Response(JSON.stringify({ caloriesBest: 250 }), { status: 200 });
+      });
+
+      const config = { apiUrl: "http://127.0.0.1:4000" };
+      await estimateNutrition(
+        config,
+        {
+          text: "One apple",
+          image: { mimeType: "image/jpeg", base64: "YXBwbGUtYmFzZTY0" },
+        },
+        { fetchImpl },
+      );
+
+      const body = JSON.parse(capturedInit?.body as string);
+      expect(body.image).toEqual({ mimeType: "image/jpeg", base64: "YXBwbGUtYmFzZTY0" });
+      expect(body.images).toEqual([{ mimeType: "image/jpeg", base64: "YXBwbGUtYmFzZTY0" }]);
     });
   });
 });

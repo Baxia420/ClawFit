@@ -1,9 +1,79 @@
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type, type Static, type TSchema } from "typebox";
-import { isFallbackNotice, isMealLogConfirmation, sanitizeUserFacingError } from "./confirmation.js";
-import { derivePendingMealScope, deriveWhatsAppNutritionOperationId, healthFetch, withPendingMealScope, type SenderContext } from "./health-client.js";
+import { confirmMealDraft, isFallbackNotice, isMealLogConfirmation, sanitizeUserFacingError } from "./confirmation.js";
+import { derivePendingMealScope, deriveWhatsAppNutritionOperationId, estimateNutrition, healthFetch, withPendingMealScope, type SenderContext } from "./health-client.js";
 import { resolveImagePayload, MediaResolutionError, type MediaAuthorizationContext, type ResolvedImage } from "./media-resolver.js";
+import { resolveTargetUserContext } from "./identity-resolver.js";
+
+const lastFailedEstimationTime = new Map<string, number>();
+
+export type DebouncedMediaItem = {
+  path?: string;
+  url?: string;
+  mimeType?: string;
+  base64?: string;
+  data?: string;
+  timestamp: number;
+};
+
+export class InboundMediaDebouncer {
+  private readonly buffer = new Map<string, DebouncedMediaItem[]>();
+  private readonly debounceWaiters = new Map<string, Promise<void>>();
+  private readonly debounceMs: number;
+
+  constructor(debounceMs: number = 2500) {
+    this.debounceMs = debounceMs;
+  }
+
+  recordInboundMedia(
+    senderKey: string,
+    items: Array<Omit<DebouncedMediaItem, "timestamp">>,
+  ): void {
+    if (!items || items.length === 0) return;
+    const existing = this.buffer.get(senderKey) ?? [];
+    const now = Date.now();
+    for (const item of items) {
+      existing.push({ ...item, timestamp: now });
+    }
+    this.buffer.set(senderKey, existing);
+  }
+
+  async waitForDebounce(senderKey: string): Promise<DebouncedMediaItem[]> {
+    const existingWaiter = this.debounceWaiters.get(senderKey);
+    if (existingWaiter) {
+      await existingWaiter;
+      return this.getCollectedMedia(senderKey);
+    }
+
+    const waiter = new Promise<void>((resolve) => {
+      setTimeout(resolve, this.debounceMs);
+    }).finally(() => {
+      this.debounceWaiters.delete(senderKey);
+    });
+
+    this.debounceWaiters.set(senderKey, waiter);
+    await waiter;
+    return this.getCollectedMedia(senderKey);
+  }
+
+  getCollectedMedia(senderKey: string, maxAgeMs: number = 60_000): DebouncedMediaItem[] {
+    const items = this.buffer.get(senderKey) ?? [];
+    const now = Date.now();
+    const valid = items.filter((item) => now - item.timestamp <= maxAgeMs);
+    if (valid.length !== items.length) {
+      this.buffer.set(senderKey, valid);
+    }
+    return valid;
+  }
+
+  clearCollectedMedia(senderKey: string): void {
+    this.buffer.delete(senderKey);
+  }
+}
+
+export const inboundMediaDebouncer = new InboundMediaDebouncer(2500);
+export const activePendingMealBySession = new Map<string, string>();
 
 const ConfigSchema = Type.Object({
   apiUrl: Type.Optional(Type.String({ default: "http://127.0.0.1:4000" })),
@@ -27,6 +97,8 @@ const LoggedMeal = Type.Object({
   source: Type.Union([Type.Literal("text"), Type.Literal("photo"), Type.Literal("preset"), Type.Literal("manual")]),
   rawUserText: Type.Union([Type.String(), Type.Null()]),
   idempotencyKey: IdempotencyKey,
+  targetUserName: Type.Optional(Type.String({ description: "Target household member name or alias (e.g. 'Cici', 'Mahin', 'partner')." })),
+  targetUserId: Type.Optional(Type.String({ format: "uuid", description: "Target user UUID." })),
 });
 const PresetMeal = Type.Object({
   ...EstimateFields,
@@ -41,8 +113,14 @@ const PendingMealDraft = Type.Object({
   source: Type.Union([Type.Literal("text"), Type.Literal("photo"), Type.Literal("preset"), Type.Literal("manual")]),
   rawUserText: Type.Union([Type.String(), Type.Null()]),
   idempotencyKey: IdempotencyKey,
+  targetUserName: Type.Optional(Type.String({ description: "Target household member name or alias (e.g. 'Cici', 'Mahin', 'partner')." })),
+  targetUserId: Type.Optional(Type.String({ format: "uuid", description: "Target user UUID." })),
 });
-const PendingMealLookup = Type.Object({ id: Type.Optional(Id) });
+const PendingMealLookup = Type.Object({
+  id: Type.Optional(Id),
+  targetUserName: Type.Optional(Type.String({ description: "Target household member name or alias (e.g. 'Cici', 'Mahin', 'partner')." })),
+  targetUserId: Type.Optional(Type.String({ format: "uuid", description: "Target user UUID." })),
+});
 
 function createSenderTool<TParams extends TSchema>(
   tool: any,
@@ -149,11 +227,25 @@ const plugin = defineToolPlugin({
         imagePaths: Type.Optional(Type.Array(Type.String(), { description: "Optional local paths or media URIs of attached meal images (e.g. package front + nutrition label)." })),
         imageBase64: Type.Optional(Type.String({ description: "Optional raw base64 image data when the active client can provide it." })),
         imageMimeType: Type.Optional(Type.String({ description: "MIME type paired with imageBase64." })),
-        images: Type.Optional(Type.Array(Type.Object({ base64: Type.String(), mimeType: Type.String() }), { description: "Optional multiple images (e.g. package front + nutrition label)." })),
+        images: Type.Optional(Type.Array(Type.Object({ base64: Type.Optional(Type.String()), data: Type.Optional(Type.String()), mimeType: Type.String() }), { description: "Optional multiple images (e.g. package front + nutrition label)." })),
         operationId: Type.Optional(Type.String({ description: "Optional stable operation ID for tracking and idempotency." })),
+        targetUserName: Type.Optional(Type.String({ description: "Optional target household member name or alias (e.g. 'Cici', 'Mahin', 'partner')." })),
       }),
       execute: async (params, { config, sender, toolContext, signal }) => {
         const rawCtx = toolContext as Record<string, unknown> | undefined;
+        const senderKey = `${sender.conversationId}:${sender.senderId}`;
+
+        const lastFail = lastFailedEstimationTime.get(senderKey);
+        if (lastFail && Date.now() - lastFail < 5000) {
+          return {
+            success: false,
+            error: "ESTIMATION_FAILED",
+            message: "Nutrition service could not analyze this meal. Please try again in a few moments or enter details manually.",
+          };
+        }
+
+        const collectedCompanionMedia = inboundMediaDebouncer.getCollectedMedia(senderKey);
+
         const authContext: MediaAuthorizationContext = {
           senderId: sender.senderId,
           conversationId: sender.conversationId,
@@ -173,11 +265,40 @@ const plugin = defineToolPlugin({
               : {}),
         };
 
+        const companionPaths: string[] = [];
+        for (const item of collectedCompanionMedia) {
+          if (item.path && !companionPaths.includes(item.path)) {
+            companionPaths.push(item.path);
+          }
+        }
+        if (companionPaths.length > 0) {
+          authContext.authorizedMediaPaths = [
+            ...(authContext.authorizedMediaPaths ?? []),
+            ...companionPaths,
+          ];
+        }
+
+        let combinedImagePaths: string[] | undefined = params.imagePaths ? [...params.imagePaths] : undefined;
+        if (!combinedImagePaths && params.imagePath) {
+          combinedImagePaths = [params.imagePath];
+        }
+        if (companionPaths.length > 0) {
+          if (!combinedImagePaths) {
+            combinedImagePaths = [...companionPaths];
+          } else {
+            for (const cp of companionPaths) {
+              if (!combinedImagePaths.includes(cp)) {
+                combinedImagePaths.push(cp);
+              }
+            }
+          }
+        }
+
         let resolved: { images?: ResolvedImage[]; image?: ResolvedImage };
         try {
           resolved = await resolveImagePayload({
-            imagePath: params.imagePath,
-            imagePaths: params.imagePaths,
+            imagePath: combinedImagePaths && combinedImagePaths.length === 1 ? combinedImagePaths[0] : undefined,
+            imagePaths: combinedImagePaths && combinedImagePaths.length > 1 ? combinedImagePaths : undefined,
             imageBase64: params.imageBase64,
             imageMimeType: params.imageMimeType,
             images: params.images,
@@ -193,7 +314,17 @@ const plugin = defineToolPlugin({
           throw err;
         }
 
-        const scopeKey = derivePendingMealScope(toolContext);
+        const targetUser = await resolveTargetUserContext({
+          config,
+          sender,
+          targetUserName: params.targetUserName,
+          userPrompt: params.text,
+        });
+        const effectiveSender: SenderContext = targetUser
+          ? { ...sender, targetUserId: targetUser.userId }
+          : sender;
+
+        const scopeKey = derivePendingMealScope(toolContext, targetUser?.userId);
         const effectiveImages: Array<{ mimeType: string; base64: string }> = [];
         if (resolved.images && resolved.images.length > 0) {
           effectiveImages.push(...resolved.images);
@@ -209,36 +340,79 @@ const plugin = defineToolPlugin({
           images: effectiveImages,
         });
 
-        return healthFetch(config, "/v1/nutrition/estimate", {
-          method: "POST",
-          body: {
-            operationId,
-            text: params.text,
-            ...(resolved.images && resolved.images.length > 1
-              ? { images: resolved.images }
-              : resolved.image
-                ? { image: resolved.image }
-                : resolved.images && resolved.images.length === 1 && resolved.images[0]
-                  ? { image: resolved.images[0] }
-                  : {}),
-          },
-          sender,
-          ...(signal ? { signal } : {}),
-        });
+        try {
+          const result = await estimateNutrition<Record<string, unknown>>(
+            config,
+            {
+              operationId,
+              text: params.text,
+              images: effectiveImages.length > 0 ? effectiveImages : undefined,
+              targetUserId: targetUser?.userId,
+            },
+            {
+              ...(effectiveSender !== undefined ? { sender: effectiveSender } : {}),
+              ...(signal !== undefined ? { signal } : {}),
+            },
+          );
+          if (result && typeof result === "object" && (result as Record<string, unknown>).isFallbackEstimate) {
+            return {
+              ...result,
+              modelUsed: (result as Record<string, unknown>).modelUsed ?? "gemini-3.5-flash-lite",
+              isFallbackEstimate: true,
+              fallbackNotice: "(Estimated via Flash Lite — 3.8 daily quota reached)",
+            };
+          }
+          return result;
+        } catch (err) {
+          lastFailedEstimationTime.set(senderKey, Date.now());
+          console.error("[TOOLS] estimate_nutrition failed:", (err as Error)?.message);
+          return {
+            success: false,
+            error: "ESTIMATION_FAILED",
+            message: "Nutrition service could not analyze this meal. Please try again later or enter details manually.",
+          };
+        }
       },
     }),
     createSenderTool(tool, {
       name: "create_pending_meal",
       description: "Persist a scoped meal draft for later confirmation. This never logs a meal and always expires after two hours.",
       parameters: PendingMealDraft,
-      execute: (params, { config, sender, toolContext, signal }) => {
-        const scopeKey = derivePendingMealScope(toolContext);
-        return healthFetch(config, "/v1/meals/pending", {
-          method: "POST",
-          body: { ...params, scopeKey, expiresInSeconds: 7_200 },
+      execute: async (params, { config, sender, toolContext, signal }) => {
+        const rawCtx = toolContext as Record<string, unknown> | undefined;
+        const sessionKey = (rawCtx?.sessionKey ?? rawCtx?.sessionId) as string | undefined;
+        const contextualPrompt = (rawCtx?.currentPrompt as string | undefined) ??
+          (sessionKey ? lastPromptBySession.get(sessionKey) : undefined) ??
+          params.rawUserText ??
+          params.label;
+
+        const targetUser = await resolveTargetUserContext({
+          config,
           sender,
-          ...(signal ? { signal } : {}),
+          targetUserName: params.targetUserName,
+          targetUserId: params.targetUserId,
+          userPrompt: contextualPrompt,
         });
+        const effectiveSender: SenderContext = targetUser
+          ? { ...sender, targetUserId: targetUser.userId }
+          : sender;
+        const scopeKey = derivePendingMealScope(toolContext, targetUser?.userId);
+        const result = (await healthFetch(config, "/v1/meals/pending", {
+          method: "POST",
+          body: { ...params, scopeKey, expiresInSeconds: 7_200, targetUserId: targetUser?.userId },
+          sender: effectiveSender,
+          ...(signal ? { signal } : {}),
+        })) as { id?: string };
+        if (result?.id) {
+          activePendingMealBySession.set(scopeKey, result.id);
+          if (sessionKey) {
+            if (targetUser?.userId) {
+              activePendingMealBySession.set(`${sessionKey}:${targetUser.userId}`, result.id);
+            }
+            activePendingMealBySession.set(sessionKey, result.id);
+          }
+        }
+        return result;
       },
     }),
     createSenderTool(tool, {
@@ -246,11 +420,26 @@ const plugin = defineToolPlugin({
       description: "Get this peer's active unconfirmed pending meal draft(s) across session boundaries. Returns the latest draft and all pending drafts in scope.",
       parameters: PendingMealLookup,
       execute: async (params, { config, sender, toolContext, signal }) => {
-        const scopeKey = derivePendingMealScope(toolContext);
+        const rawCtx = toolContext as Record<string, unknown> | undefined;
+        const sessionKey = (rawCtx?.sessionKey ?? rawCtx?.sessionId) as string | undefined;
+        const contextualPrompt = (rawCtx?.currentPrompt as string | undefined) ??
+          (sessionKey ? lastPromptBySession.get(sessionKey) : undefined);
+
+        const targetUser = await resolveTargetUserContext({
+          config,
+          sender,
+          targetUserName: params.targetUserName,
+          targetUserId: params.targetUserId,
+          userPrompt: contextualPrompt,
+        });
+        const effectiveSender: SenderContext = targetUser
+          ? { ...sender, targetUserId: targetUser.userId }
+          : sender;
+        const scopeKey = derivePendingMealScope(toolContext, targetUser?.userId);
         if (params.id) {
-          return healthFetch(config, withPendingMealScope(`/v1/meals/pending/${params.id}`, scopeKey), { sender, ...(signal ? { signal } : {}) });
+          return healthFetch(config, withPendingMealScope(`/v1/meals/pending/${params.id}`, scopeKey), { sender: effectiveSender, ...(signal ? { signal } : {}) });
         }
-        const list = (await healthFetch(config, withPendingMealScope("/v1/meals/pending", scopeKey), { sender, ...(signal ? { signal } : {}) })) as { pending?: unknown[] };
+        const list = (await healthFetch(config, withPendingMealScope("/v1/meals/pending", scopeKey), { sender: effectiveSender, ...(signal ? { signal } : {}) })) as { pending?: unknown[] };
         const latest = Array.isArray(list?.pending) && list.pending.length > 0 ? list.pending[0] : null;
         return {
           latest,
@@ -269,9 +458,27 @@ const plugin = defineToolPlugin({
         idempotencyKey: Type.Optional(IdempotencyKey),
         date: Type.Optional(Type.String({ format: "date", description: "Optional local calendar date (YYYY-MM-DD) to fetch updated daily totals immediately after confirming." })),
         timezone: Type.Optional(Type.String({ description: "Timezone for daily total calculation (default Asia/Kuala_Lumpur)." })),
+        targetUserName: Type.Optional(Type.String({ description: "Optional target household member name or alias (e.g. 'Cici', 'Mahin', 'partner')." })),
+        targetUserId: Type.Optional(Type.String({ format: "uuid", description: "Optional target user UUID." })),
       }),
       execute: async (params, { config, sender, toolContext, signal }) => {
-        const scopeKey = derivePendingMealScope(toolContext);
+        const rawCtx = toolContext as Record<string, unknown> | undefined;
+        const sessionKey = (rawCtx?.sessionKey ?? rawCtx?.sessionId) as string | undefined;
+        const contextualPrompt = (rawCtx?.currentPrompt as string | undefined) ??
+          (sessionKey ? lastPromptBySession.get(sessionKey) : undefined);
+
+        const targetUser = await resolveTargetUserContext({
+          config,
+          sender,
+          targetUserName: params.targetUserName,
+          targetUserId: params.targetUserId,
+          userPrompt: contextualPrompt,
+        });
+        const effectiveSender: SenderContext = targetUser
+          ? { ...sender, targetUserId: targetUser.userId }
+          : sender;
+        const scopeKey = derivePendingMealScope(toolContext, targetUser?.userId);
+        const qualifiedSessionKey = sessionKey && targetUser?.userId ? `${sessionKey}:${targetUser.userId}` : undefined;
         const targetIds: string[] = [];
 
         if (params.ids && params.ids.length > 0) {
@@ -279,7 +486,7 @@ const plugin = defineToolPlugin({
         } else if (params.id) {
           targetIds.push(params.id);
         } else if (params.count && params.count > 1) {
-          const listRes = (await healthFetch(config, withPendingMealScope("/v1/meals/pending", scopeKey), { sender, ...(signal ? { signal } : {}) })) as { pending?: Array<{ id: string; label?: string; calories?: { best?: number }; occurredAt?: string }> };
+          const listRes = (await healthFetch(config, withPendingMealScope("/v1/meals/pending", scopeKey), { sender: effectiveSender, ...(signal ? { signal } : {}) })) as { pending?: Array<{ id: string; label?: string; calories?: { best?: number }; occurredAt?: string }> };
           const pendingList = Array.isArray(listRes?.pending) ? listRes.pending : [];
 
           if (pendingList.length === 0) {
@@ -302,35 +509,56 @@ const plugin = defineToolPlugin({
           const toConfirm = pendingList.slice(0, params.count);
           targetIds.push(...toConfirm.map((d) => d.id));
         } else {
-          const latestRes = (await healthFetch(config, withPendingMealScope("/v1/meals/pending/latest", scopeKey), { sender, ...(signal ? { signal } : {}) })) as { pending?: { id: string } | null };
+          const latestRes = (await healthFetch(config, withPendingMealScope("/v1/meals/pending/latest", scopeKey), { sender: effectiveSender, ...(signal ? { signal } : {}) })) as { pending?: { id: string } | null };
           if (latestRes?.pending?.id) {
             targetIds.push(latestRes.pending.id);
           } else {
-            return { error: "No active unconfirmed meal draft found to confirm." };
+            const storedPendingId = activePendingMealBySession.get(scopeKey) ??
+              (qualifiedSessionKey ? activePendingMealBySession.get(qualifiedSessionKey) : undefined) ??
+              (sessionKey ? activePendingMealBySession.get(sessionKey) : undefined);
+            if (storedPendingId) {
+              targetIds.push(storedPendingId);
+            } else {
+              return { error: "No active unconfirmed meal draft found to confirm." };
+            }
           }
         }
 
         if (targetIds.length === 1) {
           const targetId = targetIds[0]!;
-          const res = (await healthFetch(config, `/v1/meals/pending/${targetId}/confirm`, {
-            method: "POST",
-            body: {
+          const confirmRes = await confirmMealDraft(
+            {
+              id: targetId,
               scopeKey,
-              ...(params.occurredAt ? { occurredAt: params.occurredAt } : {}),
-              ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}),
+              occurredAt: params.occurredAt,
+              idempotencyKey: params.idempotencyKey,
             },
-            sender,
-            ...(signal ? { signal } : {}),
-          })) as { id: string; label?: string; calories?: { best?: number } };
+            {
+              config,
+              sender: effectiveSender,
+              signal,
+            },
+          );
+
+          activePendingMealBySession.delete(scopeKey);
+          if (qualifiedSessionKey) activePendingMealBySession.delete(qualifiedSessionKey);
+          if (sessionKey) {
+            activePendingMealBySession.delete(sessionKey);
+          }
 
           let dailyNutrition: unknown = undefined;
           let summaryError: string | undefined = undefined;
           if (params.date) {
             try {
+              const qs = new URLSearchParams({
+                date: params.date,
+                timezone: params.timezone ?? "Asia/Kuala_Lumpur",
+                ...(targetUser?.userId ? { targetUserId: targetUser.userId } : {}),
+              });
               dailyNutrition = await healthFetch(
                 config,
-                `/v1/nutrition/daily?date=${encodeURIComponent(params.date)}&timezone=${encodeURIComponent(params.timezone ?? "Asia/Kuala_Lumpur")}`,
-                { sender, ...(signal ? { signal } : {}) },
+                `/v1/nutrition/daily?${qs.toString()}`,
+                { sender: effectiveSender, ...(signal ? { signal } : {}) },
               );
             } catch (err) {
               summaryError = sanitizeUserFacingError((err as Error).message);
@@ -338,20 +566,25 @@ const plugin = defineToolPlugin({
           }
 
           return {
-            ...res,
-            confirmedMealId: res.id,
+            ...confirmRes.meal,
+            confirmedMealId: confirmRes.mealId,
             pendingDraftId: targetId,
-            status: "confirmed" as const,
+            status: confirmRes.status,
+            name: confirmRes.name,
+            calories: confirmRes.calories,
             ...(dailyNutrition ? { dailyNutrition } : {}),
             ...(summaryError ? { summaryError } : {}),
-            message: `Meal '${res.label ?? "Meal"}' confirmed with canonical ID ${res.id}. Future corrections must use update_meal with confirmedMealId.`,
+            message:
+              confirmRes.status === "already_confirmed"
+                ? "This meal has already been logged."
+                : `Meal '${confirmRes.name ?? "Meal"}' confirmed with canonical ID ${confirmRes.mealId}. Future corrections must use update_meal with confirmedMealId.`,
           };
         }
 
         const confirmedMeals: Array<{
           confirmedMealId: string;
           pendingDraftId: string;
-          status: "confirmed";
+          status: "confirmed" | "already_confirmed";
           label?: string | undefined;
           calories?: number | undefined;
           meal: unknown;
@@ -368,23 +601,26 @@ const plugin = defineToolPlugin({
             : undefined;
 
           try {
-            const res = (await healthFetch(config, `/v1/meals/pending/${targetId}/confirm`, {
-              method: "POST",
-              body: {
+            const confirmRes = await confirmMealDraft(
+              {
+                id: targetId,
                 scopeKey,
-                ...(params.occurredAt ? { occurredAt: params.occurredAt } : {}),
-                ...(idempotencyKey ? { idempotencyKey } : {}),
+                occurredAt: params.occurredAt,
+                idempotencyKey,
               },
-              sender,
-              ...(signal ? { signal } : {}),
-            })) as { id: string; label?: string; calories?: { best?: number } };
+              {
+                config,
+                sender: effectiveSender,
+                signal,
+              },
+            );
             confirmedMeals.push({
-              confirmedMealId: res.id,
+              confirmedMealId: confirmRes.mealId,
               pendingDraftId: targetId,
-              status: "confirmed",
-              label: res.label,
-              calories: res.calories?.best,
-              meal: res,
+              status: confirmRes.status,
+              label: confirmRes.name,
+              calories: confirmRes.calories,
+              meal: confirmRes.meal,
             });
           } catch (err) {
             failures.push({
@@ -395,14 +631,25 @@ const plugin = defineToolPlugin({
           }
         }
 
+        activePendingMealBySession.delete(scopeKey);
+        if (qualifiedSessionKey) activePendingMealBySession.delete(qualifiedSessionKey);
+        if (sessionKey) {
+          activePendingMealBySession.delete(sessionKey);
+        }
+
         let dailyNutrition: unknown = undefined;
         let summaryError: string | undefined = undefined;
         if (params.date && confirmedMeals.length > 0) {
           try {
+            const qs = new URLSearchParams({
+              date: params.date,
+              timezone: params.timezone ?? "Asia/Kuala_Lumpur",
+              ...(targetUser?.userId ? { targetUserId: targetUser.userId } : {}),
+            });
             dailyNutrition = await healthFetch(
               config,
-              `/v1/nutrition/daily?date=${encodeURIComponent(params.date)}&timezone=${encodeURIComponent(params.timezone ?? "Asia/Kuala_Lumpur")}`,
-              { sender, ...(signal ? { signal } : {}) },
+              `/v1/nutrition/daily?${qs.toString()}`,
+              { sender: effectiveSender, ...(signal ? { signal } : {}) },
             );
           } catch (err) {
             summaryError = sanitizeUserFacingError((err as Error).message);
@@ -457,13 +704,31 @@ const plugin = defineToolPlugin({
             uncertaintyReasons: Type.Array(Type.String()),
           }),
         ),
+        targetUserName: Type.Optional(Type.String({ description: "Optional target household member name or alias (e.g. 'Cici', 'Mahin', 'partner')." })),
+        targetUserId: Type.Optional(Type.String({ format: "uuid", description: "Optional target user UUID." })),
       }),
-      execute: (params, { config, sender, toolContext, signal }) => {
-        const scopeKey = derivePendingMealScope(toolContext);
+      execute: async (params, { config, sender, toolContext, signal }) => {
+        const rawCtx = toolContext as Record<string, unknown> | undefined;
+        const sessionKey = (rawCtx?.sessionKey ?? rawCtx?.sessionId) as string | undefined;
+        const contextualPrompt = (rawCtx?.currentPrompt as string | undefined) ??
+          (sessionKey ? lastPromptBySession.get(sessionKey) : undefined) ??
+          params.patch?.label;
+
+        const targetUser = await resolveTargetUserContext({
+          config,
+          sender,
+          targetUserName: params.targetUserName,
+          targetUserId: params.targetUserId,
+          userPrompt: contextualPrompt,
+        });
+        const effectiveSender: SenderContext = targetUser
+          ? { ...sender, targetUserId: targetUser.userId }
+          : sender;
+        const scopeKey = derivePendingMealScope(toolContext, targetUser?.userId);
         return healthFetch(config, `/v1/meals/pending/${params.id}`, {
           method: "PATCH",
-          body: { ...params.patch, scopeKey },
-          sender,
+          body: { ...params.patch, scopeKey, ...(targetUser?.userId ? { targetUserId: targetUser.userId } : {}) },
+          sender: effectiveSender,
           ...(signal ? { signal } : {}),
         });
       },
@@ -472,56 +737,185 @@ const plugin = defineToolPlugin({
       name: "log_meal",
       description: "Persist a user-confirmed meal estimate. Never call before explicit confirmation unless the original request explicitly said to log it.",
       parameters: LoggedMeal,
-      execute: (params, { config, sender, signal }) =>
-        healthFetch(config, "/v1/meals", { method: "POST", body: params, sender, ...(signal ? { signal } : {}) }),
+      execute: async (params, { config, sender, toolContext, signal }) => {
+        const rawCtx = toolContext as Record<string, unknown> | undefined;
+        const sessionKey = (rawCtx?.sessionKey ?? rawCtx?.sessionId) as string | undefined;
+        const contextualPrompt = (rawCtx?.currentPrompt as string | undefined) ??
+          (sessionKey ? lastPromptBySession.get(sessionKey) : undefined) ??
+          params.rawUserText ??
+          params.label;
+
+        const targetUser = await resolveTargetUserContext({
+          config,
+          sender,
+          targetUserName: (params as any).targetUserName,
+          targetUserId: (params as any).targetUserId,
+          userPrompt: contextualPrompt,
+        });
+        const effectiveSender: SenderContext = targetUser
+          ? { ...sender, targetUserId: targetUser.userId }
+          : sender;
+        return healthFetch(config, "/v1/meals", {
+          method: "POST",
+          body: { ...params, ...(targetUser?.userId ? { targetUserId: targetUser.userId } : {}) },
+          sender: effectiveSender,
+          ...(signal ? { signal } : {}),
+        });
+      },
     }),
     createSenderTool(tool, {
       name: "get_meal",
       description: "Get one meal by its database ID.",
-      parameters: Type.Object({ id: Id }),
-      execute: (params, { config, sender, signal }) =>
-        healthFetch(config, `/v1/meals/${params.id}`, { sender, ...(signal ? { signal } : {}) }),
+      parameters: Type.Object({
+        id: Id,
+        targetUserName: Type.Optional(Type.String({ description: "Optional target household member name or alias (e.g. 'Cici', 'Mahin', 'partner')." })),
+        targetUserId: Type.Optional(Type.String({ format: "uuid", description: "Optional target user UUID." })),
+      }),
+      execute: async (params, { config, sender, toolContext, signal }) => {
+        const rawCtx = toolContext as Record<string, unknown> | undefined;
+        const sessionKey = (rawCtx?.sessionKey ?? rawCtx?.sessionId) as string | undefined;
+        const contextualPrompt = (rawCtx?.currentPrompt as string | undefined) ??
+          (sessionKey ? lastPromptBySession.get(sessionKey) : undefined);
+
+        const targetUser = await resolveTargetUserContext({
+          config,
+          sender,
+          targetUserName: params.targetUserName,
+          targetUserId: params.targetUserId,
+          userPrompt: contextualPrompt,
+        });
+        const effectiveSender: SenderContext = targetUser
+          ? { ...sender, targetUserId: targetUser.userId }
+          : sender;
+        const qs = new URLSearchParams({
+          ...(targetUser?.userId ? { targetUserId: targetUser.userId } : {}),
+        });
+        const path = qs.toString() ? `/v1/meals/${params.id}?${qs.toString()}` : `/v1/meals/${params.id}`;
+        return healthFetch(config, path, { sender: effectiveSender, ...(signal ? { signal } : {}) });
+      },
     }),
     createSenderTool(tool, {
       name: "get_recent_meals",
       description: "List recent meals so natural-language references can be resolved to an ID.",
-      parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
-      execute: (params, { config, sender, signal }) =>
-        healthFetch(config, `/v1/meals/recent?limit=${params.limit ?? 20}`, { sender, ...(signal ? { signal } : {}) }),
+      parameters: Type.Object({
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+        targetUserName: Type.Optional(Type.String({ description: "Optional target household member name or alias (e.g. 'Cici', 'Mahin', 'partner')." })),
+        targetUserId: Type.Optional(Type.String({ format: "uuid", description: "Optional target user UUID." })),
+      }),
+      execute: async (params, { config, sender, toolContext, signal }) => {
+        const rawCtx = toolContext as Record<string, unknown> | undefined;
+        const sessionKey = (rawCtx?.sessionKey ?? rawCtx?.sessionId) as string | undefined;
+        const contextualPrompt = (rawCtx?.currentPrompt as string | undefined) ??
+          (sessionKey ? lastPromptBySession.get(sessionKey) : undefined);
+
+        const targetUser = await resolveTargetUserContext({
+          config,
+          sender,
+          targetUserName: params.targetUserName,
+          targetUserId: params.targetUserId,
+          userPrompt: contextualPrompt,
+        });
+        const effectiveSender: SenderContext = targetUser
+          ? { ...sender, targetUserId: targetUser.userId }
+          : sender;
+        const qs = new URLSearchParams({
+          limit: String(params.limit ?? 20),
+          ...(targetUser?.userId ? { targetUserId: targetUser.userId } : {}),
+        });
+        return healthFetch(config, `/v1/meals/recent?${qs.toString()}`, { sender: effectiveSender, ...(signal ? { signal } : {}) });
+      },
     }),
     createSenderTool(tool, {
       name: "update_meal",
       description: "Correct an existing confirmed/logged meal by its canonical confirmed meal ID (from log_meal, confirm_pending_meal, or get_recent_meals). Use this for calorie, quantity, macro, confidence, label, or time/date corrections ('that was yesterday'). For unconfirmed drafts, use update_pending_meal.",
       parameters: Type.Object({
         id: Id,
-        patch: Type.Partial(
-          Type.Object({
-            occurredAt: Type.String({ format: "date-time" }),
-            label: Type.String(),
-            caloriesBest: Type.Integer({ minimum: 0 }),
-            caloriesLow: Type.Integer({ minimum: 0 }),
-            caloriesHigh: Type.Integer({ minimum: 0 }),
-            proteinG: Type.Number({ minimum: 0 }),
-            carbsG: Type.Number({ minimum: 0 }),
-            fatG: Type.Number({ minimum: 0 }),
-            fiberG: NullableNumber,
-            confidence: Confidence,
-            uncertaintyReasons: Type.Array(Type.String()),
-          }),
+        patch: Type.Optional(
+          Type.Partial(
+            Type.Object({
+              occurredAt: Type.String({ format: "date-time" }),
+              label: Type.String(),
+              caloriesBest: Type.Integer({ minimum: 0 }),
+              caloriesLow: Type.Integer({ minimum: 0 }),
+              caloriesHigh: Type.Integer({ minimum: 0 }),
+              proteinG: Type.Number({ minimum: 0 }),
+              carbsG: Type.Number({ minimum: 0 }),
+              fatG: Type.Number({ minimum: 0 }),
+              fiberG: NullableNumber,
+              confidence: Confidence,
+              uncertaintyReasons: Type.Array(Type.String()),
+            }),
+          ),
         ),
+        occurredAt: Type.Optional(Type.String({ format: "date-time" })),
+        label: Type.Optional(Type.String()),
+        caloriesBest: Type.Optional(Type.Integer({ minimum: 0 })),
+        caloriesLow: Type.Optional(Type.Integer({ minimum: 0 })),
+        caloriesHigh: Type.Optional(Type.Integer({ minimum: 0 })),
+        proteinG: Type.Optional(Type.Number({ minimum: 0 })),
+        carbsG: Type.Optional(Type.Number({ minimum: 0 })),
+        fatG: Type.Optional(Type.Number({ minimum: 0 })),
+        fiberG: Type.Optional(NullableNumber),
+        confidence: Type.Optional(Confidence),
+        uncertaintyReasons: Type.Optional(Type.Array(Type.String())),
         date: Type.Optional(Type.String({ format: "date", description: "Optional local calendar date (YYYY-MM-DD) to fetch updated daily totals immediately after updating." })),
         timezone: Type.Optional(Type.String({ description: "Timezone for daily total calculation (default Asia/Kuala_Lumpur)." })),
+        targetUserName: Type.Optional(Type.String({ description: "Optional target household member name or alias (e.g. 'Cici', 'Mahin', 'partner')." })),
+        targetUserId: Type.Optional(Type.String({ format: "uuid", description: "Optional target user UUID." })),
       }),
-      execute: async (params, { config, sender, signal }) => {
-        const updated = await healthFetch(config, `/v1/meals/${params.id}`, { method: "PATCH", body: params.patch, sender, ...(signal ? { signal } : {}) });
+      execute: async (params, { config, sender, toolContext, signal }) => {
+        const rawCtx = toolContext as Record<string, unknown> | undefined;
+        const sessionKey = (rawCtx?.sessionKey ?? rawCtx?.sessionId) as string | undefined;
+        const contextualPrompt = (rawCtx?.currentPrompt as string | undefined) ??
+          (sessionKey ? lastPromptBySession.get(sessionKey) : undefined) ??
+          params.label ??
+          params.patch?.label;
+
+        const targetUser = await resolveTargetUserContext({
+          config,
+          sender,
+          targetUserName: params.targetUserName,
+          targetUserId: params.targetUserId,
+          userPrompt: contextualPrompt,
+        });
+        const effectiveSender: SenderContext = targetUser
+          ? { ...sender, targetUserId: targetUser.userId }
+          : sender;
+        const effectivePatch: Record<string, unknown> = {
+          ...(params.patch ?? {}),
+        };
+        if (params.occurredAt !== undefined) effectivePatch.occurredAt = params.occurredAt;
+        if (params.label !== undefined) effectivePatch.label = params.label;
+        if (params.caloriesBest !== undefined) effectivePatch.caloriesBest = params.caloriesBest;
+        if (params.caloriesLow !== undefined) effectivePatch.caloriesLow = params.caloriesLow;
+        if (params.caloriesHigh !== undefined) effectivePatch.caloriesHigh = params.caloriesHigh;
+        if (params.proteinG !== undefined) effectivePatch.proteinG = params.proteinG;
+        if (params.carbsG !== undefined) effectivePatch.carbsG = params.carbsG;
+        if (params.fatG !== undefined) effectivePatch.fatG = params.fatG;
+        if (params.fiberG !== undefined) effectivePatch.fiberG = params.fiberG;
+        if (params.confidence !== undefined) effectivePatch.confidence = params.confidence;
+        if (params.uncertaintyReasons !== undefined) effectivePatch.uncertaintyReasons = params.uncertaintyReasons;
+        if (targetUser?.userId) effectivePatch.targetUserId = targetUser.userId;
+
+        const updated = await healthFetch(config, `/v1/meals/${params.id}`, {
+          method: "PATCH",
+          body: effectivePatch,
+          sender: effectiveSender,
+          ...(signal ? { signal } : {}),
+        });
         let dailyNutrition: unknown = undefined;
         let summaryError: string | undefined = undefined;
         if (params.date) {
           try {
+            const qs = new URLSearchParams({
+              date: params.date,
+              timezone: params.timezone ?? "Asia/Kuala_Lumpur",
+              ...(targetUser?.userId ? { targetUserId: targetUser.userId } : {}),
+            });
             dailyNutrition = await healthFetch(
               config,
-              `/v1/nutrition/daily?date=${encodeURIComponent(params.date)}&timezone=${encodeURIComponent(params.timezone ?? "Asia/Kuala_Lumpur")}`,
-              { sender, ...(signal ? { signal } : {}) },
+              `/v1/nutrition/daily?${qs.toString()}`,
+              { sender: effectiveSender, ...(signal ? { signal } : {}) },
             );
           } catch (err) {
             summaryError = sanitizeUserFacingError((err as Error).message);
@@ -537,16 +931,66 @@ const plugin = defineToolPlugin({
     createSenderTool(tool, {
       name: "delete_meal",
       description: "Delete one existing meal by ID.",
-      parameters: Type.Object({ id: Id }),
-      execute: (params, { config, sender, signal }) =>
-        healthFetch(config, `/v1/meals/${params.id}`, { method: "DELETE", sender, ...(signal ? { signal } : {}) }),
+      parameters: Type.Object({
+        id: Id,
+        targetUserName: Type.Optional(Type.String({ description: "Optional target household member name or alias (e.g. 'Cici', 'Mahin', 'partner')." })),
+        targetUserId: Type.Optional(Type.String({ format: "uuid", description: "Optional target user UUID." })),
+      }),
+      execute: async (params, { config, sender, toolContext, signal }) => {
+        const rawCtx = toolContext as Record<string, unknown> | undefined;
+        const sessionKey = (rawCtx?.sessionKey ?? rawCtx?.sessionId) as string | undefined;
+        const contextualPrompt = (rawCtx?.currentPrompt as string | undefined) ??
+          (sessionKey ? lastPromptBySession.get(sessionKey) : undefined);
+
+        const targetUser = await resolveTargetUserContext({
+          config,
+          sender,
+          targetUserName: params.targetUserName,
+          targetUserId: params.targetUserId,
+          userPrompt: contextualPrompt,
+        });
+        const effectiveSender: SenderContext = targetUser
+          ? { ...sender, targetUserId: targetUser.userId }
+          : sender;
+        const qs = new URLSearchParams({
+          ...(targetUser?.userId ? { targetUserId: targetUser.userId } : {}),
+        });
+        const path = qs.toString() ? `/v1/meals/${params.id}?${qs.toString()}` : `/v1/meals/${params.id}`;
+        return healthFetch(config, path, { method: "DELETE", sender: effectiveSender, ...(signal ? { signal } : {}) });
+      },
     }),
     createSenderTool(tool, {
       name: "get_daily_nutrition",
       description: "Read database-backed meals and deterministic nutrition totals for a local calendar date.",
-      parameters: Type.Object({ date: Type.String({ format: "date" }), timezone: Type.Optional(Type.String({ default: "Asia/Kuala_Lumpur" })) }),
-      execute: (params, { config, sender, signal }) =>
-        healthFetch(config, `/v1/nutrition/daily?date=${encodeURIComponent(params.date)}&timezone=${encodeURIComponent(params.timezone ?? "Asia/Kuala_Lumpur")}`, { sender, ...(signal ? { signal } : {}) }),
+      parameters: Type.Object({
+        date: Type.String({ format: "date" }),
+        timezone: Type.Optional(Type.String({ default: "Asia/Kuala_Lumpur" })),
+        targetUserName: Type.Optional(Type.String({ description: "Optional target household member name or alias (e.g. 'Cici', 'Mahin', 'partner')." })),
+        targetUserId: Type.Optional(Type.String({ format: "uuid", description: "Optional target user UUID." })),
+      }),
+      execute: async (params, { config, sender, toolContext, signal }) => {
+        const rawCtx = toolContext as Record<string, unknown> | undefined;
+        const sessionKey = (rawCtx?.sessionKey ?? rawCtx?.sessionId) as string | undefined;
+        const contextualPrompt = (rawCtx?.currentPrompt as string | undefined) ??
+          (sessionKey ? lastPromptBySession.get(sessionKey) : undefined);
+
+        const targetUser = await resolveTargetUserContext({
+          config,
+          sender,
+          targetUserName: params.targetUserName,
+          targetUserId: params.targetUserId,
+          userPrompt: contextualPrompt,
+        });
+        const effectiveSender: SenderContext = targetUser
+          ? { ...sender, targetUserId: targetUser.userId }
+          : sender;
+        const qs = new URLSearchParams({
+          date: params.date,
+          timezone: params.timezone ?? "Asia/Kuala_Lumpur",
+          ...(targetUser?.userId ? { targetUserId: targetUser.userId } : {}),
+        });
+        return healthFetch(config, `/v1/nutrition/daily?${qs.toString()}`, { sender: effectiveSender, ...(signal ? { signal } : {}) });
+      },
     }),
     createSenderTool(tool, {
       name: "save_food_preset",
@@ -682,6 +1126,51 @@ plugin.register = (api) => {
   registerTools(api);
 
   api.on(
+    "message_received",
+    async (event: any, context: any) => {
+      const senderId = event?.senderId ?? event?.from ?? context?.senderId;
+      const conversationId = event?.conversationId ?? event?.to ?? context?.conversationId;
+      if (!senderId || !conversationId) return;
+      const senderKey = `${conversationId}:${senderId}`;
+
+      const mediaItems: Array<{ path?: string; url?: string; mimeType?: string }> = [];
+      if (typeof event?.mediaPath === "string" && event.mediaPath) {
+        mediaItems.push({ path: event.mediaPath, mimeType: event.mediaType });
+      }
+      if (Array.isArray(event?.mediaPaths)) {
+        for (const p of event.mediaPaths) {
+          if (typeof p === "string" && p) mediaItems.push({ path: p });
+        }
+      }
+      if (typeof event?.mediaUrl === "string" && event.mediaUrl) {
+        mediaItems.push({ url: event.mediaUrl, mimeType: event.mediaType });
+      }
+      if (Array.isArray(event?.mediaUrls)) {
+        for (const u of event.mediaUrls) {
+          if (typeof u === "string" && u) mediaItems.push({ url: u });
+        }
+      }
+      if (Array.isArray(event?.attachments)) {
+        for (const a of event.attachments) {
+          if (a?.path || a?.url) mediaItems.push({ path: a.path, url: a.url, mimeType: a.mimeType });
+        }
+      }
+      if (Array.isArray(event?.inboundMedia)) {
+        for (const im of event.inboundMedia) {
+          if (im?.path || im?.url) mediaItems.push({ path: im.path, url: im.url, mimeType: im.mimeType });
+        }
+      }
+
+      if (mediaItems.length > 0) {
+        inboundMediaDebouncer.recordInboundMedia(senderKey, mediaItems);
+        // Debounce rapid companion messages from the same sender arriving within 2.5s
+        await inboundMediaDebouncer.waitForDebounce(senderKey);
+      }
+    },
+    { priority: 100 },
+  );
+
+  api.on(
     "before_prompt_build",
     (event, context) => {
       const sessionKey = context.sessionKey ?? context.sessionId ?? "default";
@@ -780,9 +1269,17 @@ ClawFit health tracking policy:
 - Corrections update the existing meal or workout-set ID after resolving it from recent/active state. Never create a replacement. Reuse a stable idempotency key when retrying a create action.
 - Perform only the action in the latest user message. Earlier unanswered or failed user messages are context, not queued actions: never replay them. A retry of the same current action must reuse its original idempotency key.
 - ALL food and meal estimation (including food photos, restaurant meals, mixed dishes, and food descriptions) MUST use estimate_nutrition. The dedicated strong nutrition model (Gemini 3.8 Flash / 3.7 Flash) performs nutritional calculation; never guess or compute calories/macros mentally. Persist every unconfirmed estimate with create_pending_meal before presenting it to the user. Do not call log_meal until the user confirms, unless their first message explicitly asks to log/save/track it.
+- ABSOLUTE PROHIBITION ON SELF-ESTIMATION: If estimate_nutrition fails or returns an error, you are strictly forbidden from calculating, guessing, or hallucinating calories, protein, carbs, or fat yourself. NEVER call create_pending_meal or log_meal with self-generated nutritional numbers when estimate_nutrition fails. Instead, clearly report the error to the user ("Nutrition service could not analyze this meal. Please try again later or enter details manually.").
+- IDENTITY DELEGATION: When a message specifies that a meal, photo, or query is for the sender's partner (e.g., "Cici had this", "log for Cici", "Cici ate 4 eggs", "what did Cici eat?"), you MUST explicitly pass targetUserName: "Cici" in the relevant tool call (estimate_nutrition, create_pending_meal, confirm_pending_meal, log_meal, get_daily_nutrition, get_recent_meals). Never attribute a partner's meal to the message sender.
 - When an image of a product and an image of its nutrition label are both available, inspect both; printed nutrition label values take precedence over visual estimation.
 - On user confirmation ("log it", "log both", "yes", "save it"): DO NOT re-run estimate_nutrition. Confirm the relevant draft(s) with confirm_pending_meal. For a single draft, "log it" confirms that pending meal; for multiple items, "log both" confirms the active drafts.
-- Updating unconfirmed drafts before confirmation: use update_pending_meal. Updating confirmed/logged meals: use update_meal with the confirmed meal ID (confirmedMealId). Never use a pending draft ID with update_meal.
+- Updating unconfirmed drafts before confirmation: use update_pending_meal.
+- UPDATING AN ALREADY LOGGED MEAL: When the user asks to modify, update, or edit an already logged/confirmed meal (e.g. "update dinner, don't make a new entry", "change lunch calories to 600", "update my last meal"):
+  1. NEVER call create_pending_meal or create a duplicate entry.
+  2. Call get_recent_meals (with targetUserName if applicable) to find the existing confirmed meal and its ID.
+  3. Call update_meal with that ID and the updated fields (e.g. caloriesBest, proteinG, carbsG, fatG, label, etc.).
+- THREE-TIER ESTIMATION TRANSPARENCY: If estimate_nutrition returns fallbackNotice: "(Estimated via Flash Lite — 3.8 daily quota reached)", you MUST append "(Estimated via Flash Lite — 3.8 daily quota reached)" to your message to inform the user that the primary model reached its quota.
+- PARTNER PRIVACY & MEAL ISOLATION: When a user asks "what did she eat yesterday?", "what did she have today?", or queries their partner's food, pass targetUserName: "Cici". NEVER return meals belonging to the requester. Return only meals logged for the partner.
 - Date corrections ("that was yesterday", "move meals to yesterday", "I ate this last night"): Use the local calendar date for yesterday in Asia/Kuala_Lumpur. If meals were already logged today, update their occurredAt via update_meal to yesterday's date. If confirming a pending draft from yesterday, pass occurredAt with yesterday's timestamp to confirm_pending_meal.
 - For "What did I eat today?" or calorie totals, make a single call to get_daily_nutrition with today's local date and return a direct, concise summary.
 - In WhatsApp group chats: If a message is casual banter, conversation between members, memes, emojis, or stickers that are not addressed to ClawFit and contain no meal, food, nutrition, or workout tracking request, remain completely silent and produce no output. Only respond when explicitly addressed or when a health, food, meal, or workout command or question is present.

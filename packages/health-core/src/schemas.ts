@@ -20,6 +20,20 @@ export const nutritionItemSchema = z.object({
   fiberG: z.number().nonnegative().max(500).nullable().optional(),
 });
 
+export const nutritionImageSchema = z
+  .object({
+    mimeType: z.enum(["image/jpeg", "image/png", "image/webp", "image/heic"]),
+    base64: z.string().max(6_000_000).optional(),
+    data: z.string().max(6_000_000).optional(),
+  })
+  .transform((val) => ({
+    mimeType: val.mimeType,
+    base64: val.base64 ?? val.data ?? "",
+  }))
+  .refine((val) => val.base64.length > 0, "Image base64 or data is required");
+
+export type NutritionImageInput = z.infer<typeof nutritionImageSchema>;
+
 export const nutritionEstimateSchema = z
   .object({
     label: z.string().min(1).max(300),

@@ -1,4 +1,36 @@
 import type { NutritionModelClient, NutritionModelRequest } from "@clawfit/health-core";
+export { NutritionEstimationUnavailableError } from "@clawfit/health-core";
+
+export const PRIMARY_NUTRITION_MODEL = process.env.NUTRITION_MODEL_PRIMARY || "gemini-3.8-flash";
+export const FALLBACK_NUTRITION_MODEL = process.env.NUTRITION_MODEL_FALLBACK || "gemini-3.7-flash";
+export const EMERGENCY_NUTRITION_MODEL = process.env.NUTRITION_MODEL_EMERGENCY || "gemini-3.5-flash-lite";
+
+export class UpstreamRateLimitError extends Error {
+  readonly code = "UPSTREAM_RATE_LIMIT";
+  readonly statusCode = 429;
+  constructor(message = "Gemini rate limit exceeded. Please wait a moment.") {
+    super(message);
+    this.name = "UpstreamRateLimitError";
+  }
+}
+
+export class UpstreamTimeoutError extends Error {
+  readonly code = "UPSTREAM_TIMEOUT";
+  readonly statusCode = 504;
+  constructor(message = "Nutrition estimation timed out upstream.") {
+    super(message);
+    this.name = "UpstreamTimeoutError";
+  }
+}
+
+export class InvalidImagePayloadError extends Error {
+  readonly code = "INVALID_PAYLOAD";
+  readonly statusCode = 400;
+  constructor(message = "The supplied image or text could not be processed.") {
+    super(message);
+    this.name = "InvalidImagePayloadError";
+  }
+}
 
 export class GeminiNutritionClient implements NutritionModelClient {
   constructor(
@@ -7,43 +39,104 @@ export class GeminiNutritionClient implements NutritionModelClient {
   ) {}
 
   async generate(request: NutritionModelRequest): Promise<unknown> {
-    const parts: Record<string, unknown>[] = [{ text: request.prompt }];
-    if (request.images && request.images.length > 0) {
+    const parts: Array<Record<string, unknown>> = [];
+    if (request.images && Array.isArray(request.images)) {
       for (const img of request.images) {
-        parts.push({ inlineData: { mimeType: img.mimeType, data: img.base64 } });
+        const rawData = (img as Record<string, unknown>).data ?? img.base64;
+        if (typeof rawData === "string" && rawData) {
+          parts.push({
+            inlineData: {
+              data: rawData.replace(/^data:[^;]+;base64,/, ""),
+              mimeType: img.mimeType || "image/jpeg",
+            },
+          });
+        }
       }
     } else if (request.image) {
-      parts.push({ inlineData: { mimeType: request.image.mimeType, data: request.image.base64 } });
-    }
-    const response = await this.fetchImpl(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(request.model)}:generateContent`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-goog-api-key": this.apiKey },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts }],
-          generationConfig: {
-            responseMimeType: "application/json",
-            responseJsonSchema: nutritionJsonSchema,
+      const rawData = (request.image as Record<string, unknown>).data ?? request.image.base64;
+      if (typeof rawData === "string" && rawData) {
+        parts.push({
+          inlineData: {
+            data: rawData.replace(/^data:[^;]+;base64,/, ""),
+            mimeType: request.image.mimeType || "image/jpeg",
           },
-        }),
-        signal: request.signal ?? AbortSignal.timeout(45_000),
-      },
-    );
+        });
+      }
+    }
+    parts.push({ text: request.prompt });
+
+    const perAttemptTimeoutMs = 20_000;
+    const timeoutSignal = AbortSignal.timeout(perAttemptTimeoutMs);
+    let effectiveSignal: AbortSignal;
+    if (!request.signal) {
+      effectiveSignal = timeoutSignal;
+    } else if (typeof AbortSignal.any === "function") {
+      effectiveSignal = AbortSignal.any([request.signal, timeoutSignal]);
+    } else {
+      effectiveSignal = request.signal;
+    }
+
+    let response: Response;
+    try {
+      response = await this.fetchImpl(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(request.model)}:generateContent`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-goog-api-key": this.apiKey },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts }],
+            generationConfig: {
+              responseMimeType: "application/json",
+              responseJsonSchema: nutritionJsonSchema,
+            },
+          }),
+          signal: effectiveSignal,
+        },
+      );
+    } catch (err: unknown) {
+      const isAbort = (err as Error)?.name === "AbortError" || (err as Error)?.name === "TimeoutError" || effectiveSignal.aborted;
+      if (isAbort) {
+        throw new UpstreamTimeoutError();
+      }
+      throw err;
+    }
+
     if (!response.ok) {
       let errorDetails = "";
+      let googleStatus = "";
       try {
         const errorJson = (await response.json()) as { error?: { message?: string; status?: string; code?: number } };
         if (errorJson?.error) {
-          const status = errorJson.error.status ? ` [${errorJson.error.status}]` : "";
+          googleStatus = errorJson.error.status ?? "";
+          const status = googleStatus ? ` [${googleStatus}]` : "";
           const msg = errorJson.error.message ? `: ${errorJson.error.message}` : "";
           errorDetails = `${status}${msg}`;
         }
       } catch {
         // Non-JSON error response; status code is preserved below
       }
+
+      console.error("Gemini upstream estimation failure", {
+        status: response.status,
+        googleStatus,
+        details: errorDetails,
+      });
+
+      if (response.status === 429 || googleStatus === "RESOURCE_EXHAUSTED") {
+        throw new UpstreamRateLimitError();
+      }
+      if (response.status === 400 || googleStatus === "INVALID_ARGUMENT") {
+        throw new InvalidImagePayloadError(
+          errorDetails ? `The supplied image or text could not be processed${errorDetails}` : undefined,
+        );
+      }
+      if (response.status === 503 || response.status === 504 || googleStatus === "UNAVAILABLE" || googleStatus === "DEADLINE_EXCEEDED") {
+        throw new UpstreamTimeoutError();
+      }
+
       throw new Error(`Gemini request failed (${response.status})${errorDetails}`);
     }
+
     const payload = (await response.json()) as {
       candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
       promptFeedback?: { blockReason?: string };
@@ -58,7 +151,17 @@ export class GeminiNutritionClient implements NutritionModelClient {
       const blockReason = payload.promptFeedback?.blockReason || payload.candidates?.[0]?.finishReason;
       throw new Error(blockReason ? `Gemini blocked request: ${blockReason}` : "Gemini returned no JSON text");
     }
-    const data = JSON.parse(text) as unknown;
+    let cleanText = text.trim();
+    if (cleanText.startsWith("```")) {
+      cleanText = cleanText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+    }
+    let data: unknown;
+    try {
+      data = JSON.parse(cleanText) as unknown;
+    } catch (parseErr) {
+      console.error("Gemini returned invalid JSON output:", cleanText);
+      throw new Error(`Gemini returned unparseable JSON: ${(parseErr as Error).message}`);
+    }
     const usage = payload.usageMetadata
       ? {
           promptTokens: typeof payload.usageMetadata.promptTokenCount === "number" ? payload.usageMetadata.promptTokenCount : undefined,

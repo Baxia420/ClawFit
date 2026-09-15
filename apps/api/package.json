@@ -13,6 +13,7 @@
     "build": "pnpm run build:dependencies && pnpm run clean && tsc -p tsconfig.json",
     "smoke:runtime": "pnpm run build && node scripts/runtime-smoke.mjs",
     "start": "node dist/server.js",
+    "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

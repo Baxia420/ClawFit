@@ -27,6 +27,15 @@ export interface NutritionModelClient {
   generate(request: NutritionModelRequest): Promise<unknown>;
 }
 
+export class NutritionEstimationUnavailableError extends Error {
+  readonly code = "NUTRITION_ESTIMATION_UNAVAILABLE";
+  readonly statusCode = 503;
+  constructor(message = "Nutrition estimation service is temporarily unavailable. Please try again later.") {
+    super(message);
+    this.name = "NutritionEstimationUnavailableError";
+  }
+}
+
 export class NutritionEstimationError extends Error {
   readonly code: NutritionErrorCode;
   readonly statusCode: number;
@@ -60,20 +69,35 @@ export class NutritionEstimationError extends Error {
 export function classifyNutritionErrorCode(errorOrMessage: unknown): NutritionErrorCode {
   const message = errorOrMessage instanceof Error ? errorOrMessage.message : String(errorOrMessage);
   const name = errorOrMessage instanceof Error ? errorOrMessage.name : "";
+  const code = (errorOrMessage as { code?: string })?.code;
 
-  if (name === "AbortError" || /aborted|timeout|deadline exceeded/i.test(message)) {
+  if (
+    name === "AbortError" ||
+    name === "TimeoutError" ||
+    name === "UpstreamTimeoutError" ||
+    code === "UPSTREAM_TIMEOUT" ||
+    /aborted|timeout|timed\s*out|deadline exceeded/i.test(message)
+  ) {
     return "TIMEOUT_OR_CANCELLED";
   }
   if (/API_KEY_INVALID|PERMISSION_DENIED|UNAUTHENTICATED|\b401\b|\b403\b/i.test(message)) {
     return "CREDENTIALS_OR_CONFIG";
   }
-  if (/RESOURCE_EXHAUSTED|QUOTA_EXCEEDED|\b429\b|rate limit/i.test(message)) {
+  if (
+    code === "UPSTREAM_RATE_LIMIT" ||
+    name === "UpstreamRateLimitError" ||
+    /RESOURCE_EXHAUSTED|QUOTA_EXCEEDED|\b429\b|rate limit/i.test(message)
+  ) {
     return "QUOTA_OR_RATE_LIMIT";
   }
   if (/blocked|SAFETY|PROMPT_BLOCKED|promptFeedback/i.test(message)) {
     return "MODEL_OUTPUT_BLOCKED";
   }
-  if (/returned no JSON text|JSON|ZodError|validation failed|INVALID_ARGUMENT|\b400\b/i.test(message)) {
+  if (
+    code === "INVALID_PAYLOAD" ||
+    name === "InvalidImagePayloadError" ||
+    /returned no JSON text|JSON|ZodError|validation failed|INVALID_ARGUMENT|\b400\b/i.test(message)
+  ) {
     return "MODEL_OUTPUT_INVALID";
   }
   if (/UNAVAILABLE|\b500\b|\b502\b|\b503\b|fetch failed|ECONNRESET|ETIMEDOUT/i.test(message)) {
@@ -129,8 +153,8 @@ export function getActionableMessageForNutritionError(code: NutritionErrorCode):
 
 export function isRetryableNutritionError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  // Shared quota exhaustion, bad client arguments, schema validation errors on request, or shared auth/credential failures
-  if (/RESOURCE_EXHAUSTED|QUOTA_EXCEEDED|\b429\b|API_KEY_INVALID|PERMISSION_DENIED|UNAUTHENTICATED|INVALID_ARGUMENT|\b401\b|\b403\b|\b400\b/i.test(message)) {
+  // Shared invalid credentials or malformed client payload abort immediately
+  if (/API_KEY_INVALID|PERMISSION_DENIED|UNAUTHENTICATED|INVALID_ARGUMENT|\b401\b|\b403\b|\b400\b/i.test(message)) {
     return false;
   }
   return true;
@@ -158,7 +182,7 @@ export class NutritionEstimator {
   }> {
     const attempts: { model: string; reason: string; code: NutritionErrorCode; latencyMs?: number }[] = [];
     const totalStart = performance.now();
-    const totalBudgetMs = 50_000;
+    const totalBudgetMs = 45_000;
 
     if (input.signal?.aborted) {
       throw new NutritionEstimationError("Estimation aborted by caller", [], "TIMEOUT_OR_CANCELLED", 504);
@@ -177,7 +201,7 @@ export class NutritionEstimator {
         );
       }
 
-      const attemptBudget = index === 0 ? Math.min(35_000, remainingTotal) : remainingTotal;
+      const attemptBudget = Math.min(20_000, remainingTotal);
       const attemptStart = performance.now();
 
       const controller = new AbortController();
@@ -251,10 +275,11 @@ export function nutritionPrompt(userText: string): string {
   return [
     "Estimate the consumed meal's nutrition. Return JSON only.",
     "Use realistic ranges; never imply false precision. Hidden oils, sauces, and restaurant portions lower confidence.",
+    "When multiple images or packaging photos are provided (e.g. food plate + nutrition label), prioritize the authoritative printed values shown on the nutrition facts label over visual estimation of the plated food.",
     "Provide item-level calories and macros where possible for each item in items[].",
     "Required keys: label, items[{name, portion_description, calories?, protein_g?, carbs_g?, fat_g?, fiber_g?}], calories{best,low,high},",
     "macros{protein_g,carbs_g,fat_g,fiber_g}, confidence(high|medium|low), uncertainty_reasons[].",
-    `User description: ${userText || "No text supplied; infer from the attached meal image."}`,
+    `User description: ${userText || "No text supplied; infer from the attached meal image(s)."}` ,
   ].join("\n");
 }
 
