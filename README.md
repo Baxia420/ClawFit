@@ -2,6 +2,8 @@
 
 ClawFit is a private calorie, nutrition, and workout tracker. PostgreSQL and the authenticated Health API are the source of truth; OpenClaw and the Next.js dashboard are independent clients of that API.
 
+For service links, the UptimeRobot monitor, and idle database checks, start with [Operations and service directory](docs/operations.md). Use [the deployment runbook](docs/deployment.md) for installation and redeployment.
+
 ## Architecture
 
 ```text
