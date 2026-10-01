@@ -108,6 +108,8 @@ For always-on WhatsApp health tracking without developer workstation dependence:
 - **Deployment Runbook**: See [docs/deployment.md](docs/deployment.md) for complete runbooks covering VPS bootstrap, systemd configuration, Neon migrations, production identity bootstrap, QR pairing, encrypted backups, and monitoring.
 - **VPS Assets**: Templates and scripts are located in `deploy/openclaw/` (`clawfit-openclaw.service`, `openclaw.env.template`, `bootstrap.sh`, `redeploy.sh`).
 
+Routine Render/uptime health checks must use `/health`, which never queries PostgreSQL. `/ready` is a one-shot database/schema diagnostic requiring a configured machine bearer token; it intentionally wakes Neon. The database pool releases unused connections after 30 seconds. For existing Render services, change the live **Health Check Path** to `/health` before deploying, then follow the [idle suspension check](docs/deployment.md#94-verify-neon-suspends-when-idle).
+
 ## Environment loading
 
 The API, database migrator, and Next.js app load the repository-root `.env` even though pnpm runs workspace scripts from their package directories. Keep secrets in that single ignored file; do not create package-local copies.

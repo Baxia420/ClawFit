@@ -8,14 +8,21 @@ const isReadinessSmoke = args.includes("--verify-estimator") || args.includes("-
 const promptArgs = args.filter((a) => a !== "--verify-estimator" && a !== "--readiness-only");
 
 // -----------------------------------------------------------------------------
-// Part A: Public Estimator Readiness Smoke
+// Part A: Operator Estimator Readiness Smoke
 // -----------------------------------------------------------------------------
 // Inspects /ready to verify database connectivity, schema migration status,
-// and that an estimator model is configured. Does not require user identity
-// or bearer credentials.
+// and that an estimator model is configured. Requires a machine bearer token,
+// but no user identity. This is a one-shot check that intentionally wakes Neon.
 // -----------------------------------------------------------------------------
-console.log(`[READINESS] Querying public readiness probe at ${apiUrl}/ready...`);
-const readyRes = await fetch(new URL("/ready", apiUrl));
+const token = process.env.HEALTH_API_WEB_TOKEN || process.env.HEALTH_API_OPENCLAW_TOKEN;
+if (!token) {
+  console.error("[AUTH_ERROR] HEALTH_API_WEB_TOKEN or HEALTH_API_OPENCLAW_TOKEN is required for the operator readiness check.");
+  process.exit(1);
+}
+console.log(`[READINESS] Querying operator readiness probe at ${apiUrl}/ready...`);
+const readyRes = await fetch(new URL("/ready", apiUrl), {
+  headers: { authorization: `Bearer ${token}` },
+});
 if (!readyRes.ok) {
   console.error(`[READINESS_FAILURE] /ready probe failed with HTTP ${readyRes.status}.`);
   process.exit(1);
@@ -31,6 +38,11 @@ console.log("[READINESS] Response:", JSON.stringify(readyBody, null, 2));
 
 if (readyBody.status !== "ready") {
   console.error(`[READINESS_FAILURE] API status is '${readyBody.status ?? "unknown"}', expected 'ready'.`);
+  process.exit(1);
+}
+
+if (readyBody.database !== "ok" || readyBody.schema !== "ok") {
+  console.error("[READINESS_FAILURE] Database or schema is not ready.");
   process.exit(1);
 }
 
@@ -52,12 +64,6 @@ if (isReadinessSmoke && promptArgs.length === 0) {
 // Probes the authenticated nutrition estimation endpoint. Strictly requires
 // valid credentials and real, non-fabricated identity context.
 // -----------------------------------------------------------------------------
-const token = process.env.HEALTH_API_WEB_TOKEN ?? process.env.HEALTH_API_OPENCLAW_TOKEN;
-if (!token) {
-  console.error("[AUTH_ERROR] HEALTH_API_WEB_TOKEN or HEALTH_API_OPENCLAW_TOKEN is required for authenticated nutrition testing.");
-  process.exit(1);
-}
-
 const headers: Record<string, string> = {
   authorization: `Bearer ${token}`,
   "content-type": "application/json",

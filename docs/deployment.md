@@ -303,7 +303,7 @@ Never use `drizzle-kit push` or automatic migration on application startup in pr
    The migration applies `0004_two_user_identity.sql`. Once applied, verify that the database passes the schema-aware check:
    ```powershell
    # Test API readiness against Neon
-   Invoke-RestMethod "https://<render-service>.onrender.com/ready"
+   Invoke-RestMethod "https://<render-service>.onrender.com/ready" -Headers @{ Authorization = "Bearer $env:HEALTH_API_WEB_TOKEN" }
    # Returns: { "status": "ready", "database": "ok", "schema": "ok", "estimator": "configured" }
    ```
 
@@ -318,7 +318,9 @@ Create the service via Render Blueprint or Manual Web Service:
 - **Runtime**: `node`
 - **Build Command**: `corepack enable && pnpm install --frozen-lockfile && pnpm --filter @clawfit/api build`
 - **Start Command**: `pnpm --filter @clawfit/api start`
-- **Health Check Path**: `/ready`
+- **Health Check Path**: `/health` (no database queries)
+
+For an existing service, change **Settings -> Health Check Path** to `/health` before deploying this change. A code deploy alone does not update a manually configured service's health check. If you use a Blueprint, sync `render.yaml` and verify the live setting. Replace `/ready` with `/health` in any uptime monitor too.
 
 ### 9.2 Environment Variables on Render
 Configure these in the Render dashboard:
@@ -334,12 +336,25 @@ Configure these in the Render dashboard:
 - `NUTRITION_MODEL_PRIMARY`: `<verified-primary-model-from-.model-smoke.json>`
 - `NUTRITION_MODEL_FALLBACK`: *(Only configure if verified in `.model-smoke.json`)*
 
-### 9.3 Public Nutrition Estimator Readiness Probe
-Before testing WhatsApp meal logging or executing authenticated operations, run the public readiness smoke check:
+### 9.3 Operator Nutrition Estimator Readiness Probe
+Before testing WhatsApp meal logging or executing authenticated operations, run the one-shot readiness smoke check with `HEALTH_API_WEB_TOKEN` or `HEALTH_API_OPENCLAW_TOKEN` set in the root `.env`:
 ```bash
 pnpm nutrition:smoke
 ```
-This queries `/ready` and verifies that `status === "ready"`, `database === "ok"`, `schema === "ok"`, and `estimator === "configured"` without requiring user identity or bearer credentials.
+This queries `/ready` with a machine bearer token and verifies that `status === "ready"`, `database === "ok"`, `schema === "ok"`, and `estimator === "configured"`. No user identity is required. This intentionally wakes Neon; do not schedule it as a recurring probe. Unauthenticated `/ready` requests return 401 before database access. `/health` checks only the API process, so it can return 200 while Neon is asleep or unavailable. Startup still checks database/schema readiness once before listening.
+
+### 9.4 Verify Neon Suspends When Idle
+
+The database client closes unused connections after 30 seconds and opens connections lazily for later queries. Idle connections alone are not proof of a problem; repeated queries and new connection requests can reset Neon's idle timer.
+
+1. Verify Neon has scale to zero enabled with the five-minute idle timeout and the intended compute size (0.25 CU for this small workload).
+2. After deployment, stop local development servers, Drizzle Studio, SQL editors, and any scheduled jobs using this Neon project. Leave the dashboard unused and do not run `/ready` or nutrition smoke checks during the observation window.
+3. Wait at least six minutes after the last query, then inspect the Neon compute status/metrics. Expect an inactive interval despite routine `/health` probes. Usage totals can lag; use the compute status and timeline first.
+4. Open the dashboard or send an explicit WhatsApp health request. Verify the database wakes and the operation succeeds, then leave it idle and verify it suspends again.
+
+If it stays awake, check Render request logs for repeated `/v1/*` calls or restarts. In Neon, inspect **Active queries** once to identify query sources; that diagnostic itself accesses the database. ClawFit connections use `application_name = 'clawfit'`. Check external OpenClaw heartbeat/cron configuration separately; the repository's health plugin has no periodic database polling, and saved notification schedules do not yet have a delivery worker.
+
+At a constant 0.25 CU, four active hours consume 1 CU-hour. Running continuously for a 31-day month consumes 186 CU-hours even with little CPU work. Compute suspension matters more here than trimming an individual query.
 
 Once WhatsApp identities have been linked in the database, end-to-end estimation can also be verified with real credentials:
 ```bash
@@ -483,9 +498,11 @@ sudo journalctl -u clawfit-openclaw -f -n 100
 # 3. OpenClaw Channel Probe
 sudo -u clawfit -H openclaw channels status --channel whatsapp --probe --json
 
-# 4. Health API / Readiness Probe
+# 4. Routine Health API Probe (does not wake Neon)
 curl -s "https://<render-service>.onrender.com/health"
-curl -s "https://<render-service>.onrender.com/ready"
+
+# Optional one-shot database/schema check (intentionally wakes Neon)
+curl -s -H "Authorization: Bearer ${HEALTH_API_WEB_TOKEN}" "https://<render-service>.onrender.com/ready"
 
 # 5. Nutrition Estimator Smoke Check
 sudo -u clawfit -H bash -c "cd /home/clawfit/app && pnpm nutrition:smoke"
@@ -542,7 +559,7 @@ Execute after live deployment with real WhatsApp accounts. Do not mark tests pas
 
 | Test ID | Scenario | Status | Expected Outcome |
 |---|---|---|---|
-| **MAT-01** | Public API readiness probe | `[PENDING]` | `/ready` returns 200 with `{ "status": "ready", "database": "ok", "schema": "ok", "estimator": "configured" }`. |
+| **MAT-01** | API monitoring and operator readiness | `[PENDING]` | Public `/health` returns 200 without database access; `/ready` requires a machine bearer token and returns `{ "status": "ready", "database": "ok", "schema": "ok", "estimator": "configured" }` when configured. |
 | **MAT-02** | WhatsApp channel login | `[PENDING]` | `openclaw channels login --channel whatsapp` displays ANSI QR; scans cleanly and creates `creds.json`. |
 | **MAT-03** | Systemd service supervision | `[PENDING]` | System service restarts on failure; configuration error 78 stops cleanly without loop; surviving full reboot. |
 | **MAT-04** | Primary DM meal logging | `[PENDING]` | Primary user DM query creates pending draft and logs confirmed meal strictly under Primary user ID. |

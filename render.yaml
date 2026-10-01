@@ -5,7 +5,8 @@ services:
     region: singapore
     buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @clawfit/api build
     startCommand: pnpm --filter @clawfit/api start
-    healthCheckPath: /ready
+    # Frequent platform probes must not wake Neon. /ready is an operator-only DB check.
+    healthCheckPath: /health
     envVars:
       - key: NODE_VERSION
         value: 24.15.0
@@ -30,4 +31,3 @@ services:
       # Configure NUTRITION_MODEL_FALLBACK only when a verified fallback model is present in .model-smoke.json
       # - key: NUTRITION_MODEL_FALLBACK
       #   sync: false
-
