@@ -2,6 +2,8 @@
 
 This document details the production deployment, hosting topology, security baseline, and operational procedures for ClawFit Stage 3.
 
+For the observed service URLs, the five-minute UptimeRobot monitor, and day-to-day idle checks, start with [Operations and service directory](operations.md). The host examples below describe the deployment template; confirm the current OpenClaw host before applying them.
+
 ---
 
 ## 1. Production Topology & Architecture
