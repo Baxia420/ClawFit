@@ -34,20 +34,48 @@ describe("Health API", () => {
   beforeAll(async () => {
     validWebAssertion = await makeWebAssertion();
   });
-  it("allows the public health endpoint", async () => {
-    const app = createApp({ repository, webToken, openclawToken, logger: false });
-    const response = await app.inject({ method: "GET", url: "/health" });
-    expect(response.statusCode).toBe(200);
+  it("handles repeated public health probes without any database access, even during a DB outage", async () => {
+    const unavailableRepo = new Proxy({} as HealthRepository, {
+      get() { throw new Error("Health probes must never access the repository"); },
+    });
+    const app = createApp({ repository: unavailableRepo, webToken, openclawToken, logger: false });
+    for (let i = 0; i < 20; i++) {
+      const response = await app.inject({ method: i % 2 === 0 ? "GET" : "HEAD", url: "/health" });
+      expect(response.statusCode).toBe(200);
+      if (i % 2 === 0) expect(response.json()).toEqual({ status: "ok" });
+    }
     await app.close();
   });
 
-  it("handles the public /ready endpoint based on repository readiness", async () => {
+  it("rejects missing or invalid operator tokens on /ready before accessing the database", async () => {
+    const inaccessibleRepo = new Proxy({} as HealthRepository, {
+      get() { throw new Error("Unauthorized probes must never access the repository"); },
+    });
+    const app = createApp({ repository: inaccessibleRepo, webToken, openclawToken, logger: false });
+    for (const method of ["GET", "HEAD"] as const) {
+      for (const authorization of [undefined, "Bearer invalid-token", "Basic invalid", "Bearer "]) {
+        const response = await app.inject({ method, url: "/ready", headers: authorization ? { authorization } : {} });
+        expect(response.statusCode).toBe(401);
+        expect(response.headers["cache-control"]).toBe("no-store");
+      }
+    }
+    await app.close();
+
+    const unconfiguredApp = createApp({ repository: inaccessibleRepo, logger: false });
+    const response = await unconfiguredApp.inject({ method: "GET", url: "/ready", headers: { authorization: `Bearer ${webToken}` } });
+    expect(response.statusCode).toBe(401);
+    await unconfiguredApp.close();
+  });
+
+  it("handles operator /ready checks based on repository readiness", async () => {
     const readyRepo = {
       checkReady: vi.fn().mockResolvedValue(true),
     } as unknown as HealthRepository;
     const readyApp = createApp({ repository: readyRepo, webToken, openclawToken, logger: false });
-    const readyRes = await readyApp.inject({ method: "GET", url: "/ready" });
+    const readyRes = await readyApp.inject({ method: "GET", url: "/ready", headers: { authorization: `Bearer ${webToken}` } });
     expect(readyRes.statusCode).toBe(200);
+    expect(readyRes.headers["cache-control"]).toBe("no-store");
+    expect(readyRepo.checkReady).toHaveBeenCalledTimes(1);
     expect(readyRes.json()).toEqual({
       status: "ready",
       database: "ok",
@@ -63,7 +91,7 @@ describe("Health API", () => {
       estimator: { estimate: vi.fn() } as unknown as any,
       logger: false,
     });
-    const readyWithEstimatorRes = await readyAppWithEstimator.inject({ method: "GET", url: "/ready" });
+    const readyWithEstimatorRes = await readyAppWithEstimator.inject({ method: "GET", url: "/ready", headers: { authorization: `Bearer ${openclawToken}` } });
     expect(readyWithEstimatorRes.statusCode).toBe(200);
     expect(readyWithEstimatorRes.json()).toEqual({
       status: "ready",
@@ -77,7 +105,7 @@ describe("Health API", () => {
       checkReady: vi.fn().mockRejectedValue(new Error("Pre-0004 schema missing")),
     } as unknown as HealthRepository;
     const unreadyApp = createApp({ repository: unreadyRepo, webToken, openclawToken, logger: false });
-    const unreadyRes = await unreadyApp.inject({ method: "GET", url: "/ready" });
+    const unreadyRes = await unreadyApp.inject({ method: "GET", url: "/ready", headers: { authorization: `Bearer ${webToken}` } });
     expect(unreadyRes.statusCode).toBe(503);
     expect(unreadyRes.json()).toEqual({ status: "not_ready" });
     await unreadyApp.close();
@@ -1675,6 +1703,5 @@ describe("Health API", () => {
     });
   });
 });
-
 
 

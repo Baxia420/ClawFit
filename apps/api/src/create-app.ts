@@ -442,6 +442,16 @@ export function createApp(options: CreateAppOptions) {
 
   app.get("/health", async () => ({ status: "ok" }));
   app.get("/ready", async (_request, reply) => {
+    // Deep diagnostics intentionally wake PostgreSQL. Require an operator token
+    // before touching the repository so public monitors cannot keep Neon awake.
+    reply.header("Cache-Control", "no-store");
+    const authorization = _request.headers.authorization;
+    const provided = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
+    const authorized = provided && [options.webToken, options.openclawToken]
+      .some((token) => token && safeEqual(provided, token));
+    if (!authorized) {
+      return reply.code(401).send({ error: { code: "UNAUTHORIZED", message: "An operator bearer token is required; use /health for routine monitoring" } });
+    }
     try {
       await options.repository.checkReady();
       return {
