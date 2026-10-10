@@ -235,9 +235,10 @@ export type LinkExternalIdentityInput = z.infer<typeof linkExternalIdentitySchem
 export const togetherMealSummarySchema = z.object({
   id: z.string().min(1),
   label: z.string(),
-  caloriesBest: z.number(),
-  proteinG: z.number(),
+  caloriesBest: z.number().nullable(),
+  proteinG: z.number().nullable(),
   occurredAt: z.string(),
+  timeKnown: z.boolean().optional(),
 });
 
 export const togetherExerciseSummarySchema = z.object({
@@ -258,8 +259,8 @@ export const togetherWorkoutSummarySchema = z.object({
 
 export const togetherTrendPointSchema = z.object({
   day: z.string(),
-  calories: z.number(),
-  proteinG: z.number(),
+  calories: z.number().nullable(),
+  proteinG: z.number().nullable(),
 });
 
 export const togetherMemberProgressSchema = z.object({
@@ -272,8 +273,8 @@ export const togetherMemberProgressSchema = z.object({
   }),
   daily: z.object({
     date: z.string(),
-    calories: z.number(),
-    proteinG: z.number(),
+    calories: z.number().nullable(),
+    proteinG: z.number().nullable(),
     mealCount: z.number(),
     meals: z.array(togetherMealSummarySchema),
     workouts: z.array(togetherWorkoutSummarySchema),

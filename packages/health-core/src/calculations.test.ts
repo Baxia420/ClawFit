@@ -17,11 +17,22 @@ describe("deterministic calculations", () => {
         { caloriesBest: 500, caloriesLow: 450, caloriesHigh: 600, proteinG: 30, carbsG: 50, fatG: 20, fiberG: 5 },
         { caloriesBest: 300, caloriesLow: 250, caloriesHigh: 350, proteinG: 20, carbsG: 25, fatG: 10, fiberG: null },
       ]),
-    ).toEqual({ caloriesBest: 800, caloriesLow: 700, caloriesHigh: 950, proteinG: 50, carbsG: 75, fatG: 30, fiberG: 5 });
+    ).toEqual({ caloriesBest: 800, caloriesLow: 700, caloriesHigh: 950, proteinG: 50, carbsG: 75, fatG: 30, fiberG: null });
   });
 
   it("calculates workout volume", () => {
     expect(workoutVolume([{ weightKg: 80, reps: 8 }, { weightKg: 80, reps: 7 }, { weightKg: null, reps: 10 }])).toBe(1_200);
+  });
+
+  it("keeps unknown calories and macros distinct from zero when combining meals", () => {
+    const result=sumNutrition([
+      {caloriesBest:500,caloriesLow:400,caloriesHigh:600,proteinG:30,carbsG:50,fatG:20,fiberG:3},
+      {caloriesBest:1000,caloriesLow:800,caloriesHigh:1200,proteinG:null,carbsG:null,fatG:null,fiberG:null},
+    ]);
+    expect(result.caloriesBest).toBe(1500);
+    expect(result.proteinG).toBeNull();
+    expect(result.carbsG).toBeNull();
+    expect(sumNutrition([{caloriesBest:null,caloriesLow:null,caloriesHigh:null,proteinG:null,carbsG:null,fatG:null,fiberG:null}]).caloriesBest).toBeNull();
   });
 
   it("calculates Epley estimated 1RM", () => {

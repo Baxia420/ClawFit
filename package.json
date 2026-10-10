@@ -24,7 +24,8 @@
     "openclaw:plugin:validate": "pnpm --filter @clawfit/openclaw-health validate",
     "nutrition:manual": "tsx scripts/manual-nutrition-test.ts",
     "nutrition:smoke": "tsx scripts/manual-nutrition-test.ts --verify-estimator",
-    "identity:link": "tsx scripts/link-whatsapp-identity.ts"
+    "identity:link": "tsx scripts/link-whatsapp-identity.ts",
+    "history:import": "node --import tsx scripts/import-reviewed-history.ts"
   },
   "devDependencies": {
     "@electric-sql/pglite": "latest",

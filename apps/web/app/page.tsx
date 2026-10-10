@@ -5,7 +5,7 @@ import { healthApi, localDate, type Meal, type Settings, type Workout } from "..
 import { auth } from "../auth";
 import { calculateDailyProgress } from "../lib/dashboard";
 
-type Daily = { totals: { caloriesBest: number; caloriesLow: number; caloriesHigh: number; proteinG: number; carbsG: number; fatG: number }; meals: Meal[] };
+type Daily = { totals: { caloriesBest: number | null; caloriesLow: number | null; caloriesHigh: number | null; proteinG: number | null; carbsG: number | null; fatG: number | null }; meals: Meal[] };
 
 export const dynamic = "force-dynamic";
 
@@ -71,23 +71,23 @@ export default async function TodayPage() {
         <div className="header-code">TARGET / {target} KCAL<br />PROTEIN / {proteinTarget}G</div>
       </header>
       <section className="metric-grid" aria-label="Daily nutrition summary">
-        <Metric label="ENERGY / BEST" value={Math.round(totals.caloriesBest)} unit="kcal" accent hint={progress.calorieHint} />
-        <Metric label="UNCERTAINTY" value={`${Math.round(totals.caloriesLow)}–${Math.round(totals.caloriesHigh)}`} unit="kcal" />
-        <Metric label="PROTEIN" value={Math.round(totals.proteinG)} unit="g" hint={progress.proteinHint} />
-        <Metric label="CARBS / FAT" value={`${Math.round(totals.carbsG)} / ${Math.round(totals.fatG)}`} unit="g" />
+        <Metric label="ENERGY / BEST" value={formatNutrition(totals.caloriesBest)} unit="kcal" accent hint={progress.calorieHint} />
+        <Metric label="UNCERTAINTY" value={`${formatNutrition(totals.caloriesLow)}–${formatNutrition(totals.caloriesHigh)}`} unit="kcal" />
+        <Metric label="PROTEIN" value={formatNutrition(totals.proteinG)} unit="g" hint={progress.proteinHint} />
+        <Metric label="CARBS / FAT" value={`${formatNutrition(totals.carbsG)} / ${formatNutrition(totals.fatG)}`} unit="g" />
       </section>
       <section className="today-control" aria-label="Daily progress and quick actions">
         <div className="progress-block">
           <div>
             <span>ENERGY / {progress.caloriePct}%</span>
-            <strong>{Math.round(totals.caloriesBest)} / {target}</strong>
+            <strong>{formatNutrition(totals.caloriesBest)} / {target}</strong>
           </div>
           <i><b style={{ width: `${progress.calorieBarWidth}%` }} /></i>
         </div>
         <div className="progress-block">
           <div>
             <span>PROTEIN / {progress.proteinPct}%</span>
-            <strong>{Math.round(totals.proteinG)} / {proteinTarget} G</strong>
+            <strong>{formatNutrition(totals.proteinG)} / {proteinTarget} G</strong>
           </div>
           <i><b style={{ width: `${progress.proteinBarWidth}%` }} /></i>
         </div>
@@ -135,4 +135,8 @@ export default async function TodayPage() {
       </div>
     </div>
   );
+}
+
+function formatNutrition(value: number | null): string | number {
+  return value === null ? "Unknown" : Math.round(value);
 }

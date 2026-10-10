@@ -131,12 +131,13 @@ export type Meal = {
   id: string;
   occurredAt: string;
   label: string;
-  caloriesBest: number;
-  caloriesLow: number;
-  caloriesHigh: number;
-  proteinG: number;
-  carbsG: number;
-  fatG: number;
+  rawUserText?: string | null;
+  caloriesBest: number | null;
+  caloriesLow: number | null;
+  caloriesHigh: number | null;
+  proteinG: number | null;
+  carbsG: number | null;
+  fatG: number | null;
   confidence: "high" | "medium" | "low";
 };
 
@@ -155,7 +156,7 @@ export type Settings = {
 
 export async function fetchDailyNutrition(options?: { date?: string; timezone?: string; userId?: string }): Promise<{
   meals: Meal[];
-  totals: { caloriesBest: number; caloriesLow: number; caloriesHigh: number; proteinG: number; carbsG: number; fatG: number };
+  totals: { caloriesBest: number | null; caloriesLow: number | null; caloriesHigh: number | null; proteinG: number | null; carbsG: number | null; fatG: number | null };
   date: string;
 }> {
   const params = new URLSearchParams();

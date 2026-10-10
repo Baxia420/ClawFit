@@ -42,7 +42,7 @@ export function TogetherMemberPanel({ member, timeZone, trendDays }: TogetherMem
           <div className="together-metric-row">
             <span className="eyebrow">Calories</span>
             <strong>
-              {calc.caloriesConsumed} <small>/ {calc.calorieTarget} kcal</small>
+              {calc.caloriesConsumed ?? "Unknown"} <small>/ {calc.calorieTarget} kcal</small>
             </strong>
           </div>
           <div
@@ -56,7 +56,7 @@ export function TogetherMemberPanel({ member, timeZone, trendDays }: TogetherMem
             <div className="together-bar-fill calories" style={{ width: `${calc.calorieBoundedBar}%` }} />
           </div>
           <p className="together-metric-note">
-            {calc.calorieDiff > 0 ? (
+            {calc.calorieDiff === null ? (<span>{calc.calorieHint}</span>) : calc.calorieDiff > 0 ? (
               <span><strong>{calc.calorieDiff} kcal</strong> remaining</span>
             ) : calc.calorieDiff === 0 ? (
               <span>Target reached</span>
@@ -70,7 +70,7 @@ export function TogetherMemberPanel({ member, timeZone, trendDays }: TogetherMem
           <div className="together-metric-row">
             <span className="eyebrow">Protein</span>
             <strong>
-              {calc.proteinConsumed} <small>/ {calc.proteinTarget} g</small>
+              {calc.proteinConsumed ?? "Unknown"} <small>/ {calc.proteinTarget} g</small>
             </strong>
           </div>
           <div
@@ -84,10 +84,10 @@ export function TogetherMemberPanel({ member, timeZone, trendDays }: TogetherMem
             <div className="together-bar-fill protein" style={{ width: `${calc.proteinBoundedBar}%` }} />
           </div>
           <p className="together-metric-note">
-            {calc.proteinDiff > 0 ? (
+            {calc.proteinDiff === null ? (<span>{calc.proteinHint}</span>) : calc.proteinDiff > 0 ? (
               <span><strong>{calc.proteinDiff} g</strong> remaining</span>
             ) : (
-              <span>Target met ({calc.proteinConsumed} g)</span>
+              <span>Target met ({calc.proteinConsumed ?? "Unknown"} g)</span>
             )}
           </p>
         </div>
@@ -109,11 +109,11 @@ export function TogetherMemberPanel({ member, timeZone, trendDays }: TogetherMem
               <li key={meal.id} className="together-meal-item">
                 <div className="together-meal-info">
                   <strong>{meal.label}</strong>
-                  <time dateTime={meal.occurredAt}>{formatLocalTime(meal.occurredAt, timeZone)}</time>
+                  <time dateTime={meal.occurredAt}>{meal.timeKnown === false ? "Time unknown" : formatLocalTime(meal.occurredAt, timeZone)}</time>
                 </div>
                 <div className="together-meal-macros">
-                  <span className="meal-cals">{meal.caloriesBest} kcal</span>
-                  <span className="meal-prot">{meal.proteinG}g P</span>
+                  <span className="meal-cals">{meal.caloriesBest ?? "Unknown"} kcal</span>
+                  <span className="meal-prot">{meal.proteinG === null ? "Unknown protein" : `${meal.proteinG}g P`}</span>
                 </div>
               </li>
             ))}
@@ -169,11 +169,11 @@ export function TogetherMemberPanel({ member, timeZone, trendDays }: TogetherMem
           {calc.trendSummary.loggedDaysCount > 0 ? (
             <div className="together-trend-stats">
               <div>
-                <strong>{calc.trendSummary.avgCalories}</strong>
+                <strong>{calc.trendSummary.avgCalories ?? "Unknown"}</strong>
                 <span>kcal/day avg</span>
               </div>
               <div>
-                <strong>{calc.trendSummary.avgProteinG}g</strong>
+                <strong>{calc.trendSummary.avgProteinG === null ? "Unknown" : `${calc.trendSummary.avgProteinG}g`}</strong>
                 <span>protein/day avg</span>
               </div>
             </div>

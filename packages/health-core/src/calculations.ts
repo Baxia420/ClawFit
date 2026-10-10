@@ -1,28 +1,32 @@
 export type MacroNumbers = {
-  caloriesBest: number;
-  caloriesLow: number;
-  caloriesHigh: number;
-  proteinG: number;
-  carbsG: number;
-  fatG: number;
+  caloriesBest: number | null;
+  caloriesLow: number | null;
+  caloriesHigh: number | null;
+  proteinG: number | null;
+  carbsG: number | null;
+  fatG: number | null;
   fiberG: number | null;
 };
 
-export type NutritionTotals = Omit<MacroNumbers, "fiberG"> & { fiberG: number };
+export type NutritionTotals = MacroNumbers;
 
 export function sumNutrition(rows: readonly MacroNumbers[]): NutritionTotals {
   return rows.reduce<NutritionTotals>(
     (total, row) => ({
-      caloriesBest: total.caloriesBest + row.caloriesBest,
-      caloriesLow: total.caloriesLow + row.caloriesLow,
-      caloriesHigh: total.caloriesHigh + row.caloriesHigh,
-      proteinG: total.proteinG + row.proteinG,
-      carbsG: total.carbsG + row.carbsG,
-      fatG: total.fatG + row.fatG,
-      fiberG: total.fiberG + (row.fiberG ?? 0),
+      caloriesBest: addKnown(total.caloriesBest, row.caloriesBest),
+      caloriesLow: addKnown(total.caloriesLow, row.caloriesLow),
+      caloriesHigh: addKnown(total.caloriesHigh, row.caloriesHigh),
+      proteinG: addKnown(total.proteinG, row.proteinG),
+      carbsG: addKnown(total.carbsG, row.carbsG),
+      fatG: addKnown(total.fatG, row.fatG),
+      fiberG: addKnown(total.fiberG, row.fiberG),
     }),
     { caloriesBest: 0, caloriesLow: 0, caloriesHigh: 0, proteinG: 0, carbsG: 0, fatG: 0, fiberG: 0 },
   );
+}
+
+function addKnown(a: number | null, b: number | null): number | null {
+  return a === null || b === null ? null : a + b;
 }
 
 export function workoutSetVolume(weightKg: number | null, reps: number): number {
