@@ -2,6 +2,7 @@ import { and, asc, desc, eq, gt, gte, ilike, isNull, lt, sql } from "drizzle-orm
 import {
   canAccessResource,
   estimatedOneRepMax,
+  historicalTimeKnown,
   normalizeWhatsAppIdentifier,
   sumNutrition,
   workoutVolume,
@@ -541,7 +542,7 @@ export class HealthRepository {
     const nextLow = patch.caloriesLow ?? current.caloriesLow;
     const nextBest = patch.caloriesBest ?? current.caloriesBest;
     const nextHigh = patch.caloriesHigh ?? current.caloriesHigh;
-    if (nextLow > nextBest || nextBest > nextHigh) {
+    if ((nextLow !== null && nextBest !== null && nextLow > nextBest) || (nextBest !== null && nextHigh !== null && nextBest > nextHigh)) {
       throw new ConflictError("Calorie range must satisfy low <= best <= high");
     }
     const [updated] = await this.db
@@ -607,15 +608,15 @@ export class HealthRepository {
     return { date: start.toISOString().slice(0, 10), totals: sumNutrition(rows), meals: rows };
   }
 
-  async nutritionTrend(userId: string, start: Date, end: Date, timezone: string = "UTC"): Promise<{ day: string; calories_best: number; calories_low: number; calories_high: number; protein_g: number }[]> {
+  async nutritionTrend(userId: string, start: Date, end: Date, timezone: string = "UTC"): Promise<{ day: string; calories_best: number | null; calories_low: number | null; calories_high: number | null; protein_g: number | null }[]> {
     const day = sql<string>`to_char(${meals.occurredAt} AT TIME ZONE ${timezone}, 'YYYY-MM-DD')`;
     return this.db
       .select({
         day: day.as("day"),
-        calories_best: sql<number>`sum(${meals.caloriesBest})::float`.as("calories_best"),
-        calories_low: sql<number>`sum(${meals.caloriesLow})::float`.as("calories_low"),
-        calories_high: sql<number>`sum(${meals.caloriesHigh})::float`.as("calories_high"),
-        protein_g: sql<number>`sum(${meals.proteinG})::float`.as("protein_g"),
+        calories_best: sql<number | null>`CASE WHEN count(*) = count(${meals.caloriesBest}) THEN sum(${meals.caloriesBest})::float ELSE NULL END`.as("calories_best"),
+        calories_low: sql<number | null>`CASE WHEN count(*) = count(${meals.caloriesLow}) THEN sum(${meals.caloriesLow})::float ELSE NULL END`.as("calories_low"),
+        calories_high: sql<number | null>`CASE WHEN count(*) = count(${meals.caloriesHigh}) THEN sum(${meals.caloriesHigh})::float ELSE NULL END`.as("calories_high"),
+        protein_g: sql<number | null>`CASE WHEN count(*) = count(${meals.proteinG}) THEN sum(${meals.proteinG})::float ELSE NULL END`.as("protein_g"),
       })
       .from(meals)
       .where(and(eq(meals.userId, userId), gte(meals.occurredAt, start), lt(meals.occurredAt, end)))
@@ -1014,6 +1015,7 @@ export class HealthRepository {
             caloriesBest: m.caloriesBest,
             proteinG: m.proteinG,
             occurredAt: m.occurredAt.toISOString(),
+            ...(!historicalTimeKnown(m.rawUserText) ? {timeKnown:false} : {}),
           })),
           workouts: hydratedWorkouts.map((hw) => ({
             id: hw.workout.id,

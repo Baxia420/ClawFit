@@ -2,7 +2,7 @@
 
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
-type Point = { day: string; caloriesBest?: number; caloriesLow?: number; caloriesHigh?: number; proteinG?: number; estimatedOneRepMax?: number };
+type Point = { day: string; caloriesBest?: number | null; caloriesLow?: number | null; caloriesHigh?: number | null; proteinG?: number | null; estimatedOneRepMax?: number };
 
 export function TrendChart({ data, mode = "calories" }: { data: Point[]; mode?: "calories" | "protein" | "e1rm" }) {
   const key = mode === "calories" ? "caloriesBest" : mode === "protein" ? "proteinG" : "estimatedOneRepMax";

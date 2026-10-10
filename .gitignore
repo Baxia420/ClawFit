@@ -12,3 +12,6 @@ coverage/
 output/
 apps/web/.vercel/
 .playwright-cli/
+
+# Historical import data, identity manifests, receipts and recovery backups stay private.
+historical-private/

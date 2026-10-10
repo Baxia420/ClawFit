@@ -4,7 +4,7 @@ import { TrendChart } from "../../components/TrendChart";
 import { healthApi, type Meal, type Settings } from "../../lib/api";
 import { calculateTrendSummary } from "../../lib/dashboard";
 
-type Trend = { day: string; calories_best: number; calories_low: number; calories_high: number; protein_g: number };
+type Trend = { day: string; calories_best: number | null; calories_low: number | null; calories_high: number | null; protein_g: number | null };
 
 export const dynamic = "force-dynamic";
 
@@ -52,10 +52,10 @@ export default async function NutritionPage({ searchParams }: { searchParams: Pr
 
   const trend = trendRaw.map((row) => ({
     day: String(row.day).slice(0, 10),
-    caloriesBest: Number(row.calories_best),
-    caloriesLow: Number(row.calories_low),
-    caloriesHigh: Number(row.calories_high),
-    proteinG: Number(row.protein_g),
+    caloriesBest: row.calories_best === null ? null : Number(row.calories_best),
+    caloriesLow: row.calories_low === null ? null : Number(row.calories_low),
+    caloriesHigh: row.calories_high === null ? null : Number(row.calories_high),
+    proteinG: row.protein_g === null ? null : Number(row.protein_g),
   }));
   const summary = calculateTrendSummary(trend, days, settings);
 
@@ -74,14 +74,14 @@ export default async function NutritionPage({ searchParams }: { searchParams: Pr
       <section className="metric-grid two">
         <Metric
           label="AVG ENERGY (LOGGED DAYS)"
-          value={summary.calorieAverage}
+          value={summary.calorieAverage ?? "Unknown"}
           unit="kcal/day"
           accent
           hint={summary.calorieHint}
         />
         <Metric
           label="AVG PROTEIN"
-          value={summary.proteinAverage}
+          value={summary.proteinAverage ?? "Unknown"}
           unit="g/day"
           hint={summary.proteinHint}
         />

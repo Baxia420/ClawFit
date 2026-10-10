@@ -305,7 +305,7 @@ describe("Together Dashboard web client and progress projections", () => {
 
       // Meals are confirmed only
       expect(memberCaller.daily.meals).toHaveLength(3);
-      expect(memberCaller.daily.meals.every((m) => m.label && m.caloriesBest > 0)).toBe(true);
+      expect(memberCaller.daily.meals.every((m) => m.label && m.caloriesBest !== null && m.caloriesBest > 0)).toBe(true);
 
       // Caller is marked isCaller=true, partner isCaller=false
       expect(memberCaller.isCaller).toBe(true);
