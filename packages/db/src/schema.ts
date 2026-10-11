@@ -1,5 +1,6 @@
+import type { MuscleGroup, RoutineExercise, RoutineSnapshot } from "@clawfit/health-core";
 import { sql } from "drizzle-orm";
-import { boolean, index, integer, jsonb, pgEnum, pgTable, real, text, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
+import { boolean, date, foreignKey, index, integer, jsonb, pgEnum, pgTable, real, text, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
 
 export const confidenceEnum = pgEnum("confidence", ["high", "medium", "low"]);
 export const mealSourceEnum = pgEnum("meal_source", ["text", "photo", "preset", "manual"]);
@@ -177,12 +178,34 @@ export const foodPresets = pgTable(
   (table) => [uniqueIndex("food_presets_user_normalized_name_uq").on(table.userId, table.normalizedName)],
 );
 
+export const bodyWeights = pgTable("body_weights", {
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  day: date("day").notNull(), weightKg: real("weight_kg").notNull(), notes: varchar("notes", { length: 500 }).notNull().default(""),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, table => [uniqueIndex("body_weights_user_day_uq").on(table.userId, table.day)]);
+export const trainingProfiles = pgTable("training_profiles", {
+  userId: uuid("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  weightGoalKg: real("weight_goal_kg"),
+});
+export const workoutRoutines = pgTable("workout_routines", {
+  id: uuid("id").primaryKey().defaultRandom(), userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  name: varchar("name", { length: 120 }).notNull(), exercises: jsonb("exercises").$type<RoutineExercise[]>().notNull(),
+  archived: boolean("archived").notNull().default(false), version: integer("version").notNull().default(1),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, table => [uniqueIndex("routines_user_key_uq").on(table.userId, table.idempotencyKey), uniqueIndex("routines_user_id_uq").on(table.userId, table.id)]);
+export const workoutSchedule = pgTable("workout_schedule", {
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  weekday: integer("weekday").notNull(), routineId: uuid("routine_id").notNull(),
+}, table => [uniqueIndex("schedule_user_day_uq").on(table.userId, table.weekday), foreignKey({ columns: [table.userId, table.routineId], foreignColumns: [workoutRoutines.userId, workoutRoutines.id] }).onDelete("cascade")]);
+
 export const workouts = pgTable(
   "workouts",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "restrict" }),
     name: varchar("name", { length: 120 }).notNull(),
+    routineSnapshot: jsonb("routine_snapshot").$type<RoutineSnapshot>(),
     status: workoutStatusEnum("status").notNull().default("active"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
@@ -205,6 +228,7 @@ export const exercises = pgTable(
     workoutId: uuid("workout_id").notNull().references(() => workouts.id, { onDelete: "cascade" }),
     name: varchar("name", { length: 160 }).notNull(),
     normalizedName: varchar("normalized_name", { length: 160 }).notNull(),
+    muscleGroup: varchar("muscle_group", { length: 30 }).$type<MuscleGroup>(),
     position: integer("position").notNull(),
   },
   (table) => [uniqueIndex("exercises_workout_name_uq").on(table.workoutId, table.normalizedName)],

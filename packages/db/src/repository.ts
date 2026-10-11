@@ -1,6 +1,8 @@
 import { and, asc, desc, eq, gt, gte, ilike, isNull, lt, sql } from "drizzle-orm";
 import {
   canAccessResource,
+  routineDefinitionSchema, summarizeTraining, muscleForExercise,
+  type RoutineDefinition, type RoutineSnapshot, type TrainingSession,
   estimatedOneRepMax,
   historicalTimeKnown,
   normalizeWhatsAppIdentifier,
@@ -25,6 +27,7 @@ import {
 } from "@clawfit/health-core";
 import type { HealthDatabase } from "./client.js";
 import {
+  bodyWeights, trainingProfiles, workoutRoutines, workoutSchedule,
   exercises,
   externalIdentities,
   foodPresets,
@@ -736,19 +739,95 @@ export class HealthRepository {
     return deleted;
   }
 
-  async startWorkout(userId: string, input: { name: string; startedAt?: Date | undefined; idempotencyKey: string }): Promise<HydratedWorkout> {
-    const existing = await this.db.query.workouts.findFirst({
-      where: and(eq(workouts.userId, userId), eq(workouts.idempotencyKey, input.idempotencyKey)),
+  async startWorkout(userId: string, input: { name: string; startedAt?: Date | undefined; routineId?: string | undefined; idempotencyKey: string }): Promise<HydratedWorkout> {
+    const id = await this.db.transaction(async tx => {
+      // Serialize starts for one owner so retries and two devices cannot create two active sessions.
+      await tx.select({ id: users.id }).from(users).where(eq(users.id, userId)).for("update");
+      const existing = await tx.query.workouts.findFirst({ where: and(eq(workouts.userId, userId), eq(workouts.idempotencyKey, input.idempotencyKey)) });
+      if (existing) return existing.id;
+      const active = await tx.query.workouts.findFirst({ where: and(eq(workouts.userId, userId), eq(workouts.status, "active")) });
+      if (active) throw new ConflictError("A workout is already active. Resume it before starting another.");
+      let snapshot: RoutineSnapshot | null = null;
+      if (input.routineId) {
+        const routine = await tx.query.workoutRoutines.findFirst({ where: and(eq(workoutRoutines.userId, userId), eq(workoutRoutines.id, input.routineId), eq(workoutRoutines.archived, false)) });
+        if (!routine) throw new NotFoundError("Routine not found");
+        const definition = routineDefinitionSchema.parse(routine);
+        snapshot = { routineId: routine.id, name: definition.name, exercises: definition.exercises };
+      }
+      const [created] = await tx.insert(workouts).values({ userId, name: snapshot?.name ?? input.name, startedAt: input.startedAt ?? new Date(), routineSnapshot: snapshot, idempotencyKey: input.idempotencyKey }).returning();
+      if (!created) throw new Error("Workout insert returned no record");
+      if (snapshot) await tx.insert(exercises).values(snapshot.exercises.map((exercise, position) => ({ workoutId: created.id, name: exercise.name, normalizedName: normalizeName(exercise.name), muscleGroup: exercise.muscleGroup, position })));
+      return created.id;
     });
-    if (existing) return this.getWorkout(userId, existing.id);
-    const active = await this.getActiveWorkout(userId);
-    if (active) throw new ConflictError(`Workout ${active.workout.id} is already active`);
-    const [created] = await this.db
-      .insert(workouts)
-      .values({ userId, name: input.name, startedAt: input.startedAt ?? new Date(), idempotencyKey: input.idempotencyKey })
-      .returning();
-    if (!created) throw new Error("Workout insert returned no record");
-    return this.getWorkout(userId, created.id);
+    return this.getWorkout(userId, id);
+  }
+
+  async listRoutines(userId: string) {
+    return this.db.select().from(workoutRoutines).where(eq(workoutRoutines.userId, userId)).orderBy(asc(workoutRoutines.archived), asc(workoutRoutines.name));
+  }
+  async saveRoutine(userId: string, input: RoutineDefinition & { idempotencyKey: string }) {
+    const definition = routineDefinitionSchema.parse(input);
+    const [created] = await this.db.insert(workoutRoutines).values({ userId, ...definition, idempotencyKey: input.idempotencyKey }).onConflictDoNothing().returning();
+    if (created) return created;
+    const existing = await this.db.query.workoutRoutines.findFirst({ where: and(eq(workoutRoutines.userId, userId), eq(workoutRoutines.idempotencyKey, input.idempotencyKey)) });
+    if (!existing) throw new ConflictError("Routine could not be saved");
+    return existing;
+  }
+  async updateRoutine(userId: string, id: string, input: RoutineDefinition & { version: number }) {
+    const definition = routineDefinitionSchema.parse(input);
+    return this.db.transaction(async tx => {
+      const [row] = await tx.update(workoutRoutines).set({ ...definition, version: input.version + 1, updatedAt: new Date() }).where(and(eq(workoutRoutines.userId, userId), eq(workoutRoutines.id, id), eq(workoutRoutines.version, input.version))).returning();
+      if (!row) {
+        const existing = await tx.query.workoutRoutines.findFirst({ where: and(eq(workoutRoutines.userId, userId), eq(workoutRoutines.id, id)) });
+        if (!existing) throw new NotFoundError("Routine not found");
+        throw new ConflictError("This routine changed on another device. Reload before saving.");
+      }
+      if (row.archived) await tx.delete(workoutSchedule).where(and(eq(workoutSchedule.userId, userId), eq(workoutSchedule.routineId, id)));
+      return row;
+    });
+  }
+  async getSchedule(userId: string) {
+    return this.db.select().from(workoutSchedule).where(eq(workoutSchedule.userId, userId)).orderBy(asc(workoutSchedule.weekday));
+  }
+  async setScheduleDay(userId: string, weekday: number, routineId: string | null) {
+    return this.db.transaction(async tx => {
+      if (routineId === null) {
+        await tx.delete(workoutSchedule).where(and(eq(workoutSchedule.userId, userId), eq(workoutSchedule.weekday, weekday)));
+        return { weekday, routineId: null };
+      }
+      const [routine] = await tx.select().from(workoutRoutines).where(and(eq(workoutRoutines.userId, userId), eq(workoutRoutines.id, routineId), eq(workoutRoutines.archived, false))).for("share");
+      if (!routine) throw new NotFoundError("Routine not found");
+      await tx.insert(workoutSchedule).values({ userId, weekday, routineId }).onConflictDoUpdate({ target: [workoutSchedule.userId, workoutSchedule.weekday], set: { routineId } });
+      return { weekday, routineId };
+    });
+  }
+  async weightHistory(userId: string, startDay: string, endDay: string) {
+    const [entries, profile] = await Promise.all([
+      this.db.select({ day: bodyWeights.day, weightKg: bodyWeights.weightKg, notes: bodyWeights.notes }).from(bodyWeights).where(and(eq(bodyWeights.userId, userId), gte(bodyWeights.day, startDay), lt(bodyWeights.day, endDay))).orderBy(asc(bodyWeights.day)),
+      this.db.query.trainingProfiles.findFirst({ where: eq(trainingProfiles.userId, userId) }),
+    ]);
+    return { entries, goalKg: profile?.weightGoalKg ?? null };
+  }
+  async saveWeight(userId: string, day: string, input: { weightKg: number; notes: string }) {
+    const [saved] = await this.db.insert(bodyWeights).values({ userId, day, ...input }).onConflictDoUpdate({ target: [bodyWeights.userId, bodyWeights.day], set: { ...input, updatedAt: new Date() } }).returning();
+    return saved;
+  }
+  async setWeightGoal(userId: string, goalKg: number | null) {
+    await this.db.insert(trainingProfiles).values({ userId, weightGoalKg: goalKg }).onConflictDoUpdate({ target: trainingProfiles.userId, set: { weightGoalKg: goalKg } });
+    return { goalKg };
+  }
+  async trainingStats(userId: string, start: Date, end: Date, timezone: string) {
+    const sessions = await this.db.select().from(workouts).where(and(eq(workouts.userId, userId), eq(workouts.status, "finished"), gte(workouts.startedAt, start), lt(workouts.startedAt, end)));
+    const rows = await this.db.select({ exercise: exercises, set: workoutSets }).from(exercises).innerJoin(workouts, eq(exercises.workoutId, workouts.id)).leftJoin(workoutSets, eq(workoutSets.exerciseId, exercises.id)).where(and(eq(workouts.userId, userId), eq(workouts.status, "finished"), gte(workouts.startedAt, start), lt(workouts.startedAt, end)));
+    const hydrated: TrainingSession[] = sessions.map(session => ({ ...session, exercises: [] }));
+    const sessionMap = new Map(hydrated.map(s => [s.id, s]));
+    const exerciseMap = new Map<string, TrainingSession["exercises"][number]>();
+    for (const row of rows) {
+      let exercise = exerciseMap.get(row.exercise.id);
+      if (!exercise) { exercise = { name: row.exercise.name, muscleGroup: row.exercise.muscleGroup, sets: [] }; exerciseMap.set(row.exercise.id, exercise); sessionMap.get(row.exercise.workoutId)?.exercises.push(exercise); }
+      if (row.set) exercise.sets.push(row.set);
+    }
+    return summarizeTraining(hydrated, timezone);
   }
 
   async getActiveWorkout(userId: string): Promise<HydratedWorkout | null> {
@@ -761,9 +840,7 @@ export class HealthRepository {
 
   async addWorkoutSet(userId: string, workoutId: string, input: WorkoutSetInput): Promise<typeof workoutSets.$inferSelect> {
     return this.db.transaction(async (tx) => {
-      const workout = await tx.query.workouts.findFirst({
-        where: and(eq(workouts.id, workoutId), eq(workouts.userId, userId)),
-      });
+      const [workout] = await tx.select().from(workouts).where(and(eq(workouts.id, workoutId), eq(workouts.userId, userId))).for("update");
       if (!workout) throw new NotFoundError("Workout not found");
       if (workout.status !== "active") throw new ConflictError("Cannot add a set to a finished workout");
 
@@ -783,9 +860,11 @@ export class HealthRepository {
       let exercise = await tx.query.exercises.findFirst({ where: and(eq(exercises.workoutId, workoutId), eq(exercises.normalizedName, normalizedName)) });
       if (!exercise) {
         const positionRows = await tx.select({ count: sql<number>`count(*)::int` }).from(exercises).where(eq(exercises.workoutId, workoutId));
-        [exercise] = await tx.insert(exercises).values({ workoutId, name: input.exerciseName, normalizedName, position: positionRows[0]?.count ?? 0 }).returning();
+        [exercise] = await tx.insert(exercises).values({ workoutId, name: input.exerciseName, normalizedName, muscleGroup: input.muscleGroup ?? muscleForExercise(input.exerciseName), position: positionRows[0]?.count ?? 0 }).returning();
       }
       if (!exercise) throw new Error("Exercise insert returned no record");
+      if (input.muscleGroup && exercise.muscleGroup && input.muscleGroup !== exercise.muscleGroup) throw new ConflictError("Use the same primary muscle for this exercise within the session");
+      if (input.muscleGroup && !exercise.muscleGroup) await tx.update(exercises).set({ muscleGroup: input.muscleGroup }).where(eq(exercises.id, exercise.id));
       const countRows = await tx.select({ count: sql<number>`count(*)::int` }).from(workoutSets).where(eq(workoutSets.exerciseId, exercise.id));
       const [created] = await tx
         .insert(workoutSets)
@@ -840,12 +919,13 @@ export class HealthRepository {
   }
 
   async finishWorkout(userId: string, id: string, finishedAt: Date = new Date()): Promise<HydratedWorkout> {
-    const [updated] = await this.db
-      .update(workouts)
-      .set({ status: "finished", finishedAt, updatedAt: new Date() })
-      .where(and(eq(workouts.id, id), eq(workouts.userId, userId)))
-      .returning();
-    if (!updated) throw new NotFoundError("Workout not found");
+    await this.db.transaction(async tx => {
+      const [current] = await tx.select().from(workouts).where(and(eq(workouts.id, id), eq(workouts.userId, userId))).for("update");
+      if (!current) throw new NotFoundError("Workout not found");
+      if (current.status === "finished") return;
+      if (finishedAt < current.startedAt) throw new ConflictError("Finish time cannot be before the workout started");
+      await tx.update(workouts).set({ status: "finished", finishedAt, updatedAt: new Date() }).where(eq(workouts.id, id));
+    });
     return this.getWorkout(userId, id);
   }
 
@@ -1069,6 +1149,17 @@ export class HealthRepository {
   }
 
   async checkReady() {
+    // Resolve the new tables/columns without scanning training history.
+    await this.db.execute(sql`
+      SELECT w.routine_snapshot, ex.muscle_group
+      FROM workouts w
+      LEFT JOIN exercises ex ON ex.workout_id = w.id
+      CROSS JOIN body_weights bw
+      CROSS JOIN training_profiles tp
+      CROSS JOIN workout_routines wr
+      CROSS JOIN workout_schedule ws
+      LIMIT 0
+    `);
     const result = await this.db.execute(sql`
       SELECT u.id
       FROM users u
