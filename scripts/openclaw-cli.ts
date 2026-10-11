@@ -5,22 +5,20 @@ import { delimiter, dirname, join } from "node:path";
 type RunOptions = {
   capture?: boolean;
   allowFailure?: boolean;
+  timeoutMs?: number;
 };
 
 export function runOpenClaw(args: string[], options: RunOptions = {}) {
   const command = process.platform === "win32" ? process.execPath : "openclaw";
   const commandArgs = process.platform === "win32" ? [resolveWindowsOpenClawEntry(), ...args] : args;
   const result = spawnSync(command, commandArgs, {
+    timeout: options.timeoutMs ?? 65_000,
     encoding: options.capture ? "utf8" : undefined,
     stdio: options.capture ? "pipe" : "inherit",
   });
 
   if (result.error) throw result.error;
   if (result.status !== 0 && !options.allowFailure) {
-    if (options.capture) {
-      if (result.stdout) process.stdout.write(result.stdout);
-      if (result.stderr) process.stderr.write(result.stderr);
-    }
     throw new Error(`OpenClaw command failed with exit code ${result.status ?? 1}: ${args.slice(0, 2).join(" ")}`);
   }
 

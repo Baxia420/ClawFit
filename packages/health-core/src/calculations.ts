@@ -10,6 +10,26 @@ export type MacroNumbers = {
 
 export type NutritionTotals = MacroNumbers;
 
+export type NutritionCoverage = {
+  mealCount: number;
+  knownTotals: Record<keyof MacroNumbers, number>;
+  missingCounts: Record<keyof MacroNumbers, number>;
+};
+
+/** Partial subtotals accompany strict totals; unknown values never become complete totals. */
+export function nutritionCoverage(rows: readonly MacroNumbers[]): NutritionCoverage {
+  const knownTotals = { caloriesBest: 0, caloriesLow: 0, caloriesHigh: 0, proteinG: 0, carbsG: 0, fatG: 0, fiberG: 0 };
+  const missingCounts = { ...knownTotals };
+  for (const row of rows) {
+    for (const key of Object.keys(knownTotals) as (keyof MacroNumbers)[]) {
+      const value = row[key];
+      if (value === null) missingCounts[key] += 1;
+      else knownTotals[key] += value;
+    }
+  }
+  return { mealCount: rows.length, knownTotals, missingCounts };
+}
+
 export function sumNutrition(rows: readonly MacroNumbers[]): NutritionTotals {
   return rows.reduce<NutritionTotals>(
     (total, row) => ({

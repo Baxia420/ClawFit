@@ -34,6 +34,25 @@ describe("Health API", () => {
   beforeAll(async () => {
     validWebAssertion = await makeWebAssertion();
   });
+  it("binds meal-history pagination and search to the authenticated user and GMT+8 calendar window", async () => {
+    const scoped = { getUser: vi.fn().mockResolvedValue({ id: DEFAULT_PRIMARY_USER_ID, active: true }), getSettings: vi.fn().mockResolvedValue({timezone:"Asia/Kuala_Lumpur"}), listMealHistory: vi.fn().mockResolvedValue({ meals: [], total: 0, limit: 40, offset: 40 }) } as unknown as HealthRepository;
+    const app = createApp({ repository: scoped, webToken, openclawToken, assertionSecret, logger: false });
+    const response = await app.inject({ method: "GET", url: "/v1/meals/history?date=2026-10-02&days=7&offset=40&search=roti", headers: { authorization: `Bearer ${validWebAssertion}` } });
+    expect(response.statusCode).toBe(200);
+    expect(scoped.listMealHistory).toHaveBeenCalledWith(DEFAULT_PRIMARY_USER_ID, new Date("2026-09-25T16:00:00Z"), new Date("2026-10-02T16:00:00Z"), 40, 40, "roti");
+    await app.close();
+  });
+  it("rejects invalid history dates and paging without querying meals", async () => {
+    const scoped = { getUser: vi.fn().mockResolvedValue({ id: DEFAULT_PRIMARY_USER_ID, active: true }), getSettings: vi.fn(), listMealHistory: vi.fn() } as unknown as HealthRepository;
+    const app = createApp({ repository: scoped, webToken, openclawToken, assertionSecret, logger: false });
+    for (const query of ["date=2026-02-30", "date=2026-10-02&offset=-1", "date=2026-10-02&limit=101"]) {
+      const response = await app.inject({ method: "GET", url: `/v1/meals/history?${query}`, headers: { authorization: `Bearer ${validWebAssertion}` } });
+      expect(response.statusCode).toBe(400);
+    }
+    expect(scoped.listMealHistory).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it("handles repeated public health probes without any database access, even during a DB outage", async () => {
     const unavailableRepo = new Proxy({} as HealthRepository, {
       get() { throw new Error("Health probes must never access the repository"); },

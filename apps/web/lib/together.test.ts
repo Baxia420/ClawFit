@@ -282,13 +282,13 @@ describe("Together Dashboard web client and progress projections", () => {
     it("handles empty trend safely with zero averages", () => {
       const emptySummary = calculateTogetherTrendSummary([]);
       expect(emptySummary.loggedDaysCount).toBe(0);
-      expect(emptySummary.avgCalories).toBe(0);
-      expect(emptySummary.avgProteinG).toBe(0);
+      expect(emptySummary.avgCalories).toBeNull();
+      expect(emptySummary.avgProteinG).toBeNull();
 
       const undefinedSummary = calculateTogetherTrendSummary(undefined);
       expect(undefinedSummary.loggedDaysCount).toBe(0);
-      expect(undefinedSummary.avgCalories).toBe(0);
-      expect(undefinedSummary.avgProteinG).toBe(0);
+      expect(undefinedSummary.avgCalories).toBeNull();
+      expect(undefinedSummary.avgProteinG).toBeNull();
     });
 
     it("preserves privacy by exposing only display names and confirmed summaries", () => {

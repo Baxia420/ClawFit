@@ -526,12 +526,12 @@ sudo bash deploy/openclaw/redeploy.sh main
 ```
 
 The script executes:
-1. `git fetch origin && git checkout main && git pull --ff-only` (as user `clawfit`)
+1. Fetch and check out the approved branch, tag or commit detached (as user `clawfit`), refusing local changes.
 2. `pnpm install --frozen-lockfile` (as user `clawfit`)
-3. `pnpm build` (as user `clawfit`)
+3. Build the health core and database packages (as user `clawfit`).
 4. `pnpm openclaw:plugin:validate` (as user `clawfit`)
-5. `systemctl restart clawfit-openclaw` (as root)
-6. `systemctl status clawfit-openclaw` (as root)
+5. Stop the Gateway, repair only scoped state ownership, run setup/model configuration and the pre-restart checks. A fresh verified model report is required; no Gemini probes run automatically.
+6. Start the Gateway and run authenticated RPC/channel checks. A failed check stops the Gateway. Complete the separate live acceptance checks in section 18 before declaring success.
 
 All build outputs and repository files remain strictly owned by `clawfit:clawfit`.
 
@@ -573,3 +573,37 @@ Execute after live deployment with real WhatsApp accounts. Do not mark tests pas
 | **MAT-12** | VPS network isolation | `[PENDING]` | Port scan confirms only port 22/tcp is open inbound; OpenClaw has zero public inbound ports. |
 | **MAT-13** | Credential & config restoration | `[PENDING]` | Encrypted backup (`credentials/` + `openclaw.json`) restores onto clean host with `.env`, reconnecting to WhatsApp without QR. |
 | **MAT-14** | 24/7 autonomous uptime | `[PENDING]` | WhatsApp bot logs meals and replies while developer local PC is completely powered off. |
+
+
+## 18. Nutrition coverage and CIA gateway repair
+
+The nutrition dashboard retains strict unknown totals and shows known subtotals with a `+` and a missing-meal count. Rolling averages use only logged days with complete values for the selected nutrient and show the denominator. Unlogged dates remain gaps; they are not zero-intake days. Historic target comparisons use current user settings. No historical records are rewritten for these displays.
+
+### Verified gateway defects
+
+The repository previously added custom Google model rows without an explicit API or base URL. The pinned OpenClaw `2026.7.1-2` configured-model fallback can select `openai-responses` when transport metadata is absent. The corrected provider and each selected row specify `google-generative-ai` and Google's `v1beta` endpoint. The regression test resolves these rows through the installed pinned OpenClaw resolver without network access.
+
+Model IDs enter runtime configuration only after an authenticated smoke report verifies the model. `models:smoke` checks text generation, function calling, and image input, including the previously unprobed candidate. Probe failures and absent catalog entries are distinguished. General fallbacks use only verified low-cost candidates; nutrition primary/fallback are distinct verified image-capable Gemini candidates. No untested model is presumed usable. The report expires after seven days.
+
+`openclaw:setup` no longer registers models or sets nutrition-model defaults. The API requires explicit nutrition-model environment values; without a model, `/ready` reports the estimator as unconfigured. Gateway environment changes do not update Render. Check Render's existing `NUTRITION_MODEL_PRIMARY` and `NUTRITION_MODEL_FALLBACK` against `.model-smoke.json` separately; preserve existing values until evidence supports a change. API deployments for the nutrition dashboard do not justify rotating any secrets.
+
+### Upgrade an already paired CIA installation
+
+Do not rerun bootstrap, reinstall OpenClaw, pair WhatsApp again, reset credentials, or change UFW. Use the dedicated `clawfit` account for all OpenClaw and build commands. Stop the systemd service before changing its active authentication/configuration.
+
+1. Take the existing encrypted backup and note the current repository commit. Keep the protected environment backup local; never paste or commit it.
+2. Fetch and inspect the approved PR/commit. Build and validate the plugin as `clawfit`. `redeploy.sh` now accepts branches, tags and immutable commits without trying to `git pull` a detached SHA.
+3. Stop `clawfit-openclaw`, then run `sudo bash deploy/openclaw/repair-state.sh`. It fixes only the named service directories and root-owned files in main-agent/workspace trees. It does not rewrite secrets or WhatsApp credentials. For a different agent/state layout, inspect ownership and repair only that layout manually.
+4. Run `pnpm openclaw:setup` as `clawfit`. The existing configured token is preserved and synchronized into the protected Gateway environment. JSON auth and local-client references use `${OPENCLAW_GATEWAY_TOKEN}`. External secret providers or unresolved token references cause a refusal instead of credential replacement. Existing non-token authentication is not overwritten. Model configuration also preserves an existing Google provider credential; it adds an environment reference only when none is configured. The protected Gateway environment loads before repository development defaults. Required API credentials already present in the protected environment take precedence over repository values. A mode-0600 `.env.clawfit-backup` is saved once when changes are needed.
+5. If the old `.model-smoke.json` lacks image evidence, is absent, or is stale, run `pnpm models:smoke` explicitly as `clawfit`. This makes small real Google requests; it does not analyze historical meals. Then run `pnpm models:configure`.
+6. Run `pnpm openclaw:preflight --before-restart`, restart the systemd service, and run `pnpm openclaw:preflight` again. These check the pinned version, plugin/config validity, state access, Google routing, canonical auth, restrictions, API readiness, authenticated RPC and WhatsApp connection. Values and credentials are hidden. Deep API readiness intentionally wakes the database once; continue using `/health` for routine monitoring.
+7. Run `pnpm openclaw:preflight --live` once. This makes one real text-generation request through the Gateway, does not deliver a message, and rejects embedded fallback as proof of Gateway success.
+8. From each authorized WhatsApp account, request a read-only nutrition summary for a known historical date. Confirm the reply uses the health tool and correct user's data. Verify a permitted photo estimate remains a draft and never logs without confirmation. These are manual live acceptance checks; local automated tests do not prove them. Recheck after a service restart and after rerunning configuration.
+
+For a combined approved upgrade use `sudo bash deploy/openclaw/redeploy.sh` with the approved ref as its argument. It uses a fresh existing smoke report and never silently initiates Gemini probes. If a check fails after service stop, it reports the failure and does not declare the deployment successful. Complete checks before resuming live use.
+
+### Recovery
+
+Keep the old approved commit, encrypted state backup, and protected environment backup. If the upgrade fails, stop the Gateway, return the checkout to the previous commit, rebuild its plugin, and restore only the config/environment files changed by setup. Keep WhatsApp credentials and identity mappings intact. Restart and repeat authenticated RPC/channel checks. Do not print token values when comparing credentials.
+
+`messages.suppressToolErrors` is disabled so authorized health-tool failures are visible. It is not a fix for AI-provider authentication failures; routing and authentication must pass their own checks. Runtime, filesystem, browser and unrestricted web tools remain denied, and sender/group restrictions remain enabled.

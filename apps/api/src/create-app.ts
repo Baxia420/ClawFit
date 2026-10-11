@@ -554,6 +554,22 @@ export function createApp(options: CreateAppOptions) {
     const limit = listQuery.parse(request.query).limit;
     return options.repository.listRecentMeals(requireRequestUserId(request), limit);
   });
+  app.get("/v1/meals/history", async (request) => {
+    const query = z.object({
+      date: z.string().refine(isValidCalendarDate), days: z.coerce.number().int().min(1).max(365).default(30),
+      timezone: z.string().refine(isValidIanaTimezone).optional(),
+      limit: z.coerce.number().int().min(1).max(100).default(40), offset: z.coerce.number().int().min(0).max(100000).default(0),
+      search: z.string().trim().max(200).default(""),
+    }).parse(request.query);
+    const userId = requireRequestUserId(request);
+    const settings = await options.repository.getSettings(userId);
+    const timezone = query.timezone ?? settings.timezone;
+    const startDate = new Date(`${query.date}T12:00:00Z`);
+    startDate.setUTCDate(startDate.getUTCDate() - (query.days - 1));
+    const { start } = zonedDayRange(startDate.toISOString().slice(0, 10), timezone);
+    const { end } = zonedDayRange(query.date, timezone);
+    return options.repository.listMealHistory(userId, start, end, query.limit, query.offset, query.search);
+  });
   app.get("/v1/meals/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
     return options.repository.getMeal(requireRequestUserId(request), id);

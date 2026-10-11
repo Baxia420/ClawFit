@@ -25,15 +25,18 @@
     "nutrition:manual": "tsx scripts/manual-nutrition-test.ts",
     "nutrition:smoke": "tsx scripts/manual-nutrition-test.ts --verify-estimator",
     "identity:link": "tsx scripts/link-whatsapp-identity.ts",
-    "history:import": "node --import tsx scripts/import-reviewed-history.ts"
+    "history:import": "node --import tsx scripts/import-reviewed-history.ts",
+    "openclaw:preflight": "tsx scripts/openclaw-preflight.ts"
   },
   "devDependencies": {
     "@electric-sql/pglite": "latest",
     "@types/node": "latest",
     "dotenv": "latest",
+    "json5": "2.2.3",
     "oxlint": "latest",
     "tsx": "latest",
     "typescript": "latest",
-    "vitest": "latest"
+    "vitest": "latest",
+    "zod": "4.4.3"
   }
 }

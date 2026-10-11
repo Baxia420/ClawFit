@@ -1,11 +1,12 @@
+import { nutritionCoverage, type NutritionCoverage } from "@clawfit/health-core";
 import { AskLauncher } from "../components/AskLauncher";
 import { MealList } from "../components/MealList";
 import { Metric } from "../components/Metric";
 import { healthApi, localDate, type Meal, type Settings, type Workout } from "../lib/api";
 import { auth } from "../auth";
-import { calculateDailyProgress } from "../lib/dashboard";
+import { calculateDailyProgress, recordedMetric } from "../lib/dashboard";
 
-type Daily = { totals: { caloriesBest: number | null; caloriesLow: number | null; caloriesHigh: number | null; proteinG: number | null; carbsG: number | null; fatG: number | null }; meals: Meal[] };
+type Daily = { totals: { caloriesBest: number | null; caloriesLow: number | null; caloriesHigh: number | null; proteinG: number | null; carbsG: number | null; fatG: number | null }; coverage?: NutritionCoverage; meals: Meal[] };
 
 export const dynamic = "force-dynamic";
 
@@ -59,7 +60,12 @@ export default async function TodayPage() {
   const totals = daily.totals;
   const target = settings.calorieTarget;
   const proteinTarget = settings.proteinTargetG;
-  const progress = calculateDailyProgress(totals, settings);
+  const coverage = daily.coverage ?? nutritionCoverage(daily.meals.map(meal => ({ ...meal, fiberG: meal.fiberG ?? null })));
+  const progress = calculateDailyProgress(totals, settings, coverage);
+  const energy = recordedMetric(totals.caloriesBest, "caloriesBest", "calories", coverage);
+  const protein = recordedMetric(totals.proteinG, "proteinG", "protein", coverage);
+  const carbs = recordedMetric(totals.carbsG, "carbsG", "carbs", coverage);
+  const fat = recordedMetric(totals.fatG, "fatG", "fat", coverage);
 
   return (
     <div className="page">
@@ -71,25 +77,25 @@ export default async function TodayPage() {
         <div className="header-code">TARGET / {target} KCAL<br />PROTEIN / {proteinTarget}G</div>
       </header>
       <section className="metric-grid" aria-label="Daily nutrition summary">
-        <Metric label="ENERGY / BEST" value={formatNutrition(totals.caloriesBest)} unit="kcal" accent hint={progress.calorieHint} />
-        <Metric label="UNCERTAINTY" value={`${formatNutrition(totals.caloriesLow)}–${formatNutrition(totals.caloriesHigh)}`} unit="kcal" />
-        <Metric label="PROTEIN" value={formatNutrition(totals.proteinG)} unit="g" hint={progress.proteinHint} />
-        <Metric label="CARBS / FAT" value={`${formatNutrition(totals.carbsG)} / ${formatNutrition(totals.fatG)}`} unit="g" />
+        <Metric label="ENERGY / BEST" value={energy.value} unit="kcal" accent hint={energy.status === "complete" ? progress.calorieHint : energy.hint} />
+        <Metric label="UNCERTAINTY" value={coverage.mealCount === 0 ? "—" : `${formatNutrition(totals.caloriesLow)}–${formatNutrition(totals.caloriesHigh)}`} unit="kcal" />
+        <Metric label="PROTEIN" value={protein.value} unit="g" hint={protein.status === "complete" ? progress.proteinHint : protein.hint} />
+        <Metric label="CARBS / FAT" value={`${carbs.value} / ${fat.value}`} unit="g" hint={carbs.status === "partial" || fat.status === "partial" ? "Partial recorded macros · + means more is unknown" : ""} />
       </section>
       <section className="today-control" aria-label="Daily progress and quick actions">
         <div className="progress-block">
           <div>
-            <span>ENERGY / {progress.caloriePct}%</span>
-            <strong>{formatNutrition(totals.caloriesBest)} / {target}</strong>
+            <span>ENERGY / {progress.caloriePct === null ? energy.status === "empty" ? "NO LOGS" : "INCOMPLETE" : `${progress.caloriePct}%`}</span>
+            <strong>{energy.value} / {target}</strong>
           </div>
-          <i><b style={{ width: `${progress.calorieBarWidth}%` }} /></i>
+          <i className={energy.status === "partial" ? "incomplete-track" : ""}><b style={{ width: `${progress.calorieBarWidth}%` }} /></i>
         </div>
         <div className="progress-block">
           <div>
-            <span>PROTEIN / {progress.proteinPct}%</span>
-            <strong>{formatNutrition(totals.proteinG)} / {proteinTarget} G</strong>
+            <span>PROTEIN / {progress.proteinPct === null ? protein.status === "empty" ? "NO LOGS" : "INCOMPLETE" : `${progress.proteinPct}%`}</span>
+            <strong>{protein.value} / {proteinTarget} G</strong>
           </div>
-          <i><b style={{ width: `${progress.proteinBarWidth}%` }} /></i>
+          <i className={protein.status === "partial" ? "incomplete-track" : ""}><b style={{ width: `${progress.proteinBarWidth}%` }} /></i>
         </div>
         <div className="quick-actions">
           <AskLauncher label="LOG A MEAL" prompt="I ate " />
@@ -108,7 +114,7 @@ export default async function TodayPage() {
         <section className="panel workout-now">
           <div className="panel-title">
             <span>02 / ACTIVE WORKOUT</span>
-            <strong>{active ? active.workout.status : "offline"}</strong>
+            <strong>{active ? active.workout.status : "no active workout"}</strong>
           </div>
           {active ? (
             <>

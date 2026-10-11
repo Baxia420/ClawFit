@@ -263,6 +263,16 @@ export const togetherTrendPointSchema = z.object({
   proteinG: z.number().nullable(),
 });
 
+const nutritionNumbersSchema = z.object({
+  caloriesBest: z.number().nonnegative(), caloriesLow: z.number().nonnegative(), caloriesHigh: z.number().nonnegative(),
+  proteinG: z.number().nonnegative(), carbsG: z.number().nonnegative(), fatG: z.number().nonnegative(), fiberG: z.number().nonnegative(),
+});
+export const nutritionCoverageSchema = z.object({
+  mealCount: z.number().int().nonnegative(),
+  knownTotals: nutritionNumbersSchema,
+  missingCounts: nutritionNumbersSchema,
+});
+
 export const togetherMemberProgressSchema = z.object({
   userId: z.string().min(1),
   displayName: z.string(),
@@ -276,6 +286,7 @@ export const togetherMemberProgressSchema = z.object({
     calories: z.number().nullable(),
     proteinG: z.number().nullable(),
     mealCount: z.number(),
+    coverage: nutritionCoverageSchema.optional(),
     meals: z.array(togetherMealSummarySchema),
     workouts: z.array(togetherWorkoutSummarySchema),
   }),

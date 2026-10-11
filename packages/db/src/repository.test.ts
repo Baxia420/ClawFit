@@ -69,6 +69,35 @@ describe("HealthRepository", () => {
     expect((await repository.getMeal(primaryUserId, created!.id)).caloriesBest).toBe(500);
   });
 
+  it("browses scoped history with local date boundaries, literal search and deterministic pagination", async () => {
+    await repository.createMeal(primaryUserId, { ...baseMeal, label: "Rice 100%", occurredAt: new Date("2026-09-10T16:30:00Z"), idempotencyKey: "history-a" });
+    await repository.createMeal(primaryUserId, { ...baseMeal, label: "Rice 100%", occurredAt: new Date("2026-09-11T01:00:00Z"), idempotencyKey: "history-b" });
+    await repository.createMeal(primaryUserId, { ...baseMeal, label: "Other rice", occurredAt: new Date("2026-09-11T02:00:00Z"), idempotencyKey: "history-c" });
+    await repository.createMeal(DEFAULT_PARTNER_USER_ID, { ...baseMeal, label: "Rice 100%", occurredAt: new Date("2026-09-11T02:00:00Z"), idempotencyKey: "history-partner" });
+    const start = new Date("2026-09-10T16:00:00Z"), end = new Date("2026-09-11T16:00:00Z");
+    const first = await repository.listMealHistory(primaryUserId, start, end, 1, 0, "100%");
+    const second = await repository.listMealHistory(primaryUserId, start, end, 1, 1, "100%");
+    expect(first.total).toBe(2);
+    expect(first.meals).toHaveLength(1);
+    expect(second.meals).toHaveLength(1);
+    expect(first.meals[0]?.id).not.toBe(second.meals[0]?.id);
+    expect(first.meals[0]?.userId).toBe(primaryUserId);
+    expect(await repository.listMealHistory(primaryUserId, end, new Date("2026-09-12T16:00:00Z"), 40, 0, "")).toMatchObject({ total: 0, meals: [] });
+  });
+
+  it("returns partial coverage from SQL and daily queries while retaining strict null totals", async () => {
+    const created = await repository.createMeal(primaryUserId, baseMeal);
+    const unknown = await repository.createMeal(primaryUserId, { ...baseMeal, idempotencyKey: "coverage-unknown" });
+    await pg.query("UPDATE meals SET protein_g = NULL WHERE id = $1", [unknown!.id]);
+    const start = new Date("2026-08-14T00:00:00Z"), end = new Date("2026-08-15T00:00:00Z");
+    const daily = await repository.dailyNutrition(primaryUserId, start, end);
+    expect(daily.totals.proteinG).toBeNull();
+    expect(daily.coverage.knownTotals.proteinG).toBe(created!.proteinG);
+    expect(daily.coverage.missingCounts.proteinG).toBe(1);
+    const trend = await repository.nutritionTrend(primaryUserId, start, end);
+    expect(trend[0]).toMatchObject({ protein_g: null, known_protein: 30, missing_protein: 1, meal_count: 2 });
+  });
+
   it("calculates daily totals", async () => {
     await repository.createMeal(primaryUserId, baseMeal);
     await repository.createMeal(primaryUserId, { ...baseMeal, calories: { best: 300, low: 250, high: 350 }, idempotencyKey: "meal-request-002" });
@@ -175,7 +204,7 @@ describe("HealthRepository", () => {
     const trendA = await repository.nutritionTrend(userA, windowStart, windowEnd, timezone);
 
     expect(trendA).toHaveLength(3);
-    expect(trendA).toEqual([
+    expect(trendA.map(({day, calories_best, calories_low, calories_high, protein_g}) => ({day, calories_best, calories_low, calories_high, protein_g}))).toEqual([
       { day: "2026-09-05", calories_best: 200, calories_low: 180, calories_high: 220, protein_g: 30 },
       { day: "2026-09-10", calories_best: 300, calories_low: 270, calories_high: 330, protein_g: 30 },
       { day: "2026-09-11", calories_best: 300, calories_low: 270, calories_high: 330, protein_g: 30 },
@@ -184,7 +213,7 @@ describe("HealthRepository", () => {
     // 3. Verify user isolation holds in trend
     const trendB = await repository.nutritionTrend(userB, windowStart, windowEnd, timezone);
     expect(trendB).toHaveLength(2);
-    expect(trendB).toEqual([
+    expect(trendB.map(({day, calories_best, calories_low, calories_high, protein_g}) => ({day, calories_best, calories_low, calories_high, protein_g}))).toEqual([
       { day: "2026-09-10", calories_best: 500, calories_low: 450, calories_high: 550, protein_g: 30 },
       { day: "2026-09-11", calories_best: 500, calories_low: 450, calories_high: 550, protein_g: 30 },
     ]);

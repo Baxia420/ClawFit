@@ -1,6 +1,6 @@
 import type { TogetherMemberProgress } from "../lib/api";
 import { formatLocalTime } from "../lib/api";
-import { calculateTogetherMemberProgress } from "../lib/dashboard";
+import { calculateTogetherMemberProgress, recordedMetric } from "../lib/dashboard";
 
 interface TogetherMemberPanelProps {
   member: TogetherMemberProgress;
@@ -15,7 +15,11 @@ export function TogetherMemberPanel({ member, timeZone, trendDays }: TogetherMem
     member.goals.proteinTargetG,
     member.daily.proteinG,
     member.trend,
+    member.daily.coverage,
   );
+
+  const calories = recordedMetric(member.daily.calories, "caloriesBest", "calories", member.daily.coverage);
+  const protein = recordedMetric(member.daily.proteinG, "proteinG", "protein", member.daily.coverage);
 
   return (
     <div className="together-member-card">
@@ -42,21 +46,21 @@ export function TogetherMemberPanel({ member, timeZone, trendDays }: TogetherMem
           <div className="together-metric-row">
             <span className="eyebrow">Calories</span>
             <strong>
-              {calc.caloriesConsumed ?? "Unknown"} <small>/ {calc.calorieTarget} kcal</small>
+              {calories.value} <small>/ {calc.calorieTarget} kcal</small>
             </strong>
           </div>
           <div
-            className="together-bar-track"
+            className={`together-bar-track ${calories.status === "partial" ? "incomplete-track" : ""}`}
             role="progressbar"
             aria-valuenow={calc.calorieAriaValueNow}
             aria-valuemin={calc.calorieAriaValueMin}
             aria-valuemax={calc.calorieAriaValueMax}
-            aria-valuetext={calc.calorieAccessibleText}
+            aria-valuetext={calories.status === "complete" ? calc.calorieAccessibleText : `${calories.value} kcal recorded; ${calories.hint}`}
           >
             <div className="together-bar-fill calories" style={{ width: `${calc.calorieBoundedBar}%` }} />
           </div>
           <p className="together-metric-note">
-            {calc.calorieDiff === null ? (<span>{calc.calorieHint}</span>) : calc.calorieDiff > 0 ? (
+            {calc.calorieDiff === null ? (<span>{calories.hint}</span>) : calc.calorieDiff > 0 ? (
               <span><strong>{calc.calorieDiff} kcal</strong> remaining</span>
             ) : calc.calorieDiff === 0 ? (
               <span>Target reached</span>
@@ -70,29 +74,30 @@ export function TogetherMemberPanel({ member, timeZone, trendDays }: TogetherMem
           <div className="together-metric-row">
             <span className="eyebrow">Protein</span>
             <strong>
-              {calc.proteinConsumed ?? "Unknown"} <small>/ {calc.proteinTarget} g</small>
+              {protein.value} <small>/ {calc.proteinTarget} g</small>
             </strong>
           </div>
           <div
-            className="together-bar-track"
+            className={`together-bar-track ${protein.status === "partial" ? "incomplete-track" : ""}`}
             role="progressbar"
             aria-valuenow={calc.proteinAriaValueNow}
             aria-valuemin={calc.proteinAriaValueMin}
             aria-valuemax={calc.proteinAriaValueMax}
-            aria-valuetext={calc.proteinAccessibleText}
+            aria-valuetext={protein.status === "complete" ? calc.proteinAccessibleText : `${protein.value} g recorded; ${protein.hint}`}
           >
             <div className="together-bar-fill protein" style={{ width: `${calc.proteinBoundedBar}%` }} />
           </div>
           <p className="together-metric-note">
-            {calc.proteinDiff === null ? (<span>{calc.proteinHint}</span>) : calc.proteinDiff > 0 ? (
+            {calc.proteinDiff === null ? (<span>{protein.hint}</span>) : calc.proteinDiff > 0 ? (
               <span><strong>{calc.proteinDiff} g</strong> remaining</span>
             ) : (
-              <span>Target met ({calc.proteinConsumed ?? "Unknown"} g)</span>
+              <span>Target met ({protein.value} g)</span>
             )}
           </p>
         </div>
       </section>
 
+      {(calories.status === "partial" || protein.status === "partial") && <p className="coverage-note">+ shows a known subtotal. Meals with missing values are not counted as zero.</p>}
       {/* Confirmed Meals Section */}
       <section className="together-feed-section" aria-label={`Confirmed meals for ${member.displayName}`}>
         <h3 className="together-feed-title">
@@ -166,15 +171,16 @@ export function TogetherMemberPanel({ member, timeZone, trendDays }: TogetherMem
             <span className="eyebrow">{trendDays}D Trend Summary</span>
             <small>{calc.trendSummary.loggedDaysCount} of {trendDays} days logged</small>
           </div>
+          <p className="coverage-note">Averages use logged days with complete recorded values for each nutrient. Goals shown above are your current goals.</p>
           {calc.trendSummary.loggedDaysCount > 0 ? (
             <div className="together-trend-stats">
               <div>
                 <strong>{calc.trendSummary.avgCalories ?? "Unknown"}</strong>
-                <span>kcal/day avg</span>
+                <span>kcal/day avg · {calc.trendSummary.completeCalorieDays}/{calc.trendSummary.loggedDaysCount} logged days complete</span>
               </div>
               <div>
                 <strong>{calc.trendSummary.avgProteinG === null ? "Unknown" : `${calc.trendSummary.avgProteinG}g`}</strong>
-                <span>protein/day avg</span>
+                <span>protein/day avg · {calc.trendSummary.completeProteinDays}/{calc.trendSummary.loggedDaysCount} logged days complete</span>
               </div>
             </div>
           ) : (
