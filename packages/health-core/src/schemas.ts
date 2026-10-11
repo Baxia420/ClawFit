@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { muscleGroupSchema } from "./training.js";
 
 export const confidenceSchema = z.enum(["high", "medium", "low"]);
 const timezoneSchema = z.string().min(1).max(100).refine((value) => {
@@ -67,12 +68,14 @@ export const mealPatchSchema = z.object({
 });
 
 export const startWorkoutSchema = z.object({
+  routineId: z.string().uuid().optional(),
   name: z.string().min(1).max(120),
   startedAt: z.coerce.date().optional(),
   idempotencyKey: z.string().min(8).max(200),
 });
 
 export const workoutSetInputSchema = z.object({
+  muscleGroup: muscleGroupSchema.optional(),
   exerciseName: z.string().min(1).max(160),
   weightKg: z.number().nonnegative().max(1_000).nullable(),
   reps: z.number().int().positive().max(1_000),

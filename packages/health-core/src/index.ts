@@ -4,3 +4,5 @@ export * from "./nutrition.js";
 export * from "./schemas.js";
 
 export * from "./historical-data.js";
+
+export * from "./training.js";

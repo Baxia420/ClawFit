@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import Fastify, { type FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
 import {
+  routineCreateSchema, routineUpdateSchema, scheduleInputSchema, trainingDateSchema, weightEntrySchema, weightGoalSchema,
   confirmPendingMealSchema,
   foodPresetPatchSchema,
   getZonedCalendarDate,
@@ -684,9 +685,49 @@ export function createApp(options: CreateAppOptions) {
     return options.repository.deletePreset(requireRequestUserId(request), id);
   });
 
+  const trainingWindow = async (request: FastifyRequest) => {
+    const query = z.object({ date: trainingDateSchema.optional(), days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query);
+    const userId = requireRequestUserId(request);
+    const settings = await options.repository.getSettings(userId);
+    const date = query.date ?? getZonedCalendarDate(new Date(), settings.timezone);
+    const first = new Date(`${date}T12:00:00Z`); first.setUTCDate(first.getUTCDate() - query.days + 1);
+    const startDay = first.toISOString().slice(0, 10);
+    const { start } = zonedDayRange(startDay, settings.timezone);
+    const { end } = zonedDayRange(date, settings.timezone);
+    const next = new Date(`${date}T12:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
+    return { userId, timezone: settings.timezone, start, end, startDay, endDay: next.toISOString().slice(0, 10) };
+  };
+  app.get("/v1/training/plans", async request => {
+    const userId = requireRequestUserId(request);
+    const [routines, schedule] = await Promise.all([options.repository.listRoutines(userId), options.repository.getSchedule(userId)]);
+    return { routines, schedule };
+  });
+  app.post("/v1/training/routines", async (request, reply) => reply.code(201).send(await options.repository.saveRoutine(requireRequestUserId(request), routineCreateSchema.parse(request.body))));
+  app.put("/v1/training/routines/:id", async request => options.repository.updateRoutine(requireRequestUserId(request), uuidParam.parse(request.params).id, routineUpdateSchema.parse(request.body)));
+  app.put("/v1/training/schedule/:weekday", async request => {
+    const weekday = z.coerce.number().int().min(1).max(7).parse((request.params as { weekday: string }).weekday);
+    return options.repository.setScheduleDay(requireRequestUserId(request), weekday, scheduleInputSchema.parse(request.body).routineId);
+  });
+  app.get("/v1/training/stats", async request => {
+    const window = await trainingWindow(request);
+    return options.repository.trainingStats(window.userId, window.start, window.end, window.timezone);
+  });
+  app.get("/v1/training/weight", async request => {
+    const window = await trainingWindow(request);
+    return options.repository.weightHistory(window.userId, window.startDay, window.endDay);
+  });
+  app.put("/v1/training/weight/goal", async request => options.repository.setWeightGoal(requireRequestUserId(request), weightGoalSchema.parse(request.body).goalKg));
+  app.put("/v1/training/weight/:day", async request => {
+    const day = trainingDateSchema.parse((request.params as { day: string }).day);
+    const userId = requireRequestUserId(request);
+    const settings = await options.repository.getSettings(userId);
+    if (day > getZonedCalendarDate(new Date(), settings.timezone)) throw new ConflictError("A weigh-in cannot be in the future");
+    return options.repository.saveWeight(userId, day, weightEntrySchema.parse(request.body));
+  });
+
   app.post("/v1/workouts", async (request, reply) => {
     const body = startWorkoutSchema.parse(request.body);
-    const payload = { name: body.name, idempotencyKey: body.idempotencyKey, ...(body.startedAt ? { startedAt: body.startedAt } : {}) };
+    const payload = { ...(body.routineId ? { routineId: body.routineId } : {}), name: body.name, idempotencyKey: body.idempotencyKey, ...(body.startedAt ? { startedAt: body.startedAt } : {}) };
     return reply.code(201).send(await options.repository.startWorkout(requireRequestUserId(request), payload));
   });
   app.get("/v1/workouts/active", async (request) => {

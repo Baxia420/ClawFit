@@ -143,8 +143,8 @@ export type Meal = {
 };
 
 export type Workout = {
-  workout: { id: string; name: string; status: string; startedAt: string; finishedAt: string | null };
-  exercises: { id: string; name: string; sets: { id: string; setNumber: number; weightKg: number | null; reps: number; estimatedOneRepMax: number | null }[] }[];
+  workout: { id: string; name: string; routineSnapshot?: import("@clawfit/health-core").RoutineSnapshot | null; status: string; startedAt: string; finishedAt: string | null };
+  exercises: { id: string; name: string; muscleGroup?: import("@clawfit/health-core").MuscleGroup | null; sets: { id: string; setNumber: number; weightKg: number | null; reps: number; estimatedOneRepMax: number | null }[] }[];
   volumeKg: number;
   setCount: number;
 };

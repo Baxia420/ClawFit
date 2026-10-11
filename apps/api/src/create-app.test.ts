@@ -34,6 +34,32 @@ describe("Health API", () => {
   beforeAll(async () => {
     validWebAssertion = await makeWebAssertion();
   });
+  it("binds training windows and weigh-in writes to the authenticated owner and GMT+8", async () => {
+    const scoped = { getUser: vi.fn().mockResolvedValue({ id: DEFAULT_PRIMARY_USER_ID, active: true }), getSettings: vi.fn().mockResolvedValue({ timezone: "Asia/Kuala_Lumpur" }), trainingStats: vi.fn().mockResolvedValue({}), weightHistory: vi.fn().mockResolvedValue({ entries: [] }), saveWeight: vi.fn().mockResolvedValue({}), setWeightGoal: vi.fn().mockResolvedValue({}) } as unknown as HealthRepository;
+    const app = createApp({ repository: scoped, webToken, openclawToken, assertionSecret, logger: false });
+    const headers = { authorization: `Bearer ${validWebAssertion}` };
+    expect((await app.inject({ method: "GET", url: `/v1/training/stats?date=2026-10-02&days=7&userId=${DEFAULT_PARTNER_USER_ID}`, headers })).statusCode).toBe(200);
+    expect(scoped.trainingStats).toHaveBeenCalledWith(DEFAULT_PRIMARY_USER_ID, new Date("2026-09-25T16:00Z"), new Date("2026-10-02T16:00Z"), "Asia/Kuala_Lumpur");
+    expect((await app.inject({ method: "GET", url: "/v1/training/weight?date=2026-10-02&days=7", headers })).statusCode).toBe(200);
+    expect(scoped.weightHistory).toHaveBeenCalledWith(DEFAULT_PRIMARY_USER_ID, "2026-09-26", "2026-10-03");
+    expect((await app.inject({ method: "PUT", url: "/v1/training/weight/2026-09-26", headers, payload: { weightKg: 75, notes: "Corrected", userId: DEFAULT_PARTNER_USER_ID } })).statusCode).toBe(200);
+    expect(scoped.saveWeight).toHaveBeenCalledWith(DEFAULT_PRIMARY_USER_ID, "2026-09-26", { weightKg: 75, notes: "Corrected" });
+    expect((await app.inject({ method: "PUT", url: "/v1/training/weight/goal", headers, payload: { goalKg: null } })).statusCode).toBe(200);
+    expect(scoped.setWeightGoal).toHaveBeenCalledWith(DEFAULT_PRIMARY_USER_ID, null);
+    await app.close();
+  });
+  it("rejects invalid training inputs before persistence", async () => {
+    const scoped = { getUser: vi.fn().mockResolvedValue({ id: DEFAULT_PRIMARY_USER_ID, active: true }), getSettings: vi.fn().mockResolvedValue({ timezone: "Asia/Kuala_Lumpur" }), trainingStats: vi.fn(), saveWeight: vi.fn(), saveRoutine: vi.fn(), setScheduleDay: vi.fn() } as unknown as HealthRepository;
+    const app = createApp({ repository: scoped, webToken, openclawToken, assertionSecret, logger: false });
+    const headers = { authorization: `Bearer ${validWebAssertion}` };
+    for (const url of ["/v1/training/stats?date=2026-02-30", "/v1/training/stats?days=366"]) expect((await app.inject({ method: "GET", url, headers })).statusCode).toBe(400);
+    for (const [url,payload] of [["/v1/training/weight/2026-02-30", { weightKg: 75 }], ["/v1/training/weight/2026-09-26", { weightKg: -1 }], ["/v1/training/schedule/8", { routineId: null }]] as const) expect((await app.inject({ method: "PUT", url, headers, payload })).statusCode).toBe(400);
+    expect((await app.inject({ method: "PUT", url: "/v1/training/weight/2099-01-01", headers, payload: { weightKg: 75 } })).statusCode).toBe(409);
+    expect((await app.inject({ method: "POST", url: "/v1/training/routines", headers, payload: { name: "Empty", exercises: [], idempotencyKey: "invalid-routine" } })).statusCode).toBe(400);
+    expect(scoped.trainingStats).not.toHaveBeenCalled(); expect(scoped.saveWeight).not.toHaveBeenCalled(); expect(scoped.setScheduleDay).not.toHaveBeenCalled(); expect(scoped.saveRoutine).not.toHaveBeenCalled();
+    expect((await app.inject({ method: "GET", url: "/v1/training/plans" })).statusCode).toBe(401);
+    await app.close();
+  });
   it("binds meal-history pagination and search to the authenticated user and GMT+8 calendar window", async () => {
     const scoped = { getUser: vi.fn().mockResolvedValue({ id: DEFAULT_PRIMARY_USER_ID, active: true }), getSettings: vi.fn().mockResolvedValue({timezone:"Asia/Kuala_Lumpur"}), listMealHistory: vi.fn().mockResolvedValue({ meals: [], total: 0, limit: 40, offset: 40 }) } as unknown as HealthRepository;
     const app = createApp({ repository: scoped, webToken, openclawToken, assertionSecret, logger: false });
