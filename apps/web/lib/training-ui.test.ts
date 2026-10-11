@@ -22,6 +22,14 @@ describe("training views", () => {
     expect(weight).toContain("Needs two weigh-ins");
     expect(weight).toContain("Saving that day again corrects its existing entry");
   });
+  it("prefills routine reps on resume and allows leaving a session with no logged sets", () => {
+    const target = { name: "Bench press", muscleGroup: "chest" as const, sets: 3, reps: 12, restSeconds: 90 };
+    const active = { workout: { id: "workout-id", name: "Push", status: "active", startedAt: "2026-10-11T01:00:00Z", finishedAt: null, routineSnapshot: { routineId: "routine-id", name: "Push", exercises: [target] } }, exercises: [{ id: "exercise-id", name: "Bench press", muscleGroup: "chest" as const, sets: [] }], volumeKg: 0, setCount: 0 };
+    const html = renderToStaticMarkup(createElement(TrainingHub, { ...base, active }));
+    expect(html).toContain('value="12"');
+    expect(html).toContain("target 12 reps");
+    expect(html.match(/<button[^>]*>Finish workout<\/button>/)?.[0]).not.toContain("disabled");
+  });
   it("makes each muscle keyboard accessible and identifies the count as primary-muscle sets", () => {
     const counts = Object.fromEntries(muscleGroups.map(m => [m, m === "chest" ? 7 : 0])) as Record<MuscleGroup,number>;
     const html = renderToStaticMarkup(createElement(MuscleCoverage, { counts }));

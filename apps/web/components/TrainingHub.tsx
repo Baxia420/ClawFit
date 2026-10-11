@@ -37,8 +37,9 @@ export function TrainingHub(props: Props) {
   const [routineName, setRoutineName] = useState(""), [routineExercises, setRoutineExercises] = useState<RoutineExercise[]>([blankExercise()]);
   const [weighDay, setWeighDay] = useState(today), [weighKg, setWeighKg] = useState(""), [weighNotes, setWeighNotes] = useState("");
   const [goalKg, setGoalKg] = useState(weight?.goalKg?.toString() ?? "");
+  useEffect(() => { setGoalKg(weight?.goalKg?.toString() ?? ""); }, [weight?.goalKg]);
   const [exerciseName, setExerciseName] = useState(active?.exercises[0]?.name ?? ""), [muscle, setMuscle] = useState<MuscleGroup>(active?.exercises[0]?.muscleGroup ?? "other");
-  const [loadKg, setLoadKg] = useState(""), [bodyweight, setBodyweight] = useState(false), [reps, setReps] = useState("8");
+  const [loadKg, setLoadKg] = useState(""), [bodyweight, setBodyweight] = useState(false), [reps, setReps] = useState(String(active?.workout.routineSnapshot?.exercises[0]?.reps ?? 8));
   const [editSetId, setEditSetId] = useState<string | null>(null);
   const [restUntil, setRestUntil] = useState<number | null>(null), [restRemaining, setRestRemaining] = useState(0);
   const [previous, setPrevious] = useState<{ sets: { weightKg: number | null; reps: number }[] } | null>(null);
