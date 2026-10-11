@@ -1,17 +1,25 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadClawFitEnv } from "./load-env.js";
 import { getOpenClawJson, runOpenClaw } from "./openclaw-cli.js";
 
+import { syncGatewayEnvironment } from "./gateway-state.js";
+import { parseAllowlist, OPENCLAW_VERSION } from "./openclaw-configuration.js";
+
 loadClawFitEnv();
+const version = runOpenClaw(["--version"], { capture: true }).stdout?.toString() ?? "";
+if (!version.includes(OPENCLAW_VERSION)) throw new Error(`Setup is verified for OpenClaw ${OPENCLAW_VERSION}.`);
 const healthTools = await loadHealthTools();
-await syncGatewayEnv();
+await syncGatewayEnvironment();
+const whatsappAllowFrom = parseAllowlist(process.env.CLAWFIT_WHATSAPP_ALLOW_FROM, "senders");
+const allowedGroupIds = parseAllowlist(process.env.CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS, "groups");
 
 // Explicit local gateway configuration (loopback only)
 run("config", "set", "gateway.mode", "local");
 run("config", "set", "gateway.bind", "loopback");
+run("config", "set", "gateway.auth", JSON.stringify({ mode: "token", token: "${OPENCLAW_GATEWAY_TOKEN}" }), "--strict-json", "--merge");
+run("config", "set", "gateway.remote.token", "${OPENCLAW_GATEWAY_TOKEN}");
 
 const pluginPath = resolve("packages/openclaw-health");
 const loadPaths = getOpenClawJson<string[]>("plugins.load.paths") ?? [];
@@ -34,40 +42,11 @@ run("config", "set", "session.reset.mode", "idle");
 run("config", "set", "session.reset.idleMinutes", "60", "--strict-json");
 run("config", "set", "session.resetByType.direct", JSON.stringify({ mode: "idle", idleMinutes: 60 }), "--strict-json");
 run("config", "set", "agents.defaults.compaction", JSON.stringify({ mode: "safeguard", reserveTokens: 8192, keepRecentTokens: 4096, maxHistoryShare: 0.5, notifyUser: false }), "--strict-json");
-run("config", "set", "messages.suppressToolErrors", "true", "--strict-json");
+run("config", "set", "messages.suppressToolErrors", "false", "--strict-json");
 run("config", "set", "messages.inbound.debounceMs", "2000", "--strict-json");
 run("config", "set", "channels.whatsapp.debounceMs", "2000", "--strict-json");
 
-const googleProviderModels = [
-  {
-    id: "gemini-3.5-flash-lite",
-    name: "Gemini 3.5 Flash Lite",
-    reasoning: true,
-    input: ["text", "image"],
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  },
-  {
-    id: "gemini-3.7-flash",
-    name: "Gemini 3.7 Flash",
-    reasoning: true,
-    input: ["text", "image"],
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  },
-  {
-    id: "gemini-3.8-flash",
-    name: "Gemini 3.8 Flash",
-    reasoning: true,
-    input: ["text", "image"],
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  },
-];
-run("config", "set", "models.providers.google.models", JSON.stringify(googleProviderModels), "--strict-json");
-
-const whatsappAllowFrom = parseWhatsAppAllowFrom(process.env.CLAWFIT_WHATSAPP_ALLOW_FROM);
-const allowedGroupIds = parseWhatsAppAllowedGroupIds(process.env.CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS);
+// Model registration belongs exclusively to models:configure after live smoke verification.
 
 if (whatsappAllowFrom.length > 0) {
   run("config", "set", "channels.whatsapp.dmPolicy", "allowlist");
@@ -86,6 +65,7 @@ if (whatsappAllowFrom.length > 0) {
   console.warn("CLAWFIT_WHATSAPP_ALLOW_FROM is not set; existing WhatsApp sender policy was left unchanged.");
 }
 
+run("config", "validate");
 console.log("ClawFit plugin, least-privilege tool policy, and session hygiene configured. Restart the Gateway after model configuration.");
 
 
@@ -100,56 +80,4 @@ async function loadHealthTools() {
     throw new Error("openclaw/policy.json must define a non-empty healthTools string array");
   }
   return parsed.healthTools as string[];
-}
-
-function parseWhatsAppAllowFrom(value: string | undefined) {
-  if (!value?.trim()) return [];
-  const entries = value.trim().startsWith("[") ? JSON.parse(value) as unknown : value.split(",").map((entry) => entry.trim());
-  if (!Array.isArray(entries) || entries.some((entry) => typeof entry !== "string" || !/^\+\d{8,15}$/.test(entry))) {
-    throw new Error("CLAWFIT_WHATSAPP_ALLOW_FROM must be a comma-separated list or JSON array of E.164 phone numbers");
-  }
-  return [...new Set(entries as string[])];
-}
-
-function parseWhatsAppAllowedGroupIds(value: string | undefined): string[] {
-  if (!value?.trim()) return [];
-  const entries = value.trim().startsWith("[") ? (JSON.parse(value) as unknown) : value.split(",").map((entry) => entry.trim());
-  if (!Array.isArray(entries) || entries.some((entry) => typeof entry !== "string" || !entry)) {
-    throw new Error("CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS must be a comma-separated list or JSON array of WhatsApp group JIDs (e.g. 12345-6789@g.us)");
-  }
-  return [...new Set(entries as string[])];
-}
-
-async function syncGatewayEnv() {
-  const requiredVars = ["GEMINI_API_KEY", "HEALTH_API_OPENCLAW_TOKEN", "HEALTH_API_URL"] as const;
-  const optionalVars = ["CLAWFIT_WHATSAPP_ALLOW_FROM", "CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS", "NUTRITION_MODEL_PRIMARY", "NUTRITION_MODEL_FALLBACK"] as const;
-
-  const missing = requiredVars.filter((name) => !process.env[name]);
-  if (missing.length > 0) throw new Error(`Missing required project environment variables: ${missing.join(", ")}`);
-
-  const gatewayEnvPath = resolve(homedir(), ".openclaw", ".env");
-  let content = "";
-  try {
-    content = await readFile(gatewayEnvPath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-
-  const lines = content ? content.replace(/\r\n/g, "\n").split("\n") : [];
-  const defaults: Record<string, string> = {
-    NUTRITION_MODEL_PRIMARY: "gemini-3.8-flash",
-    NUTRITION_MODEL_FALLBACK: "gemini-3.7-flash",
-  };
-  for (const name of [...requiredVars, ...optionalVars]) {
-    const value = process.env[name] ?? defaults[name];
-    if (value === undefined) continue;
-    const replacement = `${name}=${value}`;
-    const index = lines.findIndex((line) => new RegExp(`^\\s*${name}\\s*=`).test(line));
-    if (index === -1) lines.push(replacement);
-    else lines[index] = replacement;
-  }
-
-  await mkdir(dirname(gatewayEnvPath), { recursive: true });
-  await writeFile(gatewayEnvPath, `${lines.filter((line, index) => line || index < lines.length - 1).join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
-  console.log("Synchronized required ClawFit variables to the OpenClaw Gateway environment (values hidden).");
 }

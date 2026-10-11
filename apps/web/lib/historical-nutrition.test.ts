@@ -8,8 +8,8 @@ describe("historical nutrition display calculations",()=>{
     const shared=calculateTogetherMemberProgress(2200,1000,160,null,[{day:"2026-09-12",calories:1000,proteinG:null}]);
     expect(shared.proteinConsumed).toBeNull();expect(shared.proteinHint).toContain("unknown");expect(shared.trendSummary.avgProteinG).toBeNull();
   });
-  it("keeps incomplete day averages unknown rather than averaging a zero-filled day",()=>{
+  it("averages complete logged days with an explicit denominator",()=>{
     const summary=calculateTrendSummary([{day:"2026-09-11",caloriesBest:1000,proteinG:50},{day:"2026-09-12",caloriesBest:null,proteinG:null}],7,{calorieTarget:2200,proteinTargetG:160});
-    expect(summary.calorieAverage).toBeNull();expect(summary.proteinAverage).toBeNull();expect(summary.calorieHint).toContain("incomplete");
+    expect(summary.calorieAverage).toBe(1000);expect(summary.proteinAverage).toBe(50);expect(summary.completeCalorieDays).toBe(1);expect(summary.calorieHint).toContain("1 of 2 logged days");
   });
 });

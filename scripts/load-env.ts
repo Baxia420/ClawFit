@@ -1,21 +1,14 @@
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gatewayPaths } from "./gateway-state.js";
 
-/**
- * Loads ClawFit environment variables with deterministic precedence:
- * 1. Explicit file path in process.env.OPENCLAW_ENV_FILE (if specified)
- * 2. Repository-root .env (for local development)
- * 3. Protected OpenClaw environment file (~/.openclaw/.env) (for production VPS)
- *
- * Note: process.loadEnvFile does not overwrite already-set environment variables.
- * Therefore, variables set in shell or local .env take precedence, while
- * ~/.openclaw/.env provides production secrets on the VPS without storing
- * any .env file inside the git repository.
+/** Shell/explicit file > protected Gateway env > repository development env.
+ * The protected file is loaded before repo defaults so local development values
+ * cannot silently change the service's credentials in CLI checks.
  */
 export function loadClawFitEnv(): void {
   const explicitEnv = process.env.OPENCLAW_ENV_FILE;
+  if (explicitEnv && !existsSync(explicitEnv)) throw new Error("OPENCLAW_ENV_FILE does not exist.");
   if (explicitEnv && existsSync(explicitEnv)) {
     try {
       process.loadEnvFile(explicitEnv);
@@ -24,6 +17,14 @@ export function loadClawFitEnv(): void {
     }
   }
 
+  const openclawEnv = gatewayPaths().envPath;
+  if (existsSync(openclawEnv)) {
+    try {
+      process.loadEnvFile(openclawEnv);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
   const repoEnv = fileURLToPath(new URL("../.env", import.meta.url));
   if (existsSync(repoEnv)) {
     try {
@@ -33,12 +34,4 @@ export function loadClawFitEnv(): void {
     }
   }
 
-  const openclawEnv = resolve(homedir(), ".openclaw", ".env");
-  if (existsSync(openclawEnv)) {
-    try {
-      process.loadEnvFile(openclawEnv);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-  }
 }

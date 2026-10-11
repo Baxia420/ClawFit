@@ -1,47 +1,41 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# ClawFit OpenClaw VPS Update / Redeploy Script
-# Run as root/operator: sudo bash deploy/openclaw/redeploy.sh [git-ref]
-# ==============================================================================
-
+# Upgrade an existing CIA installation; preserves WhatsApp credentials and secrets.
 set -euo pipefail
+[[ "$(id -u)" -eq 0 ]] || { echo "Run as root: sudo bash deploy/openclaw/redeploy.sh approved-git-ref" >&2; exit 1; }
+APP_DIR=/home/clawfit/app
+TARGET_REF="${1:?Supply an approved branch, tag or commit SHA}"
+[[ -d "$APP_DIR/.git" ]] || { echo "Application checkout is missing." >&2; exit 1; }
+[[ "$TARGET_REF" != -* ]] || { echo "Invalid git ref." >&2; exit 1; }
 
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo "Error: redeploy.sh must be run as root: sudo bash deploy/openclaw/redeploy.sh [ref]" >&2
-  exit 1
-fi
+sudo -u clawfit -H bash -c '
+  set -euo pipefail
+  cd "$1"
+  [[ -z "$(git status --porcelain)" ]] || { echo "Checkout contains local changes; upgrade stopped." >&2; exit 1; }
+  git fetch origin
+  if git show-ref --verify --quiet "refs/remotes/origin/$2"; then
+    git checkout --detach "origin/$2"
+  else
+    git checkout --detach "$2"
+  fi
+  pnpm install --frozen-lockfile
+  pnpm --filter @clawfit/health-core build
+  pnpm --filter @clawfit/db build
+  pnpm openclaw:plugin:validate
+' bash "$APP_DIR" "$TARGET_REF"
 
-APP_DIR="/home/clawfit/app"
-TARGET_REF="${1:-main}"
-
-if [[ ! -d "${APP_DIR}" ]]; then
-  echo "Error: Application directory ${APP_DIR} does not exist." >&2
-  exit 1
-fi
-
-echo "==> [1/5] Updating repository to ref '${TARGET_REF}' as user 'clawfit'..."
-sudo -u clawfit -H bash -c "cd '${APP_DIR}' && git fetch origin && git checkout '${TARGET_REF}' && git pull --ff-only origin '${TARGET_REF}'"
-
-CURRENT_SHA="$(sudo -u clawfit -H bash -c "cd '${APP_DIR}' && git rev-parse HEAD")"
-echo "Checked out commit: ${CURRENT_SHA}"
-
-echo "==> [2/5] Installing dependencies with frozen lockfile..."
-sudo -u clawfit -H bash -c "cd '${APP_DIR}' && pnpm install --frozen-lockfile"
-
-echo "==> [3/5] Building application and packages..."
-sudo -u clawfit -H bash -c "cd '${APP_DIR}' && pnpm build"
-
-echo "==> [4/5] Validating OpenClaw Health plugin..."
-sudo -u clawfit -H bash -c "cd '${APP_DIR}' && pnpm openclaw:plugin:validate"
-
-echo "==> [5/5] Restarting ClawFit OpenClaw system service..."
-systemctl restart clawfit-openclaw
-sleep 3
-systemctl is-active --quiet clawfit-openclaw
-systemctl status clawfit-openclaw --no-pager
-
-echo "=============================================================================="
-echo "Redeployment to ${CURRENT_SHA} finished successfully."
-echo "Service is active and running under clawfit:clawfit."
-echo "WhatsApp session credentials preserved in /home/clawfit/.openclaw/credentials/."
-echo "=============================================================================="
+systemctl stop clawfit-openclaw
+trap 'systemctl stop clawfit-openclaw; echo "Upgrade stopped before verification completed. Gateway is stopped; restore the previous commit/config or resolve the reported check before restarting." >&2' ERR
+bash "$APP_DIR/deploy/openclaw/repair-state.sh"
+sudo -u clawfit -H bash -c '
+  set -euo pipefail
+  cd "$1"
+  pnpm openclaw:setup
+  # No real model calls on upgrade: reuse a fresh, verified report. If absent/stale,
+  # stop and run models:smoke explicitly, then retry this approved upgrade.
+  pnpm models:configure
+  pnpm openclaw:preflight --before-restart
+' bash "$APP_DIR"
+systemctl start clawfit-openclaw
+sudo -u clawfit -H bash -c 'cd "$1" && pnpm openclaw:preflight' bash "$APP_DIR"
+trap - ERR
+echo "Upgrade checks passed. Live Gemini and WhatsApp read-only acceptance still need verification; see docs/deployment.md."

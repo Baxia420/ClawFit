@@ -5,6 +5,7 @@ import {
   historicalTimeKnown,
   normalizeWhatsAppIdentifier,
   sumNutrition,
+  nutritionCoverage,
   workoutVolume,
   zonedDayRange,
   type CreateUserInput,
@@ -521,6 +522,17 @@ export class HealthRepository {
     return results.filter((m): m is HydratedMeal => m !== null);
   }
 
+  async listMealHistory(userId: string, start: Date, end: Date, limit: number, offset: number, search: string) {
+    const literalSearch = search.replace(/[\\%_]/g, value => `\\${value}`);
+    const filter = and(eq(meals.userId, userId), gte(meals.occurredAt, start), lt(meals.occurredAt, end),
+      ...(search ? [ilike(meals.label, `%${literalSearch}%`)] : []));
+    const [rows, counts] = await Promise.all([
+      this.db.select().from(meals).where(filter).orderBy(desc(meals.occurredAt), desc(meals.id)).limit(limit).offset(offset),
+      this.db.select({ total: sql<number>`count(*)::int` }).from(meals).where(filter),
+    ]);
+    return { meals: rows, total: counts[0]?.total ?? 0, limit, offset };
+  }
+
   async updateMeal(userId: string, id: string, patch: MealPatch): Promise<HydratedMeal> {
     const current = await this.db.query.meals.findFirst({
       where: and(eq(meals.id, id), eq(meals.userId, userId)),
@@ -599,20 +611,25 @@ export class HealthRepository {
     return deleted;
   }
 
-  async dailyNutrition(userId: string, start: Date, end: Date): Promise<{ date: string; totals: ReturnType<typeof sumNutrition>; meals: typeof meals.$inferSelect[] }> {
+  async dailyNutrition(userId: string, start: Date, end: Date) {
     const rows = await this.db
       .select()
       .from(meals)
       .where(and(eq(meals.userId, userId), gte(meals.occurredAt, start), lt(meals.occurredAt, end)))
       .orderBy(asc(meals.occurredAt));
-    return { date: start.toISOString().slice(0, 10), totals: sumNutrition(rows), meals: rows };
+    return { date: start.toISOString().slice(0, 10), totals: sumNutrition(rows), coverage: nutritionCoverage(rows), meals: rows };
   }
 
-  async nutritionTrend(userId: string, start: Date, end: Date, timezone: string = "UTC"): Promise<{ day: string; calories_best: number | null; calories_low: number | null; calories_high: number | null; protein_g: number | null }[]> {
+  async nutritionTrend(userId: string, start: Date, end: Date, timezone: string = "UTC"): Promise<{ day: string; calories_best: number | null; calories_low: number | null; calories_high: number | null; protein_g: number | null; meal_count: number; known_calories: number; known_protein: number; missing_calories: number; missing_protein: number }[]> {
     const day = sql<string>`to_char(${meals.occurredAt} AT TIME ZONE ${timezone}, 'YYYY-MM-DD')`;
     return this.db
       .select({
         day: day.as("day"),
+        meal_count: sql<number>`count(*)::int`.as("meal_count"),
+        known_calories: sql<number>`coalesce(sum(${meals.caloriesBest}), 0)::float`.as("known_calories"),
+        known_protein: sql<number>`coalesce(sum(${meals.proteinG}), 0)::float`.as("known_protein"),
+        missing_calories: sql<number>`(count(*) - count(${meals.caloriesBest}))::int`.as("missing_calories"),
+        missing_protein: sql<number>`(count(*) - count(${meals.proteinG}))::int`.as("missing_protein"),
         calories_best: sql<number | null>`CASE WHEN count(*) = count(${meals.caloriesBest}) THEN sum(${meals.caloriesBest})::float ELSE NULL END`.as("calories_best"),
         calories_low: sql<number | null>`CASE WHEN count(*) = count(${meals.caloriesLow}) THEN sum(${meals.caloriesLow})::float ELSE NULL END`.as("calories_low"),
         calories_high: sql<number | null>`CASE WHEN count(*) = count(${meals.caloriesHigh}) THEN sum(${meals.caloriesHigh})::float ELSE NULL END`.as("calories_high"),
@@ -1009,6 +1026,7 @@ export class HealthRepository {
           calories: totals.caloriesBest,
           proteinG: totals.proteinG,
           mealCount: dayMeals.length,
+          coverage: nutritionCoverage(dayMeals),
           meals: dayMeals.map((m) => ({
             id: m.id,
             label: m.label,

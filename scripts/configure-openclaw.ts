@@ -1,124 +1,24 @@
 import { readFile } from "node:fs/promises";
 import { loadClawFitEnv } from "./load-env.js";
 import { runOpenClaw } from "./openclaw-cli.js";
+import { readGatewayConfig } from "./gateway-state.js";
+import { z } from "zod";
+import { buildModelConfiguration, OPENCLAW_VERSION } from "./openclaw-configuration.js";
 
 loadClawFitEnv();
-
-type ProbeResult = {
-  status: "available" | "unavailable";
-  modelId?: string;
-  toolCalling?: "pass" | "fail" | "not-tested";
-  reason?: string;
-};
-
-type Report = {
-  checkedAt: string;
-  results?: Record<string, ProbeResult>;
-  selected?: {
-    defaultModel?: string;
-    nutritionPrimary?: string;
-    nutritionFallback?: string;
-  };
-};
-
-let report: Report;
-try {
-  report = JSON.parse(await readFile(".model-smoke.json", "utf8")) as Report;
-} catch {
-  console.error("No model smoke report found. Run pnpm models:smoke first.");
-  process.exit(2);
-}
-
-const defaultModel = report.selected?.defaultModel;
-const nutritionPrimary = report.selected?.nutritionPrimary;
-
-if (!defaultModel) {
-  console.error("The authenticated smoke test did not verify a usable default agent model with verified tool-calling. Run pnpm models:smoke to verify a live model.");
-  process.exit(2);
-}
-
-if (!nutritionPrimary) {
-  console.error("The authenticated smoke test did not verify a usable nutrition model. Run pnpm models:smoke to verify a live model.");
-  process.exit(2);
-}
-
-// Find ONLY verified fallback models that passed availability and tool calling tests
-const verifiedFallbacks: string[] = [];
-if (report.results) {
-  for (const result of Object.values(report.results)) {
-    if (
-      result.status === "available" &&
-      result.toolCalling === "pass" &&
-      result.modelId &&
-      result.modelId !== defaultModel &&
-      !verifiedFallbacks.includes(result.modelId)
-    ) {
-      verifiedFallbacks.push(result.modelId);
-    }
-  }
-}
-
-// Register Google models in the OpenClaw Google provider model registry
-const googleProviderModels = [
-  {
-    id: "gemini-3.5-flash-lite",
-    name: "Gemini 3.5 Flash Lite",
-    reasoning: true,
-    input: ["text", "image"],
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  },
-  {
-    id: "gemini-3.7-flash",
-    name: "Gemini 3.7 Flash",
-    reasoning: true,
-    input: ["text", "image"],
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  },
-  {
-    id: "gemini-3.8-flash",
-    name: "Gemini 3.8 Flash",
-    reasoning: true,
-    input: ["text", "image"],
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  },
-];
-
-runOpenClaw(["config", "set", "models.providers.google.models", JSON.stringify(googleProviderModels), "--strict-json"]);
-
-const primaryId = `google/${defaultModel}`;
-// General agent fallback strategy:
-// Do NOT use heavy models (3.7/3.8) as generic fallbacks for the normal chat/orchestrator.
-// Only configure low-cost fallback if evidence in .model-smoke.json supports it.
-const candidateLiteFallback = "gemini-3.1-flash-lite";
-const hasLiteFallbackSmoke = Boolean(
-  report.results?.[candidateLiteFallback]?.status === "available" &&
-  report.results?.[candidateLiteFallback]?.toolCalling === "pass"
-);
-
-const generalFallbacks: string[] = [];
-if (hasLiteFallbackSmoke) {
-  generalFallbacks.push(`google/${candidateLiteFallback}`);
-} else {
-  console.log(`[Evidence Note] .model-smoke.json lacks live smoke evidence for ${candidateLiteFallback}. Fallbacks kept empty (${JSON.stringify(generalFallbacks)}) to prevent unverified model invocations.`);
-}
-
-runOpenClaw(["config", "set", "agents.defaults.model.primary", primaryId]);
-runOpenClaw(["config", "set", "agents.defaults.model.fallbacks", JSON.stringify(generalFallbacks), "--strict-json"]);
-
-// Configure allowed agent models in OpenClaw
-const configuredModels: Record<string, Record<string, never>> = {
-  [primaryId]: {},
-  ...(hasLiteFallbackSmoke ? { [`google/${candidateLiteFallback}`]: {} } : {}),
-};
-runOpenClaw(["config", "set", "agents.defaults.models", JSON.stringify(configuredModels), "--strict-json", "--merge"]);
-
-console.log(`Configured OpenClaw primary model: ${primaryId}`);
-console.log(`Configured OpenClaw general fallback: ${JSON.stringify(generalFallbacks)}`);
-console.log(`Registered Google provider models: gemini-3.5-flash-lite, gemini-3.7-flash, gemini-3.8-flash`);
-console.log(`\nNutrition Model Routing (Health API):`);
-console.log(`  Primary:  ${process.env.NUTRITION_MODEL_PRIMARY || "gemini-3.8-flash"}`);
-console.log(`  Fallback: ${process.env.NUTRITION_MODEL_FALLBACK || "gemini-3.7-flash"}`);
-console.log("\nModel configuration completed successfully.");
+const version = runOpenClaw(["--version"], { capture: true }).stdout?.toString() ?? "";
+if (!version.includes(OPENCLAW_VERSION)) throw new Error(`This configuration is verified for OpenClaw ${OPENCLAW_VERSION}; installed version differs.`);
+const config = buildModelConfiguration(JSON.parse(await readFile(".model-smoke.json", "utf8")));
+const existing = z.object({ models: z.object({ providers: z.object({ google: z.object({ apiKey: z.unknown().optional() }).passthrough().optional() }).passthrough().optional() }).passthrough().optional() }).passthrough().parse(await readGatewayConfig());
+const { apiKey, ...routing } = config.provider;
+const provider = existing.models?.providers?.google?.apiKey === undefined ? { ...routing, apiKey } : routing;
+// Preserve existing provider credentials; only routing/model metadata is managed.
+// One provider-level write avoids registering models with an intermediate wrong transport.
+runOpenClaw(["config", "set", "models.providers.google", JSON.stringify(provider), "--strict-json", "--merge"]);
+runOpenClaw(["config", "set", "agents.defaults.model.primary", config.primary]);
+runOpenClaw(["config", "set", "agents.defaults.model.fallbacks", JSON.stringify(config.fallbacks), "--strict-json"]);
+runOpenClaw(["config", "set", "agents.defaults.models", JSON.stringify(config.allowedModels), "--strict-json", "--merge"]);
+runOpenClaw(["config", "validate"]);
+console.log(`Configured Google-native routing for ${config.primary}; general fallbacks: ${config.fallbacks.join(", ") || "none verified"}.`);
+console.log(`Verified nutrition candidates: ${config.nutrition.join(", ") || "none verified"}.`);
+console.log("Nutrition runs on the Health API. Gateway changes do not update Render; compare its model environment with these candidates before changing anything.");

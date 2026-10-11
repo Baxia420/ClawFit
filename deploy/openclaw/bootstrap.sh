@@ -30,6 +30,7 @@ fi
 echo "==> [4/9] Setting up secure state directories and private compile cache..."
 mkdir -p /home/clawfit/.openclaw/credentials/whatsapp/default
 mkdir -p /home/clawfit/.openclaw/agents/main/sessions
+mkdir -p /home/clawfit/.openclaw/agents/main/agent
 mkdir -p /home/clawfit/.openclaw/workspace
 mkdir -p /home/clawfit/app
 mkdir -p /home/clawfit/.cache/openclaw
@@ -38,8 +39,12 @@ chmod 700 /home/clawfit
 chmod 700 /home/clawfit/.openclaw
 chmod 700 /home/clawfit/.openclaw/credentials
 chmod 700 /home/clawfit/.openclaw/credentials/whatsapp
-chmod -R 700 /home/clawfit/.cache
-chown -R clawfit:clawfit /home/clawfit
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bash "${SCRIPT_DIR}/repair-state.sh"
+chown clawfit:clawfit /home/clawfit/app
+for directory in /home/clawfit/.openclaw/credentials /home/clawfit/.openclaw/credentials/whatsapp /home/clawfit/.openclaw/credentials/whatsapp/default; do
+  chown clawfit:clawfit "$directory"
+done
 
 echo "==> [5/9] Installing Node.js 24 and pnpm 11.19.0..."
 if ! command -v node >/dev/null 2>&1 || [[ "$(node -v)" != v24* ]]; then

@@ -110,8 +110,8 @@ describe("personal dashboard logic, production helpers, and multi-user isolation
       const emptyTrend: TrendDataPoint[] = [];
       const emptyResult = calculateTrendSummary(emptyTrend, 7, userA.goals);
       expect(emptyResult.activeDays).toBe(0);
-      expect(emptyResult.calorieAverage).toBe(0);
-      expect(emptyResult.calorieHint).toBe("0 active logged days in 7D window");
+      expect(emptyResult.calorieAverage).toBeNull();
+      expect(emptyResult.calorieHint).toBe("No meals logged in this 7D window");
     });
 
     it("formats local calendar dates accurately across UTC boundary in user timezone", () => {
