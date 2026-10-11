@@ -34,6 +34,13 @@ export class HealthApiNetworkError extends Error {
   }
 }
 
+export class HealthApiResponseError extends Error {
+  override name = "HealthApiResponseError";
+  constructor(readonly status: number, readonly code: string, message: string) {
+    super(`${code}: ${message}`);
+  }
+}
+
 export function derivePendingMealScope(context: PendingScopeContext) {
   const channel = normalizeScopeSegment(context.messageChannel ?? "openclaw");
   const identity = context.requesterSenderId
@@ -93,7 +100,7 @@ export async function healthFetch<T = unknown>(config: HealthPluginConfig, path:
   }
   if (!response.ok) {
     const apiError = payload as { error?: { code?: string; message?: string } };
-    throw new Error(`${apiError.error?.code ?? "HEALTH_API_ERROR"}: ${apiError.error?.message ?? `Health API returned ${response.status}`}`);
+    throw new HealthApiResponseError(response.status, apiError.error?.code ?? "HEALTH_API_ERROR", apiError.error?.message ?? `Health API returned ${response.status}`);
   }
   if (durationMs > 200) console.log(`[LATENCY] healthFetch path=${path} durationMs=${durationMs}`);
   return payload as T;

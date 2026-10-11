@@ -142,6 +142,25 @@ describe("media-resolver", () => {
       expect(checkAttachmentAuthorized("img-12345", context).authorized).toBe(true);
     });
 
+    it("does not authorize another directory's file with the same basename", async () => {
+      const own = path.join(testInboundDir, "owned", "meal.jpg");
+      const other = path.join(testInboundDir, "other", "meal.jpg");
+      await fs.mkdir(path.dirname(own), { recursive: true });
+      await fs.mkdir(path.dirname(other), { recursive: true });
+      await fs.writeFile(own, validJpegBuffer); await fs.writeFile(other, validJpegBuffer);
+      const context = { senderId: "owner", workspaceDir: testWorkspaceDir, authorizedMediaPaths: [own] };
+      expect(checkAttachmentAuthorized(other, context).authorized).toBe(false);
+      await expect(resolveAndValidateLocalFile(other, context)).rejects.toMatchObject({ code: "unauthorized_media" });
+      expect((await resolveAndValidateLocalFile("media://inbound/meal", context)).realPath).toBe(own);
+    });
+
+    it("fails closed for ambiguous aliases, missing ownership, and path case differences", () => {
+      const filePath = path.join(testInboundDir, "CaseSensitive.jpg");
+      expect(checkAttachmentAuthorized("casesensitive.jpg", { authorizedMediaPaths: [filePath] }).authorized).toBe(false);
+      expect(checkAttachmentAuthorized("meal", { authorizedMediaPaths: [path.join(testInboundDir, "a", "meal.jpg"), path.join(testInboundDir, "b", "meal.jpg")] }).authorized).toBe(false);
+      expect(checkAttachmentAuthorized(filePath, { inboundMedia: [{ path: filePath, senderId: "somebody" }] }).authorized).toBe(false);
+    });
+
     it("rejects attachment belonging to a different sender", () => {
       const context: MediaAuthorizationContext = {
         senderId: "user-A",
@@ -287,11 +306,7 @@ describe("media-resolver", () => {
         authorizedMediaPaths: [oversizedPath],
       };
 
-      // Mock fs.stat to report 5 MiB without having to create a 5MB file on disk
-      vi.spyOn(fs, "stat").mockResolvedValue({
-        isDirectory: () => false,
-        size: 5 * 1024 * 1024,
-      } as any);
+      writeFileSync(oversizedPath, Buffer.alloc(5 * 1024 * 1024));
 
       await expect(resolveAndValidateLocalFile(oversizedPath, context)).rejects.toThrowError(
         expect.objectContaining({ code: "oversized_image" }),

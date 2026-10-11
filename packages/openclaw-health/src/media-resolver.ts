@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { constants } from "node:fs";
 import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -90,8 +90,8 @@ export function detectImageMimeTypeFromBuffer(header: Buffer): string | null {
 }
 
 export function isPathInside(parent: string, child: string): boolean {
-  const normParent = path.resolve(parent).toLowerCase();
-  const normChild = path.resolve(child).toLowerCase();
+  const normParent = path.resolve(parent);
+  const normChild = path.resolve(child);
   if (normParent === normChild) return true;
   const rel = path.relative(normParent, normChild);
   return Boolean(rel && !rel.startsWith("..") && !path.isAbsolute(rel));
@@ -112,7 +112,8 @@ function normalizeMediaReference(ref: string): string {
 function extractMediaId(ref: string): string | null {
   const match = ref.match(/^media:\/\/inbound\/([^?#]+)$/i);
   if (match && match[1]) {
-    return decodeURIComponent(match[1]);
+    try { return decodeURIComponent(match[1]); }
+    catch { throw new MediaResolutionError("unauthorized_media", "Malformed media reference."); }
   }
   return null;
 }
@@ -128,216 +129,94 @@ export function getAllowedMediaRoots(workspaceDir?: string): string[] {
   return roots;
 }
 
-export function checkAttachmentAuthorized(
-  rawRef: string,
-  authContext?: MediaAuthorizationContext,
-): { authorized: boolean; reason?: string } {
-  if (!authContext) {
-    return {
-      authorized: false,
-      reason: "Cannot establish attachment ownership: no authorization context provided. Path-based requests fail closed.",
-    };
-  }
+type Attachment = NonNullable<MediaAuthorizationContext["authorizedAttachments"]>[number];
 
-  const normalized = normalizeMediaReference(rawRef);
-
-  // Check for traversal in rawRef, normalized path, or ID
-  if (
-    rawRef.includes("\0") ||
-    rawRef.includes("../") ||
-    rawRef.includes("..\\") ||
-    rawRef === ".." ||
-    normalized.includes("\0") ||
-    normalized.includes("../") ||
-    normalized.includes("..\\") ||
-    normalized === ".."
-  ) {
-    return { authorized: false, reason: "Path traversal detected in media reference." };
-  }
-
-  const mediaId = extractMediaId(normalized) ?? path.basename(normalized);
-  if (mediaId.includes("..") || mediaId.includes("/") || mediaId.includes("\\") || mediaId.includes("\0")) {
-    return { authorized: false, reason: "Path traversal detected in media reference." };
-  }
-
-  const authorizedIds = new Set<string>();
-  const authorizedPaths = new Set<string>();
-  const authorizedUrls = new Set<string>();
-
-  const addAuthRef = (ref?: string) => {
-    if (!ref) return;
-    const norm = normalizeMediaReference(ref);
-    authorizedUrls.add(norm.toLowerCase());
-    authorizedPaths.add(path.resolve(norm).toLowerCase());
-    const id = extractMediaId(norm) ?? path.basename(norm);
-    authorizedIds.add(id.toLowerCase());
-    const ext = path.extname(id);
-    if (ext) {
-      authorizedIds.add(path.basename(id, ext).toLowerCase());
-    }
-  };
-
-  if (authContext.mediaPath) addAuthRef(authContext.mediaPath);
-  if (authContext.mediaPaths) authContext.mediaPaths.forEach(addAuthRef);
-  if (authContext.mediaUrl) addAuthRef(authContext.mediaUrl);
-  if (authContext.mediaUrls) authContext.mediaUrls.forEach(addAuthRef);
-  if (authContext.authorizedMediaPaths) authContext.authorizedMediaPaths.forEach(addAuthRef);
-  if (authContext.authorizedMediaUrls) authContext.authorizedMediaUrls.forEach(addAuthRef);
-
-  const checkItemOwnership = (item: { id?: string; path?: string; url?: string; senderId?: string; conversationId?: string }) => {
-    if (item.senderId && authContext.senderId && item.senderId !== authContext.senderId) {
-      return false;
-    }
-    if (item.conversationId && authContext.conversationId && item.conversationId !== authContext.conversationId) {
-      return false;
-    }
-    return true;
-  };
-
-  if (authContext.inboundMedia) {
-    for (const item of authContext.inboundMedia) {
-      if (checkItemOwnership(item)) {
-        addAuthRef(item.path);
-        addAuthRef(item.url);
-        if (item.id) authorizedIds.add(item.id.toLowerCase());
-      }
-    }
-  }
-
-  if (authContext.authorizedAttachments) {
-    for (const item of authContext.authorizedAttachments) {
-      if (checkItemOwnership(item)) {
-        addAuthRef(item.path);
-        addAuthRef(item.url);
-        if (item.id) authorizedIds.add(item.id.toLowerCase());
-      }
-    }
-  }
-
-  if (authorizedIds.size === 0 && authorizedPaths.size === 0 && authorizedUrls.size === 0) {
-    return {
-      authorized: false,
-      reason: "Cannot establish attachment ownership: no authorized media attachments found in runtime context. Refusing path-based media access.",
-    };
-  }
-
-  const requestedLower = normalized.toLowerCase();
-  const requestedIdLower = mediaId.toLowerCase();
-  const requestedIdNoExt = path.extname(requestedIdLower) ? path.basename(requestedIdLower, path.extname(requestedIdLower)) : requestedIdLower;
-
-  if (authorizedUrls.has(requestedLower)) return { authorized: true };
-  if (authorizedIds.has(requestedIdLower) || authorizedIds.has(requestedIdNoExt)) return { authorized: true };
-  if (authorizedPaths.has(path.resolve(normalized).toLowerCase())) return { authorized: true };
-
-  return {
-    authorized: false,
-    reason: `Attachment '${rawRef}' is not authorized for sender '${authContext.senderId ?? "unknown"}' in conversation '${authContext.conversationId ?? "unknown"}'. Directory containment alone does not establish ownership.`,
-  };
+function authorizedAttachments(context: MediaAuthorizationContext | undefined): Attachment[] {
+  if (!context) return [];
+  const paths = [...(context.authorizedMediaPaths ?? []), ...(context.mediaPaths ?? []), ...(context.mediaPath ? [context.mediaPath] : [])];
+  return [
+    ...paths.map((filePath): Attachment => ({ path: filePath })),
+    ...(context.inboundMedia ?? []), ...(context.authorizedAttachments ?? []),
+  ].filter(item => (!item.senderId || item.senderId === context.senderId)
+    && (!item.conversationId || item.conversationId === context.conversationId));
 }
 
-export async function resolveAndValidateLocalFile(
-  rawPath: string,
-  authContext?: MediaAuthorizationContext,
-): Promise<{ realPath: string; mimeType: string; base64: string }> {
-  const normalized = normalizeMediaReference(rawPath);
-
-  // 1. Check for directory traversal sequences
-  if (normalized.includes("\0") || rawPath.includes("..\\") || rawPath.includes("../") || rawPath === "..") {
-    throw new MediaResolutionError("path_traversal", `Path traversal rejected: ${rawPath}`);
+function selectAuthorizedPath(rawRef: string, context: MediaAuthorizationContext | undefined): string | undefined {
+  const normalized = normalizeMediaReference(rawRef);
+  const id = extractMediaId(normalized);
+  if (normalized.includes("\0") || normalized.includes("../") || normalized.includes("..\\")
+    || normalized === ".." || (id && (id.includes("..") || /[/\\\0]/.test(id)))) {
+    throw new MediaResolutionError("path_traversal", "Path traversal detected in media reference.");
   }
+  // Absolute/relative paths must match exactly. A basename match must never
+  // authorize a different file elsewhere in the inbound storage directory.
+  const alias = id ?? (!normalized.includes("/") && !normalized.includes("\\") ? normalized : undefined);
+  const matches = authorizedAttachments(context).filter(item => {
+    if (!item.path) return false;
+    const filePath = normalizeMediaReference(item.path);
+    if (normalized === filePath || normalized === item.url) return true;
+    if (!alias) return false;
+    const basename = path.basename(filePath);
+    return alias === item.id || alias === basename || alias === path.basename(basename, path.extname(basename));
+  });
+  const paths = [...new Set(matches.map(item => normalizeMediaReference(item.path!)))];
+  return paths.length === 1 ? paths[0] : undefined;
+}
 
-  // 2. Verify authorization against sender/conversation context
-  const authResult = checkAttachmentAuthorized(rawPath, authContext);
-  if (!authResult.authorized) {
-    throw new MediaResolutionError("unauthorized_media", authResult.reason ?? "Attachment is not authorized.");
-  }
-
-  // 3. Locate file on disk
-  const mediaId = extractMediaId(normalized) ?? (path.isAbsolute(normalized) ? null : normalized);
-  const allowedRoots = getAllowedMediaRoots(authContext?.workspaceDir);
-  let resolvedCandidate: string | null = null;
-
-  if (path.isAbsolute(normalized) && existsSync(normalized)) {
-    resolvedCandidate = normalized;
-  } else if (mediaId) {
-    for (const root of allowedRoots) {
-      const exact = path.join(root, mediaId);
-      if (existsSync(exact)) {
-        resolvedCandidate = exact;
-        break;
-      }
-      for (const ext of [".jpg", ".jpeg", ".png", ".webp", ".heic"]) {
-        const withExt = path.join(root, `${mediaId}${ext}`);
-        if (existsSync(withExt)) {
-          resolvedCandidate = withExt;
-          break;
-        }
-      }
-      if (resolvedCandidate) break;
-    }
-  }
-
-  if (!resolvedCandidate) {
-    throw new MediaResolutionError("image_not_found", `Requested image attachment not found: ${rawPath}`);
-  }
-
-  // 4. Resolve symlinks and verify containment
-  let realPath: string;
+export function checkAttachmentAuthorized(rawRef: string, context?: MediaAuthorizationContext): { authorized: boolean; reason?: string } {
   try {
-    realPath = await fs.realpath(resolvedCandidate);
-  } catch {
-    throw new MediaResolutionError("image_not_found", `Failed to resolve canonical path for: ${rawPath}`);
+    if (!context) return { authorized: false, reason: "Cannot establish attachment ownership: no authorization context provided." };
+    if (!authorizedAttachments(context).length) return { authorized: false, reason: "Cannot establish attachment ownership: no authorized media attachments found." };
+    if (selectAuthorizedPath(rawRef, context)) return { authorized: true };
+    return { authorized: false, reason: "Cannot establish attachment ownership from the current authorized media attachments." };
+  } catch (err) {
+    return { authorized: false, reason: err instanceof Error ? err.message : "Invalid media reference." };
   }
+}
 
-  const explicitAllowedPaths = (authContext?.authorizedMediaPaths ?? []).map((p) => path.resolve(p).toLowerCase());
-  const isInsideAllowedRoot = allowedRoots.some((root) => isPathInside(root, realPath));
-  const isExplicitAllowedFile = explicitAllowedPaths.includes(realPath.toLowerCase());
-
-  if (!isInsideAllowedRoot && !isExplicitAllowedFile) {
-    throw new MediaResolutionError(
-      "symlink_escape",
-      `Attachment escapes authorized media storage via symlink or external path: ${rawPath} -> ${realPath}`,
-    );
-  }
-
-  // 5. Bounded reads: check file stats before loading into memory
-  const stat = await fs.stat(realPath);
-  if (stat.isDirectory()) {
-    throw new MediaResolutionError("invalid_image_content", `Specified path is a directory, not an image file: ${rawPath}`);
-  }
-  if (stat.size === 0) {
-    throw new MediaResolutionError("invalid_image_content", `Image file is empty (0 bytes): ${rawPath}`);
-  }
-  if (stat.size > MAX_IMAGE_BYTES) {
-    throw new MediaResolutionError(
-      "oversized_image",
-      `Image file exceeds maximum allowed size of 4.5 MiB (${stat.size} bytes > ${MAX_IMAGE_BYTES} bytes): ${rawPath}`,
-    );
-  }
-
-  // 6. Inspect magic bytes header before full buffer read
-  const fd = await fs.open(realPath, "r");
-  const headerBuf = Buffer.alloc(64);
+export async function resolveAndValidateLocalFile(rawPath: string, authContext?: MediaAuthorizationContext): Promise<{ realPath: string; mimeType: string; base64: string }> {
+  const selected = selectAuthorizedPath(rawPath, authContext);
+  if (!selected) throw new MediaResolutionError("unauthorized_media", "Attachment is not authorized in this turn.");
+  const candidate = path.resolve(selected);
+  // Reject symlinks in every path component, including links within the media
+  // directory. Exact trusted paths are allowed outside the standard cache root.
   try {
-    const { bytesRead } = await fd.read(headerBuf, 0, 64, 0);
-    const mimeType = detectImageMimeTypeFromBuffer(headerBuf.subarray(0, bytesRead));
-    if (!mimeType) {
-      throw new MediaResolutionError(
-        "invalid_image_content",
-        `File is not a valid supported image format (JPEG, PNG, WebP, HEIC). Header magic bytes do not match an image: ${rawPath}`,
-      );
+    let cursor = path.parse(candidate).root;
+    for (const part of candidate.slice(cursor.length).split(path.sep).filter(Boolean)) {
+      cursor = path.join(cursor, part);
+      if ((await fs.lstat(cursor)).isSymbolicLink()) throw new MediaResolutionError("symlink_escape", "Symbolic links cannot be used for attachments.");
     }
-
-    // 7. Safe bounded full buffer read
-    const fullBuffer = await fs.readFile(realPath);
-    return {
-      realPath,
-      mimeType,
-      base64: fullBuffer.toString("base64"),
-    };
-  } finally {
-    await fd.close();
+  } catch (err) {
+    if (err instanceof MediaResolutionError) throw err;
+    throw new MediaResolutionError("image_not_found", "The authorized attachment is no longer available.");
   }
+  let fd: Awaited<ReturnType<typeof fs.open>>;
+  try { fd = await fs.open(candidate, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK); }
+  catch { throw new MediaResolutionError("image_not_found", "The authorized attachment could not be opened."); }
+  try {
+    const stat = await fd.stat();
+    if (!stat.isFile() || stat.size === 0) throw new MediaResolutionError("invalid_image_content", "Attachment must be a non-empty regular file.");
+    if (stat.size > MAX_IMAGE_BYTES) throw new MediaResolutionError("oversized_image", "Attachment exceeds the 4.5 MiB image limit.");
+    const realPath = await fs.realpath(candidate);
+    const current = await fs.stat(candidate);
+    if (realPath !== candidate || stat.ino !== current.ino || stat.dev !== current.dev) throw new MediaResolutionError("symlink_escape", "Attachment changed while opening.");
+    // One descriptor and a hard upper bound protect against replacement and
+    // file growth between validation and reading. Never re-open by path.
+    const buffer = Buffer.alloc(MAX_IMAGE_BYTES + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const read = await fd.read(buffer, length, buffer.length - length, null);
+      if (!read.bytesRead) break;
+      length += read.bytesRead;
+    }
+    if (length > MAX_IMAGE_BYTES) throw new MediaResolutionError("oversized_image", "Attachment exceeds the 4.5 MiB image limit.");
+    const mimeType = detectImageMimeTypeFromBuffer(buffer.subarray(0, Math.min(length, 64)));
+    if (!mimeType) throw new MediaResolutionError("invalid_image_content", "Unsupported image content.");
+    return { realPath, mimeType, base64: buffer.subarray(0, length).toString("base64") };
+  } catch (err) {
+    if (err instanceof MediaResolutionError) throw err;
+    throw new MediaResolutionError("image_not_found", "The authorized attachment changed or could not be read.");
+  } finally { await fd.close(); }
 }
 
 export async function resolveImagePayload(params: {
@@ -373,7 +252,10 @@ export async function resolveImagePayload(params: {
       if (!["image/jpeg", "image/png", "image/webp", "image/heic"].includes(img.mimeType)) {
         throw new MediaResolutionError("invalid_image_content", `Unsupported MIME type '${img.mimeType}' at index ${idx}.`);
       }
+      if (img.base64.length > 4 * Math.ceil(MAX_IMAGE_BYTES / 3)) throw new MediaResolutionError("oversized_image", "Encoded attachment exceeds the image limit.");
+      if (img.base64.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(img.base64)) throw new MediaResolutionError("invalid_image_content", "Invalid base64 image encoding.");
       const buf = Buffer.from(img.base64, "base64");
+      if (buf.toString("base64") !== img.base64) throw new MediaResolutionError("invalid_image_content", "Invalid base64 image encoding.");
       if (buf.length > MAX_IMAGE_BYTES) {
         throw new MediaResolutionError("oversized_image", `Direct image payload at index ${idx} exceeds 4.5 MiB raw limit (${buf.length} bytes).`);
       }
@@ -385,7 +267,7 @@ export async function resolveImagePayload(params: {
         );
       }
       const detected = detectImageMimeTypeFromBuffer(buf.subarray(0, 64));
-      if (!detected) {
+      if (!detected || detected !== img.mimeType) {
         throw new MediaResolutionError("invalid_image_content", `Direct image payload at index ${idx} failed magic-byte verification.`);
       }
       validated.push({ mimeType: img.mimeType, base64: img.base64 });

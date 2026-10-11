@@ -1,7 +1,15 @@
+export const TEMPORARY_FAILURE = "I couldn't complete that just now because the service is temporarily unavailable. Please try again in a moment.";
+
+export function isNoSaveRequest(prompt: string): boolean {
+  return /\b(?:do\s+not|don['’]?t|never|without|no)\b[^.!?]{0,60}\b(?:sav(?:e|ed|ing)|log(?:ged|ging)?|track(?:ed|ing)?|record(?:ed|ing)?|persist(?:ing)?|drafts?)\b/i.test(prompt)
+    || /\b(?:estimate|estimation|calculate|calculation)\s+only\b/i.test(prompt)
+    || /\bonly\s+(?:estimate|calculate)\b/i.test(prompt);
+}
+
 export function isMealLogConfirmation(prompt: string | null | undefined): boolean {
   if (!prompt || typeof prompt !== "string") return false;
   const trimmed = prompt.trim();
-  if (!trimmed) return false;
+  if (!trimmed || isNoSaveRequest(trimmed)) return false;
   const action = "(?:log(?:ged|ging)?|sav(?:e|ed|ing)|track(?:ed|ing)?|record(?:ed|ing)?)";
   if (new RegExp(`\\b(?:do\\s+not|don't|dont|never|without)\\b[^.!?]{0,60}\\b${action}\\b`, "i").test(trimmed)) return false;
   if (new RegExp(`\\b${action}\\b[^.!?]{0,30}\\b(?:not|never)\\b`, "i").test(trimmed)) return false;
@@ -16,7 +24,7 @@ export function isFallbackNotice(text: string | null | undefined): boolean {
 }
 
 export function sanitizeUserFacingError(text: string | null | undefined): string {
-  if (!text || typeof text !== "string") return "I couldn't complete that just now. Nothing was changed — try again in a moment.";
+  if (!text || typeof text !== "string") return TEMPORARY_FAILURE;
 
   if (text.includes("UNRESOLVED_SENDER_IDENTITY:") || text.includes("This WhatsApp account isn't linked to a ClawFit profile yet.")) {
     return "This WhatsApp account isn't linked to a ClawFit profile yet.";
@@ -32,10 +40,10 @@ export function sanitizeUserFacingError(text: string | null | undefined): string
   }
 
   const hasRawError =
-    /RESOURCE_EXHAUSTED/i.test(text) ||
+    /(?:RESOURCE_EXHAUSTED|SERVICE_UNAVAILABLE)/i.test(text) ||
     /Google Generative AI API error/i.test(text) ||
     /quota exceeded/i.test(text) ||
-    /HTTP 429/i.test(text) ||
+    /HTTP (?:429|503)/i.test(text) ||
     /assistant turn failed/i.test(text) ||
     /FailoverError/i.test(text) ||
     /HealthApiNetworkError/i.test(text) ||
@@ -45,7 +53,7 @@ export function sanitizeUserFacingError(text: string | null | undefined): string
     /generativelanguage\.googleapis\.com/i.test(text);
 
   if (hasRawError) {
-    return "I couldn't complete that just now. Nothing was changed — try again in a moment.";
+    return TEMPORARY_FAILURE;
   }
   return text;
 }

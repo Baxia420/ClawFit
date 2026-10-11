@@ -1,9 +1,13 @@
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type, type Static, type TSchema } from "typebox";
-import { isFallbackNotice, isMealLogConfirmation, sanitizeUserFacingError } from "./confirmation.js";
-import { derivePendingMealScope, healthFetch, withPendingMealScope, type SenderContext } from "./health-client.js";
-import { resolveImagePayload, MediaResolutionError, type MediaAuthorizationContext, type ResolvedImage } from "./media-resolver.js";
+import { Check } from "typebox/value";
+import { isFallbackNotice, sanitizeUserFacingError } from "./confirmation.js";
+import { derivePendingMealScope, healthFetch, HealthApiResponseError, HealthApiNetworkError, withPendingMealScope, type SenderContext } from "./health-client.js";
+import { resolveImagePayload, MediaResolutionError, type ResolvedImage } from "./media-resolver.js";
+
+import { inboundTurns, InboundTurns, MEDIA_FAILURE, TEMPORARY_FAILURE, type InboundTurn } from "./inbound-turns.js";
+import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-runtime";
 
 const ConfigSchema = Type.Object({
   apiUrl: Type.Optional(Type.String({ default: "http://127.0.0.1:4000" })),
@@ -55,7 +59,9 @@ function createSenderTool<TParams extends TSchema>(
       context: {
         config: Static<typeof ConfigSchema>;
         sender: SenderContext;
-        toolContext: any;
+        toolContext: OpenClawPluginToolContext;
+        turn?: InboundTurn;
+        turns: InboundTurns;
         signal?: AbortSignal;
       },
     ) => Promise<unknown>;
@@ -66,7 +72,7 @@ function createSenderTool<TParams extends TSchema>(
     label: options.name,
     description: options.description,
     parameters: options.parameters,
-    factory: ({ config, toolContext }: { config: Static<typeof ConfigSchema>; toolContext: any }) => {
+    factory: ({ api, config, toolContext }: { api: OpenClawPluginApi; config: Static<typeof ConfigSchema>; toolContext: OpenClawPluginToolContext }) => {
       const senderId = toolContext?.requesterSenderId;
       const conversationId = toolContext?.deliveryContext?.to;
       const provider = toolContext?.messageChannel ?? "whatsapp";
@@ -107,24 +113,37 @@ function createSenderTool<TParams extends TSchema>(
             conversationId,
           };
 
+          const turns = inboundTurns.get(api)!;
+          const turn = turns.forCall(toolContext, _toolCallId);
+          if (turn?.failure && turn.failedTools.has(options.name)) return jsonResult(turn.failure);
+          if (options.name === "estimate_nutrition" && !Check(options.parameters, rawParams)) {
+            const failure = { error: "invalid_estimate_request", message: "I couldn't validate that estimate request. Please describe the meal again or resend its photo.", retryable: false as const };
+            turns.fail(turn, options.name, failure);
+            return jsonResult(failure);
+          }
+          const writeBlock = turns.writeBlock(turn, options.name);
+          if (writeBlock) return jsonResult({ error: "meal_write_blocked", message: writeBlock, retryable: false });
           try {
             const result = await options.execute(rawParams as Static<TParams>, {
               config,
               sender,
-              toolContext,
+              toolContext, turns, ...(turn ? { turn } : {}),
               ...(signal ? { signal } : {}),
             });
             return jsonResult(result);
           } catch (err) {
             const message = (err as Error).message;
-            if (message.includes("UNRESOLVED_SENDER_IDENTITY:") || message.includes("isn't linked to a ClawFit profile yet")) {
-              return jsonResult({ error: "This WhatsApp account isn't linked to a ClawFit profile yet." });
-            }
-            if (message.includes("INACTIVE_USER:") || message.includes("profile is inactive")) {
-              return jsonResult({ error: "This ClawFit profile is inactive. Please contact the household administrator." });
-            }
-            if (message.includes("UNAUTHORIZED_GROUP:") || message.includes("not authorized")) {
-              return jsonResult({ error: "This WhatsApp group is not authorized for ClawFit health tracking." });
+            if (err instanceof HealthApiResponseError || err instanceof HealthApiNetworkError) {
+              const identityMessage = /UNRESOLVED_SENDER_IDENTITY|INACTIVE_USER|UNAUTHORIZED_GROUP|MISSING_(?:SENDER|CONVERSATION)_IDENTITY/.test(message)
+                ? sanitizeUserFacingError(message) : undefined;
+              const failure = {
+                error: err instanceof HealthApiResponseError ? err.code : "service_unavailable",
+                message: identityMessage ?? (err instanceof HealthApiResponseError && err.status < 500 && err.status !== 429
+                  ? "ClawFit couldn't validate that request. Please correct it before trying again." : TEMPORARY_FAILURE),
+                retryable: false as const,
+              };
+              turns.fail(turn, options.name, failure);
+              return jsonResult(failure);
             }
             throw err;
           }
@@ -144,50 +163,35 @@ const plugin = defineToolPlugin({
       name: "estimate_nutrition",
       description: "Estimate a difficult or uncertain meal synchronously via the strong nutrition model. This returns a draft only; it does not log anything.",
       parameters: Type.Object({
-        text: Type.String({ description: "Meal description and all visual details available from attached photo(s)." }),
+        text: Type.String({ maxLength: 4_000, description: "Meal description and all visual details available from attached photo(s). Current inbound image bytes are supplied automatically." }),
         imagePath: Type.Optional(Type.String({ description: "Optional local path or media URI (e.g. media://inbound/<id>) of the meal image to analyze." })),
         imagePaths: Type.Optional(Type.Array(Type.String(), { description: "Optional local paths or media URIs of attached meal images (e.g. package front + nutrition label)." })),
-        imageBase64: Type.Optional(Type.String({ description: "Optional raw base64 image data when the active client can provide it." })),
-        imageMimeType: Type.Optional(Type.String({ description: "MIME type paired with imageBase64." })),
-        images: Type.Optional(Type.Array(Type.Object({ base64: Type.String(), mimeType: Type.String() }), { description: "Optional multiple images (e.g. package front + nutrition label)." })),
-      }),
-      execute: async (params, { config, sender, toolContext, signal }) => {
-        const rawCtx = toolContext as Record<string, unknown> | undefined;
-        const authContext: MediaAuthorizationContext = {
-          senderId: sender.senderId,
-          conversationId: sender.conversationId,
-          workspaceDir: typeof rawCtx?.workspaceDir === "string" ? rawCtx.workspaceDir : undefined,
-          ...(rawCtx?.authContext as MediaAuthorizationContext | undefined),
-          ...(Array.isArray(rawCtx?.authorizedMediaPaths) ? { authorizedMediaPaths: rawCtx.authorizedMediaPaths as string[] } : {}),
-          ...(Array.isArray(rawCtx?.authorizedMediaUrls) ? { authorizedMediaUrls: rawCtx.authorizedMediaUrls as string[] } : {}),
-          ...(typeof rawCtx?.mediaPath === "string" ? { mediaPath: rawCtx.mediaPath as string } : {}),
-          ...(Array.isArray(rawCtx?.mediaPaths) ? { mediaPaths: rawCtx.mediaPaths as string[] } : {}),
-          ...(typeof rawCtx?.mediaUrl === "string" ? { mediaUrl: rawCtx.mediaUrl as string } : {}),
-          ...(Array.isArray(rawCtx?.mediaUrls) ? { mediaUrls: rawCtx.mediaUrls as string[] } : {}),
-          ...(Array.isArray(rawCtx?.inboundMedia) ? { inboundMedia: rawCtx.inboundMedia as any } : {}),
-          ...(Array.isArray(rawCtx?.authorizedAttachments)
-            ? { authorizedAttachments: rawCtx.authorizedAttachments as any }
-            : Array.isArray(rawCtx?.attachments)
-              ? { authorizedAttachments: rawCtx.attachments as any }
-              : {}),
-        };
-
+      }, { additionalProperties: false }),
+      execute: async (params, { config, sender, toolContext, turn, turns, signal }) => {
+        const authContext = turns.authorization(turn, toolContext);
         let resolved: { images?: ResolvedImage[]; image?: ResolvedImage };
         try {
+          if (turn?.hasImageAttachment && !turn.paths.length) throw new MediaResolutionError("image_not_found", "No local image attachment available from the trusted inbound event.");
           resolved = await resolveImagePayload({
             imagePath: params.imagePath,
-            imagePaths: params.imagePaths,
-            imageBase64: params.imageBase64,
-            imageMimeType: params.imageMimeType,
-            images: params.images,
+            imagePaths: (params.imagePaths?.length ? params.imagePaths : !params.imagePath ? turn?.paths : undefined),
             authContext,
           });
+          // Match the API's per-image encoded limit and total JSON body budget,
+          // in addition to the resolver's raw byte and image-count limits.
+          if (resolved.images?.some(image => image.base64.length > 6_000_000)
+            || Buffer.byteLength(JSON.stringify({ text: params.text, images: resolved.images })) > 16 * 1024 * 1024) {
+            throw new MediaResolutionError("oversized_image", "Encoded images exceed the API request budget.");
+          }
         } catch (err) {
           if (err instanceof MediaResolutionError) {
-            return {
-              error: err.code,
-              message: err.message,
-            };
+            const message = err.code === "oversized_image" ? "These photos are too large. Please resend smaller images."
+              : err.code === "too_many_images" ? "Please send at most four photos per estimate."
+              : err.code === "invalid_image_content" ? "That attachment isn't a supported photo. Please resend it as JPEG, PNG, WebP or HEIC."
+              : MEDIA_FAILURE;
+            const failure = { error: err.code, message, retryable: false as const };
+            turns.fail(turn, "estimate_nutrition", failure);
+            return failure;
           }
           throw err;
         }
@@ -655,27 +659,16 @@ const plugin = defineToolPlugin({
   ],
 });
 
-const lastPromptBySession = new Map<string, string>();
-const blockedRuns = new Set<string>();
 const toolStartTimes = new Map<string, number>();
 
 const registerTools = plugin.register;
 plugin.register = (api) => {
+  inboundTurns.set(api, new InboundTurns(api));
   registerTools(api);
 
   api.on(
     "before_prompt_build",
-    (event, context) => {
-      const sessionKey = context.sessionKey ?? context.sessionId ?? "default";
-      lastPromptBySession.set(sessionKey, event.prompt);
-      if (context.runId) {
-        api.runContext.setRunContext({ runId: context.runId, namespace: "currentPrompt", value: event.prompt });
-        blockedRuns.delete(context.runId);
-      }
-      if (context.sessionKey) {
-        api.runContext.setRunContext({ runId: context.sessionKey, namespace: "currentPrompt", value: event.prompt });
-      }
-
+    (_event, _context) => {
       const now = new Date();
       const klDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kuala_Lumpur" }).format(now);
       const klTime = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kuala_Lumpur", hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(now);
@@ -693,31 +686,7 @@ plugin.register = (api) => {
     (event, context) => {
       const toolKey = `${context.runId ?? ""}_${event.toolName}_${event.toolCallId ?? ""}`;
       toolStartTimes.set(toolKey, performance.now());
-
-      if (event.toolName !== "log_meal" && event.toolName !== "confirm_pending_meal") return;
-
-      if (context.runId && blockedRuns.has(context.runId)) {
-        return {
-          block: true,
-          blockReason: "Meal draft already rejected as unconfirmed in this turn. Reply to the user with the estimated calories/macros and ask if they would like you to log it.",
-        };
-      }
-
-      const fromRun = context.runId ? (api.runContext.getRunContext({ runId: context.runId, namespace: "currentPrompt" }) as string | undefined) : undefined;
-      const fromSession = context.sessionKey ? (api.runContext.getRunContext({ runId: context.sessionKey, namespace: "currentPrompt" }) as string | undefined) : undefined;
-      const fromCache = lastPromptBySession.get(context.sessionKey ?? context.sessionId ?? "default");
-      const rawUserText = typeof event.params?.rawUserText === "string" ? event.params.rawUserText : undefined;
-
-      const candidates = [fromRun, fromSession, fromCache, rawUserText].filter(Boolean) as string[];
-      const isConfirmed = candidates.some((prompt) => isMealLogConfirmation(prompt));
-
-      if (!isConfirmed) {
-        if (context.runId) blockedRuns.add(context.runId);
-        return {
-          block: true,
-          blockReason: "Meal draft is not yet confirmed by the user. Do not call log_meal again in this turn. Present the estimated calories, macros, and confidence to the user and ask 'Would you like me to log this?'",
-        };
-      }
+      while (toolStartTimes.size > 1024) toolStartTimes.delete(toolStartTimes.keys().next().value!);
     },
     { priority: 100 },
   );
@@ -761,7 +730,7 @@ ClawFit health tracking policy:
 - Treat clear workout phrases as actions without unnecessary clarification: "starting push" starts a Push workout; "bench 80 x 8" adds that set; "8 again" reuses the latest exercise and weight; "only got 6" adds another set unless explicitly called a correction. Resolve current state with get_active_workout when needed.
 - Corrections update the existing meal or workout-set ID after resolving it from recent/active state. Never create a replacement. Reuse a stable idempotency key when retrying a create action.
 - Perform only the action in the latest user message. Earlier unanswered or failed user messages are context, not queued actions: never replay them. A retry of the same current action must reuse its original idempotency key.
-- ALL food and meal estimation (including food photos, restaurant meals, mixed dishes, and food descriptions) MUST use estimate_nutrition. The dedicated strong nutrition model (Gemini 3.8 Flash / 3.7 Flash) performs nutritional calculation; never guess or compute calories/macros mentally. Persist every unconfirmed estimate with create_pending_meal before presenting it to the user. Do not call log_meal until the user confirms, unless their first message explicitly asks to log/save/track it.
+- ALL food and meal estimation (including food photos, restaurant meals, mixed dishes, and food descriptions) MUST use estimate_nutrition. The dedicated strong nutrition model (Gemini 3.8 Flash / 3.7 Flash) performs nutritional calculation; never guess or compute calories/macros mentally. For ordinary estimates, create a pending draft before presenting it. If the current user asks for estimate-only or no saving, present the estimate without creating or modifying any draft or meal. Never retry a tool error marked retryable=false in this turn; explain its message to the user. Current inbound photos are supplied automatically: omit image paths unless selecting a specific attached photo; never invent references or image bytes. Do not call log_meal until the user confirms, unless their first message explicitly asks to log/save/track it.
 - When an image of a product and an image of its nutrition label are both available, inspect both; printed nutrition label values take precedence over visual estimation.
 - On user confirmation ("log it", "log both", "yes", "save it"): DO NOT re-run estimate_nutrition. Confirm the relevant draft(s) with confirm_pending_meal. For a single draft, "log it" confirms that pending meal; for multiple items, "log both" confirms the active drafts.
 - Updating unconfirmed drafts before confirmation: use update_pending_meal. Updating confirmed/logged meals: use update_meal with the confirmed meal ID (confirmedMealId). Never use a pending draft ID with update_meal.

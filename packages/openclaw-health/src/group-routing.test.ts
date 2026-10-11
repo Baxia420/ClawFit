@@ -1,6 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import plugin from "./index.js";
 
+// These tests exercise API routing. Give write calls explicit trusted inbound
+// consent, as the real SDK does, instead of authorizing model rawUserText.
+let fixtureMessage = 0;
+function routingTool(fn: any, originalContext: any, api: any) {
+  if (typeof fn !== "function") return fn;
+  const toolContext = { ...originalContext, sessionKey: originalContext.sessionKey ?? "routing-test-session" };
+  const tool = fn(toolContext);
+  if (!tool || !["create_pending_meal", "update_pending_meal", "log_meal", "confirm_pending_meal", "update_meal", "delete_meal", "save_food_preset", "update_food_preset", "delete_food_preset"].includes(tool.name)) return tool;
+  return { ...tool, execute: async (id: string, params: unknown) => {
+    const runId = `routing-test-run-${++fixtureMessage}`;
+    const context = { sessionKey: toolContext.sessionKey, runId, senderId: toolContext.requesterSenderId, chatId: toolContext.deliveryContext?.to };
+    const hooks = (name: string) => api.on.mock.calls.filter((c: any[]) => c[0] === name).map((c: any[]) => c[1]);
+    for (const hook of hooks("reply_dispatch")) await hook({ ctx: { Provider: "whatsapp", SessionKey: toolContext.sessionKey, SenderId: context.senderId, To: context.chatId, MessageSid: runId, RawBody: "Log it" }, sendPolicy: "allow" }, { dispatcher: { sendFinalReply: vi.fn() } });
+    for (const hook of hooks("before_prompt_build")) await hook({ prompt: "Log it", messages: [] }, context);
+    for (const hook of hooks("before_tool_call")) await hook({ toolName: tool.name, toolCallId: id, params }, context);
+    return tool.execute(id, params);
+  } };
+}
+
 describe("OpenClaw group routing and multi-user isolation", () => {
   const approvedGroupId = "123456789-987654@g.us";
   const unapprovedGroupId = "999999999-111111@g.us";
@@ -29,7 +48,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
     const findTool = (name: string, toolContext: any) => {
       for (const fn of registered) {
-        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        const inst = routingTool(fn, toolContext, mockApi);
         if (inst?.name === name) return inst;
       }
       throw new Error(`Tool ${name} not found`);
@@ -70,7 +89,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
     const findTool = (name: string, toolContext: any) => {
       for (const fn of registered) {
-        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        const inst = routingTool(fn, toolContext, mockApi);
         if (inst?.name === name) return inst;
       }
       throw new Error(`Tool ${name} not found`);
@@ -111,7 +130,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
     const findTool = (name: string, toolContext: any) => {
       for (const fn of registered) {
-        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        const inst = routingTool(fn, toolContext, mockApi);
         if (inst?.name === name) return inst;
       }
       throw new Error(`Tool ${name} not found`);
@@ -198,7 +217,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
     const findTool = (name: string, toolContext: any) => {
       for (const fn of registered) {
-        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        const inst = routingTool(fn, toolContext, mockApi);
         if (inst?.name === name) return inst;
       }
       throw new Error(`Tool ${name} not found`);
@@ -264,7 +283,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
       userBConfirmInstance.execute("call-cross-confirm", {
         id: userADraftData.id,
       }),
-    ).rejects.toThrow("NOT_FOUND: Pending meal estimate not found");
+    ).resolves.toMatchObject({ details: { error: "NOT_FOUND", retryable: false } });
 
     // 4. User A confirms User A's draft -> Success
     const userAConfirmInstance = findTool("confirm_pending_meal", {
@@ -314,7 +333,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
     const findTool = (name: string, toolContext: any) => {
       for (const fn of registered) {
-        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        const inst = routingTool(fn, toolContext, mockApi);
         if (inst?.name === name) return inst;
       }
       throw new Error(`Tool ${name} not found`);
@@ -363,7 +382,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
     const findTool = (name: string, toolContext: any) => {
       for (const fn of registered) {
-        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        const inst = routingTool(fn, toolContext, mockApi);
         if (inst?.name === name) return inst;
       }
       throw new Error(`Tool ${name} not found`);
@@ -425,17 +444,21 @@ describe("OpenClaw group routing and multi-user isolation", () => {
       const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
       const findTool = (name: string, toolContext: any) => {
         for (const fn of registered) {
-          const inst = typeof fn === "function" ? fn(toolContext) : fn;
+          const inst = routingTool(fn, toolContext, mockApi);
           if (inst?.name === name) return inst;
         }
         throw new Error(`Tool ${name} not found`);
       };
 
+      const hook = (name: string) => mockApi.on.mock.calls.filter((c: any[]) => c[0] === name).map((c: any[]) => c[1]);
+      const runContext = { sessionKey: "image-session", runId: "image-run", senderId: userAPhone, chatId: approvedGroupId };
+      for (const handler of hook("reply_dispatch")) handler({ ctx: { Provider: "whatsapp", SessionKey: "image-session", SenderId: userAPhone, To: approvedGroupId, MessageSid: "image-message", MediaPaths: [testImagePath], RawBody: "Estimate this photo" }, sendPolicy: "allow" }, { dispatcher: { sendFinalReply: vi.fn() } });
+      for (const handler of hook("before_prompt_build")) handler({ prompt: "Estimate this photo" }, runContext);
+      for (const handler of hook("before_tool_call")) handler({ toolName: "estimate_nutrition", toolCallId: "call-estimate-img", params: {} }, runContext);
       const tool = findTool("estimate_nutrition", {
-        messageChannel: "whatsapp",
+        messageChannel: "whatsapp", sessionKey: "image-session",
         requesterSenderId: userAPhone,
         deliveryContext: { to: approvedGroupId },
-        authorizedMediaPaths: [testImagePath],
       });
 
       const res = await tool.execute("call-estimate-img", {
@@ -489,7 +512,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
     const findTool = (name: string, toolContext: any) => {
       for (const fn of registered) {
-        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        const inst = routingTool(fn, toolContext, mockApi);
         if (inst?.name === name) return inst;
       }
       throw new Error(`Tool ${name} not found`);
@@ -535,7 +558,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
     const findTool = (name: string, toolContext: any) => {
       for (const fn of registered) {
-        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        const inst = routingTool(fn, toolContext, mockApi);
         if (inst?.name === name) return inst;
       }
       throw new Error(`Tool ${name} not found`);
@@ -577,7 +600,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
     const findTool = (name: string, toolContext: any) => {
       for (const fn of registered) {
-        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        const inst = routingTool(fn, toolContext, mockApi);
         if (inst?.name === name) return inst;
       }
       throw new Error(`Tool ${name} not found`);
@@ -629,7 +652,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
     const findTool = (name: string, toolContext: any) => {
       for (const fn of registered) {
-        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        const inst = routingTool(fn, toolContext, mockApi);
         if (inst?.name === name) return inst;
       }
       throw new Error(`Tool ${name} not found`);
@@ -679,7 +702,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
     const findTool = (name: string, toolContext: any) => {
       for (const fn of registered) {
-        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        const inst = routingTool(fn, toolContext, mockApi);
         if (inst?.name === name) return inst;
       }
       throw new Error(`Tool ${name} not found`);
@@ -735,7 +758,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
     const findTool = (name: string, toolContext: any) => {
       for (const fn of registered) {
-        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        const inst = routingTool(fn, toolContext, mockApi);
         if (inst?.name === name) return inst;
       }
       throw new Error(`Tool ${name} not found`);
@@ -775,7 +798,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     const registered = mockApi.registerTool.mock.calls.map((c: any[]) => c[0]);
     const findTool = (name: string, toolContext: any) => {
       for (const fn of registered) {
-        const inst = typeof fn === "function" ? fn(toolContext) : fn;
+        const inst = routingTool(fn, toolContext, mockApi);
         if (inst?.name === name) return inst;
       }
       throw new Error(`Tool ${name} not found`);
