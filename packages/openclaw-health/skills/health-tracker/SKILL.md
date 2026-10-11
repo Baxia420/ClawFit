@@ -23,8 +23,8 @@ Apply this skill when the user describes food, asks about nutrition, starts or l
 ## Meal routing
 
 1. Call `find_food_preset` first for “usual”, “normal”, or named repeated foods.
-2. For food descriptions and photos needing nutrition estimation, call `estimate_nutrition` once to route through the dedicated strong model. Include all visible details from photos, packages, or descriptions. If both a product package and nutrition label are provided, inspect both and prioritize printed nutrition label values. Never calculate or invent calories/macros mentally.
-3. Persist every unconfirmed draft with `create_pending_meal`, then present it and wait for confirmation. The tool derives the peer/session scope; do not invent or pass a scope yourself.
+2. For food descriptions and photos needing nutrition estimation, call `estimate_nutrition` once (the current trusted photo attachments are supplied automatically; do not invent image references or bytes) to route through the dedicated strong model. Include all visible details from photos, packages, or descriptions. If both a product package and nutrition label are provided, inspect both and prioritize printed nutrition label values. Never calculate or invent calories/macros mentally.
+3. For ordinary estimates, persist an unconfirmed draft with `create_pending_meal`, then present it and wait for confirmation. For estimate-only requests or explicit instructions not to save, do not create or modify any draft or logged meal. The tool derives the peer/session scope; do not invent or pass a scope yourself.
 4. To correct an unconfirmed draft before confirmation, call `update_pending_meal`. Never call `update_meal` for unconfirmed drafts.
 5. On user confirmation (“log it”, “log both”, “yes”, “save it”), call `confirm_pending_meal` directly. Do NOT re-run `estimate_nutrition`. For a single meal, “log it” confirms the pending draft; for multiple meals, “log both” confirms the active drafts.
 6. Once confirmed, subsequent corrections to the logged meal must use `update_meal` with the canonical `confirmedMealId` returned by `confirm_pending_meal`.
@@ -43,3 +43,5 @@ For “what have I eaten today?” and daily totals, call `get_daily_nutrition` 
 - Corrections such as “second set was 7” call `update_workout_set`; “delete the last set” calls `delete_workout_set`.
 - Use `get_previous_exercise_performance` for prior performance. Use `get_workout_history` for history. Deterministic volume and 1RM values returned by tools are final.
 - Call `finish_workout` when the user says the session is done.
+
+Do not retry tool failures marked `retryable: false` within the same turn. Explain the returned user-facing message; ask the user to resend an inaccessible photo, or retry later for a temporary service failure.

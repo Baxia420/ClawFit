@@ -12,6 +12,7 @@ import {
   mealPatchSchema,
   notificationPreferenceSchema,
   NutritionEstimator,
+  NutritionEstimationError,
   pendingMealInputSchema,
   pendingMealPatchSchema,
   pendingMealScopeSchema,
@@ -249,6 +250,9 @@ export function createApp(options: CreateAppOptions) {
   });
 
   app.setErrorHandler((error, _request, reply) => {
+    if (error instanceof NutritionEstimationError) {
+      return reply.code(503).send({ error: { code: "NUTRITION_UNAVAILABLE", message: "Nutrition estimation is temporarily unavailable. Please try again later." } });
+    }
     if (error instanceof ZodError) {
       return reply.code(400).send({ error: { code: "INVALID_PAYLOAD", message: "Request validation failed", details: error.issues } });
     }
