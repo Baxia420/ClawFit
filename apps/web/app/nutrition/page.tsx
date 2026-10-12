@@ -2,6 +2,7 @@ import { isValidCalendarDate } from "@clawfit/health-core";
 import { MealList } from "../../components/MealList";
 import { Metric } from "../../components/Metric";
 import { TrendChart } from "../../components/TrendChart";
+import { NutritionChartGaps } from "../../components/NutritionChartGaps";
 import { healthApi, type Meal, type Settings, localDate } from "../../lib/api";
 import { calculateTrendSummary, calendarTrend } from "../../lib/dashboard";
 
@@ -112,6 +113,7 @@ export default async function NutritionPage({ searchParams }: { searchParams: Pr
           <strong>best estimate</strong>
         </div>
         {trend.length ? <TrendChart data={chartData} /> : <div className="empty"><strong>NO TREND YET</strong><span>Daily points appear after meals are logged.</span></div>}
+        {trend.length > 0 && <p className="chart-legend"><span className="legend-estimate">Best estimate</span><span className="legend-range">Calorie range</span><span>Gaps: see dates below</span></p>}
       </section>
       <section className="panel chart-panel">
         <div className="panel-title">
@@ -120,9 +122,10 @@ export default async function NutritionPage({ searchParams }: { searchParams: Pr
         </div>
         {trend.length ? <TrendChart data={chartData} mode="protein" /> : <div className="empty"><strong>NO TREND YET</strong></div>}
       </section>
+      <NutritionChartGaps data={chartData} />
       <section className="panel">
         <div className="panel-title">
-          <span>03 / MEAL ARCHIVE</span>
+          <span>04 / MEAL ARCHIVE</span>
           <strong>{totalMeals} matching meals</strong>
         </div>
         {meals.length ? <MealList meals={meals} timeZone={settings.timezone} /> : <div className="empty"><strong>No matching meals</strong><span>Try another date range or search.</span></div>}

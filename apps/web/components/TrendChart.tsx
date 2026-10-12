@@ -1,11 +1,11 @@
 "use client";
 
-import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Area, ComposedChart, Line, ErrorBar, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { trendChartPoints, type ChartPoint } from "../lib/nutrition-chart";
 
-type Point = { day: string; logged?: boolean; mealCount?: number | undefined; caloriesBest?: number | null; caloriesLow?: number | null; caloriesHigh?: number | null; proteinG?: number | null; estimatedOneRepMax?: number; knownCalories?: number | undefined; knownProteinG?: number | undefined; missingCalories?: number | undefined; missingProtein?: number | undefined };
 type Mode = "calories" | "protein" | "e1rm";
 
-export function TrendTooltip({ point, mode }: { point: Point | undefined; mode: Mode }) {
+export function TrendTooltip({ point, mode }: { point: ChartPoint | undefined; mode: Mode }) {
   if (!point) return null;
   const value = mode === "calories" ? point.caloriesBest : mode === "protein" ? point.proteinG : point.estimatedOneRepMax;
   const known = mode === "calories" ? point.knownCalories : point.knownProteinG;
@@ -21,21 +21,25 @@ export function TrendTooltip({ point, mode }: { point: Point | undefined; mode: 
   </div>;
 }
 
-export function TrendChart({ data, mode = "calories" }: { data: Point[]; mode?: Mode }) {
+export function TrendChart({ data, mode = "calories" }: { data: ChartPoint[]; mode?: Mode }) {
   const key = mode === "calories" ? "caloriesBest" : mode === "protein" ? "proteinG" : "estimatedOneRepMax";
-  const points = data.map(point => ({ ...point, calorieRange: point.caloriesLow == null || point.caloriesHigh == null ? null : [point.caloriesLow, point.caloriesHigh] }));
+  const points = trendChartPoints(data);
   return (
     <div className="chart" role="img" aria-label={`${mode} trend chart; gaps indicate unlogged or incomplete days`}>
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={points} margin={{ top: 12, right: 8, left: -20, bottom: 0 }}>
+        <ComposedChart data={points} margin={{ top: 12, right: 8, left: -20, bottom: 0 }}>
           <defs><linearGradient id={`fill-${mode}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#b8f34a" stopOpacity={0.55} /><stop offset="100%" stopColor="#b8f34a" stopOpacity={0.02} /></linearGradient></defs>
           <CartesianGrid stroke="#d7d5ca" strokeDasharray="2 4" vertical={false} />
           <XAxis dataKey="day" tickFormatter={(value: string) => value.slice(5, 10)} tick={{ fontSize: 11, fill: "#5e625c" }} axisLine={false} tickLine={false} />
           <YAxis domain={[0, "auto"]} tick={{ fontSize: 11, fill: "#5e625c" }} axisLine={false} tickLine={false} />
           <Tooltip filterNull={false} content={props => props.active ? <TrendTooltip point={points.find(point => point.day === String(props.label))} mode={mode} /> : null} />
           {mode === "calories" && <Area type="linear" dataKey="calorieRange" stroke="none" fill="#b8f34a" fillOpacity={0.4} connectNulls={false} />}
-          <Area type="linear" dataKey={key} stroke="#171b18" strokeWidth={2.5} fill={mode === "calories" ? "none" : `url(#fill-${mode})`} connectNulls={false} dot={{ r: 2, fill: "#171b18" }} activeDot={{ r: 5, fill: "#b8f34a", stroke: "#171b18" }} />
-        </AreaChart>
+          {mode === "calories" && <Line dataKey="calorieRangeMidpoint" stroke="none" dot={false} activeDot={false} tooltipType="none" isAnimationActive={false}>
+            <ErrorBar dataKey="calorieRangeError" direction="y" width={5} stroke="#548518" strokeWidth={1.5} />
+          </Line>}
+          {mode === "calories" ? <Line type="linear" dataKey={key} stroke="#171b18" strokeWidth={2.5} connectNulls={false} dot={{ r: 2, fill: "#171b18" }} activeDot={{ r: 5, fill: "#b8f34a", stroke: "#171b18" }} /> :
+            <Area type="linear" dataKey={key} stroke="#171b18" strokeWidth={2.5} fill={`url(#fill-${mode})`} connectNulls={false} dot={{ r: 2, fill: "#171b18" }} activeDot={{ r: 5, fill: "#b8f34a", stroke: "#171b18" }} />}
+        </ComposedChart>
       </ResponsiveContainer>
     </div>
   );

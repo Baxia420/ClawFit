@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import { nutritionCoverage, sumNutrition } from "@clawfit/health-core";
 import { calendarTrend, calculateDailyProgress, calculateTrendSummary, calculateTogetherMemberProgress, recordedMetric } from "./dashboard";
 import { TrendTooltip } from "../components/TrendChart";
+import { NutritionChartGaps } from "../components/NutritionChartGaps";
+import { nutritionChartGaps, trendChartPoints } from "./nutrition-chart";
 
 describe("Partial nutrition and logged-day coverage", () => {
   const known = { caloriesBest: 1005, caloriesLow: 900, caloriesHigh: 1100, proteinG: 48.9, carbsG: 120, fatG: 35, fiberG: 5 };
@@ -57,5 +59,44 @@ describe("Partial nutrition and logged-day coverage", () => {
     expect(unknown).toContain("Total incomplete");
     expect(unknown).not.toContain("0 g protein known subtotal");
     expect(renderToStaticMarkup(createElement(TrendTooltip, { point: { day: "2026-10-03", logged: false }, mode: "protein" }))).toContain("No meals logged");
+  });
+  it("identifies exact gap dates without treating recorded zero as missing", () => {
+    const gaps = nutritionChartGaps([
+      { day: "2026-09-18", logged: true, caloriesBest: 1720, caloriesLow: null, caloriesHigh: null, proteinG: null },
+      { day: "2026-09-21", logged: true, caloriesBest: null, caloriesLow: null, caloriesHigh: null, proteinG: null },
+      { day: "2026-10-07", logged: false },
+      { day: "2026-10-08", logged: true, caloriesBest: 0, caloriesLow: 0, caloriesHigh: 0, proteinG: 0 },
+    ]);
+    expect(gaps.map(gap => [gap.point.day, gap.issues])).toEqual([
+      ["2026-09-18", ["Protein incomplete", "Calorie range unavailable"]],
+      ["2026-09-21", ["Calories incomplete", "Protein incomplete", "Calorie range unavailable"]],
+      ["2026-10-07", ["No meals logged"]],
+    ]);
+  });
+  it("makes partial totals and their dates accessible without requiring a chart hover", () => {
+    const html = renderToStaticMarkup(createElement(NutritionChartGaps, { data: [
+      { day: "2026-09-21", logged: true, mealCount: 7, caloriesBest: null, proteinG: null, knownCalories: 2260, knownProteinG: 107, missingCalories: 1, missingProtein: 1 },
+      { day: "2026-10-07", logged: false },
+      { day: "2026-10-08", logged: true, mealCount: 1, caloriesBest: null, proteinG: null, knownCalories: 0, knownProteinG: 0, missingCalories: 1, missingProtein: 1 },
+    ] }));
+    expect(html.toLowerCase()).toContain('datetime="2026-09-21"');
+    expect(html).toContain("2260 kcal known; 1 meal missing values.");
+    expect(html).toContain("107 g protein known; 1 meal missing values.");
+    expect(html).toContain("No meals logged");
+    expect(html).not.toContain(">0 kcal known");
+    expect(html).toContain('/nutrition?date=2026-09-21&amp;days=7');
+    expect(renderToStaticMarkup(createElement(NutritionChartGaps, { data: [] }))).toBe("");
+  });
+  it("retains an isolated calorie range even when adjacent ranges or the best estimate are unknown", () => {
+    const points = trendChartPoints([
+      { day: "2026-09-19", caloriesBest: 2980, caloriesLow: null, caloriesHigh: null },
+      { day: "2026-09-20", caloriesBest: 900, caloriesLow: 700, caloriesHigh: 1100 },
+      { day: "2026-09-21", caloriesBest: null, caloriesLow: null, caloriesHigh: null },
+      { day: "2026-09-22", caloriesBest: null, caloriesLow: 400, caloriesHigh: 600 },
+    ]);
+    expect(points.map(point => point.calorieRange)).toEqual([null, [700, 1100], null, [400, 600]]);
+    expect(points[1]).toMatchObject({ calorieRangeMidpoint: 900, calorieRangeError: 200 });
+    expect(points[3]).toMatchObject({ caloriesBest: null, calorieRangeMidpoint: 500, calorieRangeError: 100 });
+    expect(points[2]).toMatchObject({ caloriesBest: null, calorieRangeMidpoint: null, calorieRangeError: null });
   });
 });
