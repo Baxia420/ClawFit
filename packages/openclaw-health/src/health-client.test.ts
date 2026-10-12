@@ -79,3 +79,13 @@ describe("OpenClaw Health API client", () => {
     );
   });
 });
+
+it("uses an explicit household URL and returns the API's verified recipient", async () => {
+  vi.stubEnv("HEALTH_API_OPENCLAW_TOKEN", "test-token");
+  try {
+    const fetchImpl = vi.fn().mockImplementation(async () => Response.json({ id: "meal", userId: "partner" }, { headers: { "x-clawfit-meal-recipient": encodeURIComponent(JSON.stringify({ userId: "partner", displayName: "Cici" })) } }));
+    const result = await healthFetch({}, "/v1/meals", { method: "POST", sender: { senderId: "original-sender", conversationId: "authorized-group", mealFor: "Cici" }, fetchImpl });
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain("/v1/household/meals");
+    expect(result).toMatchObject({ recipient: { displayName: "Cici" } });
+  } finally { vi.unstubAllEnvs(); }
+});

@@ -20,6 +20,12 @@ it.skipIf(process.platform === "win32")("launches the existing CLI entry without
     const execute = promisify(execFile);
     expect((await execute(process.execPath, [launcher, "--check"], options)).stdout).toContain("compatibility verified");
     expect((await execute(process.execPath, [launcher, "--version"], options)).stdout).toContain("2026.7.1-2");
+    const { stdout } = await execute(process.execPath, [launcher, "--help"], {
+      ...options, env: { ...options.env, NODE_COMPILE_CACHE: path.join(directory, "compile-cache") },
+    });
+    // --version exits before the real launcher's cache-respawn path. --help
+    // executes that path: both parent AND child must install the compatibility.
+    expect(stdout.match(/"reason":"compatibility_ready"/g)).toHaveLength(2);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

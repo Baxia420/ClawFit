@@ -306,6 +306,14 @@ export class HealthRepository {
     return pending;
   }
 
+  // The caller must have an explicit household meal grant at the API boundary.
+  // This returns a persisted estimate, never another sender's image attachment.
+  async getHouseholdPendingMeal(userId: string, id: string): Promise<typeof pendingMealEstimates.$inferSelect> {
+    const pending = await this.db.query.pendingMealEstimates.findFirst({ where: and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.userId, userId)) });
+    if (!pending) throw new NotFoundError("Pending meal estimate not found");
+    return pending;
+  }
+
   async getLatestPendingMeal(userId: string, scopeKey: string, now: Date = new Date()): Promise<typeof pendingMealEstimates.$inferSelect | null> {
     const pending = await this.db.query.pendingMealEstimates.findFirst({
       where: and(
@@ -322,7 +330,7 @@ export class HealthRepository {
 
   async listPendingMeals(
     userId: string,
-    scopeKey: string,
+    scopeKey: string | undefined,
     now: Date = new Date(),
     limit = 10,
   ): Promise<(typeof pendingMealEstimates.$inferSelect)[]> {
@@ -330,7 +338,7 @@ export class HealthRepository {
       where: and(
         eq(pendingMealEstimates.userId, userId),
         eq(pendingMealEstimates.confirmed, false),
-        eq(pendingMealEstimates.scopeKey, scopeKey),
+        scopeKey === undefined ? undefined : eq(pendingMealEstimates.scopeKey, scopeKey),
         isNull(pendingMealEstimates.cancelledAt),
         gt(pendingMealEstimates.expiresAt, now),
       ),
@@ -374,7 +382,7 @@ export class HealthRepository {
   async confirmPendingMeal(
     userId: string,
     id: string,
-    options: { scopeKey: string; occurredAt?: Date | undefined; idempotencyKey?: string | undefined },
+    options: { scopeKey: string; occurredAt?: Date | undefined; idempotencyKey?: string | undefined; confirmedByUserId?: string | undefined },
     now: Date = new Date(),
   ): Promise<HydratedMeal> {
     return this.db.transaction(async (tx) => {
@@ -416,7 +424,8 @@ export class HealthRepository {
           confidence: pending.confidence,
           uncertaintyReasons: pending.uncertaintyReasons,
           source: pending.source,
-          rawUserText: pending.rawUserText,
+          rawUserText: options.confirmedByUserId && options.confirmedByUserId !== userId
+            ? JSON.stringify({ householdConfirmation: { confirmedByUserId: options.confirmedByUserId, forUserId: userId, sourceText: pending.rawUserText } }) : pending.rawUserText,
           idempotencyKey: mealIdempotencyKey,
         })
         .returning();

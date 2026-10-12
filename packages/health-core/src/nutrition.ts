@@ -81,6 +81,8 @@ export class NutritionEstimator {
 export function nutritionPrompt(userText: string): string {
   return [
     "Estimate the consumed meal's nutrition. Return JSON only.",
+    "Several photos can show components or different views of one meal. Do not count the same food twice. User-stated amounts take priority over the number of food items pictured.",
+    "Use only the current supplied photos and current user description. An assistant description is supplementary; do not include previous meals mentioned in it.",
     "Use realistic ranges; never imply false precision. Hidden oils, sauces, and restaurant portions lower confidence.",
     "Required keys: label, items[{name, portion_description}], calories{best,low,high},",
     "macros{protein_g,carbs_g,fat_g,fiber_g}, confidence(high|medium|low), uncertainty_reasons[].",
