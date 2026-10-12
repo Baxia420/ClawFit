@@ -21,6 +21,7 @@ export interface InboundTurn {
   failure?: { error: string; message: string; retryable: false };
   delivered: boolean;
   fallbackSent: boolean;
+  estimation?: Promise<unknown>;
   dispatcher: PluginHookReplyDispatchContext["dispatcher"];
   canDeliver: boolean;
 }
@@ -45,7 +46,7 @@ export class InboundTurns {
       // Tail dispatch is the same inbound message, not a new authorization grant.
       if (this.turns.some(t => t.sessionKey === sessionKey && t.messageId === messageId
         && t.senderId === senderId && t.conversationId === conversationId && t.accountId === msg.AccountId)) return;
-      const paths = [...new Set(msg.MediaPaths?.length ? msg.MediaPaths : msg.MediaPath ? [msg.MediaPath] : [])];
+      const paths = [...new Set([...(msg.MediaPaths ?? []), ...(msg.MediaPath ? [msg.MediaPath] : [])])];
       const turn: InboundTurn = {
         sessionKey, senderId, conversationId, messageId,
         accountId: msg.AccountId,
@@ -95,6 +96,13 @@ export class InboundTurns {
         // Allow our one queued failure, then suppress duplicate terminal replies.
         if (turn.delivered || event.payload.channelData?.clawfitTerminalReply !== turn.runId) return { cancel: true, reason: "clawfit-terminal-reply-already-queued" };
       }
+      if (turn.failure) {
+        if (turn.delivered) return { cancel: true, reason: "clawfit-failure-already-delivered" };
+        turn.delivered = true;
+        // Do not allow a general-agent guess, stale estimate, attachment or
+        // logging offer to turn a failed tool result into apparent success.
+        return { payload: { text: turn.failure.message, isError: true } };
+      }
       turn.delivered = true;
     }, { priority: 200 });
     api.on("before_agent_finalize", (_event, context) => {
@@ -119,7 +127,7 @@ export class InboundTurns {
     this.prune();
     const turn = context.sessionKey ? this.calls.get(this.callKey(context.sessionKey, callId)) : undefined;
     if (!turn || turn.senderId !== context.requesterSenderId || turn.conversationId !== context.deliveryContext?.to
-      || (turn.accountId && turn.accountId !== context.agentAccountId) || context.messageChannel !== "whatsapp") return;
+      || turn.accountId !== context.agentAccountId || context.messageChannel !== "whatsapp") return;
     return turn;
   }
 
@@ -144,6 +152,12 @@ export class InboundTurns {
     if (!turn) return;
     turn.failure = failure;
     turn.failedTools.add(toolName);
+  }
+
+  estimateOnce(turn: InboundTurn, execute: () => Promise<unknown>): Promise<unknown> {
+    // Store the promise before work starts so concurrent tool calls for the
+    // same album share one read/estimate. Ownership is checked before this.
+    return turn.estimation ??= Promise.resolve().then(execute);
   }
 
   private bind(runId: string, turn: InboundTurn) { turn.runId = runId; this.runs.set(runId, turn); }

@@ -6,12 +6,12 @@ import plugin from "../packages/openclaw-health/src/index.js";
 import { createApp } from "../apps/api/src/create-app.js";
 import { NutritionEstimator, type NutritionModelClient } from "../packages/health-core/src/nutrition.js";
 import { DEFAULT_PRIMARY_USER_ID } from "../packages/db/src/index.js";
-import { MEDIA_FAILURE, TEMPORARY_FAILURE } from "../packages/openclaw-health/src/inbound-turns.js";
+import { TEMPORARY_FAILURE } from "../packages/openclaw-health/src/inbound-turns.js";
 
 type HealthRepository = Parameters<typeof createApp>[0]["repository"];
 type Api = Parameters<typeof plugin.register>[0];
 type Hook = (event: unknown, context: unknown) => unknown;
-type Tool = { name: string; execute: (id: string, params: unknown) => Promise<{ details: unknown }> };
+type Tool = { parameters: { properties: Record<string, unknown> }; name: string; execute: (id: string, params: unknown) => Promise<{ details: unknown }> };
 type Factory = (context: unknown) => Tool | null;
 const group = "120363000000000000@g.us";
 const sender = "+60111111111";
@@ -41,9 +41,9 @@ function harness() {
   const emit = async (name: string, event: unknown, context: unknown = {}) => {
     let result: unknown;
     for (const handler of hooks.get(name) ?? []) result = await handler(event, context) ?? result;
-    return result as { block?: boolean; cancel?: boolean; blockReason?: string } | undefined;
+    return result as { block?: boolean; cancel?: boolean; blockReason?: string; payload?: { text?: string; isError?: boolean } } | undefined;
   };
-  async function inbound(options: { id: string; runId: string; paths?: string[]; text?: string; senderId?: string; suppress?: boolean; dispatchRunId?: boolean }) {
+  async function inbound(options: { id: string; runId: string; paths?: string[]; text?: string; senderId?: string; suppress?: boolean; dispatchRunId?: boolean; mediaUrl?: string; hasPhoto?: boolean }) {
     const senderId = options.senderId ?? sender;
     const replies: Array<{ text?: string }> = [];
     const dispatcher = {
@@ -51,7 +51,7 @@ function harness() {
     };
     // SDK FinalizedMsgContext, not invented media fields on the tool context.
     await emit("reply_dispatch", {
-      ctx: { Provider: "whatsapp", Surface: "whatsapp", OriginatingChannel: "whatsapp", OriginatingTo: group, To: group, From: senderId, SenderId: senderId, AccountId: account, SessionKey: sessionKey, MessageSid: options.id, MediaPath: options.paths?.[0], MediaPaths: options.paths, MediaTypes: options.paths?.map(() => "image/png"), RawBody: options.text ?? "Estimate this photo", BodyForCommands: options.text ?? "Estimate this photo" },
+      ctx: { Provider: "whatsapp", Surface: "whatsapp", OriginatingChannel: "whatsapp", OriginatingTo: group, To: group, From: senderId, SenderId: senderId, AccountId: account, SessionKey: sessionKey, MessageSid: options.id, MediaPath: options.paths?.[0], MediaPaths: options.paths, MediaUrl: options.mediaUrl, MediaType: options.hasPhoto ? "image/png" : undefined, MediaTypes: options.paths?.map(() => "image/png"), RawBody: options.text ?? "Estimate this photo", BodyForCommands: options.text ?? "Estimate this photo" },
       ...(options.dispatchRunId ? { runId: options.runId } : {}), sessionKey,
       inboundAudio: false, sendPolicy: "allow", shouldRouteToOriginating: false, shouldSendToolSummaries: false, suppressUserDelivery: options.suppress ?? false,
     }, { dispatcher });
@@ -106,29 +106,97 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
     await app.close();
   });
 
-  it("supports media URI aliases but denies a different sender's path and prevents later retries across model failover", async () => {
+  it("does not expose paths, URIs or bytes and cannot select another sender's attachments", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ estimate }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     const h = harness();
     const a = await h.inbound({ id: "photo-a", runId: "run-a", paths: [photo] });
-    expect(await a.execute("estimate_nutrition", "alias", { text: "Food", imagePath: "media://inbound/meal" })).toMatchObject({ estimate });
-    const b = await h.inbound({ id: "photo-b", runId: "run-b", senderId: "+60222222222" });
-    expect(await b.execute("estimate_nutrition", "steal", { text: "Food", imagePath: photo })).toMatchObject({ error: "unauthorized_media", retryable: false });
-    await h.emit("before_prompt_build", { prompt: "retry", messages: [] }, b.run);
-    expect(await b.execute("estimate_nutrition", "retry", { text: "Food", imagePath: photo })).toMatchObject({ blocked: true });
+    const tool = h.factories.map(factory => factory(a.toolContext)).find(tool => tool?.name === "estimate_nutrition")!;
+    expect(Object.keys(tool.parameters.properties)).toEqual(["text"]);
+    expect(await a.execute("estimate_nutrition", "current", { text: "Food" })).toMatchObject({ estimate });
+    const b = await h.inbound({ id: "photo-b", runId: "run-b", senderId: "+60222222222", hasPhoto: true });
+    expect(await b.execute("estimate_nutrition", "steal", { text: "Food", imagePath: photo })).toMatchObject({ error: "invalid_estimate_request", retryable: false });
+    expect(await b.execute("estimate_nutrition", "retry", { text: "Food" })).toMatchObject({ blocked: true });
     await h.terminal("run-b", "end");
-    expect(b.replies).toEqual([{ text: MEDIA_FAILURE }]);
+    expect(b.replies[0]?.text).toContain("validate");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["media://inbound/whatsapp/photo-one", "media://inbound/2026/10/photo-two"])("ignores an inbound URI containing literal slashes when trusted paths exist: %s", async mediaUrl => {
+    const generate = vi.fn().mockResolvedValue(estimate);
+    const repository = { resolveUser: vi.fn().mockResolvedValue({ resolved: true, user: { id: DEFAULT_PRIMARY_USER_ID, active: true } }) } as unknown as HealthRepository;
+    const app = createApp({ repository, openclawToken: process.env.HEALTH_API_OPENCLAW_TOKEN, allowedGroupIds: [group], estimator: makeEstimator(generate), logger: false });
+    vi.stubGlobal("fetch", vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
+      const response = await app.inject({ method: "POST", url: new URL(String(url)).pathname, headers: init?.headers as Record<string, string>, payload: String(init?.body) });
+      return new Response(response.body, { status: response.statusCode });
+    }));
+    const h = harness();
+    const turn = await h.inbound({ id: "slash", runId: "slash-run", paths: [photo], mediaUrl });
+    expect(await turn.execute("estimate_nutrition", "slash", { text: "Food" })).toMatchObject({ estimate });
+    expect(generate.mock.calls[0]?.[0].image.base64).toBe(bytes.toString("base64"));
+    await app.close();
+  });
+
+  it("fails rather than degrading an image request into a text-only estimate", async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
+    const h = harness();
+    const missing = await h.inbound({ id: "missing", runId: "missing-run", mediaUrl: "media://inbound/whatsapp/photo", hasPhoto: true });
+    expect(await missing.execute("estimate_nutrition", "missing", { text: "Banana" })).toMatchObject({ error: "image_not_found", retryable: false });
+    expect(await missing.execute("estimate_nutrition", "missing-retry", { text: "Banana" })).toMatchObject({ blocked: true });
+    expect(fetchMock).not.toHaveBeenCalled();
+    const unbound = h.factories.map(factory => factory(missing.toolContext)).find(tool => tool?.name === "estimate_nutrition")!;
+    expect((await unbound.execute("unbound", { text: "Banana" })).details).toMatchObject({ error: "unauthorized_media", retryable: false });
+  });
+
+  it("forwards both images and quantities once even when duplicate tool calls run concurrently", async () => {
+    const second = path.join(path.dirname(photo), "banana.png");
+    const secondBytes = Buffer.concat([bytes, Buffer.from("second-photo")]);
+    await writeFile(second, secondBytes);
+    const generate = vi.fn().mockResolvedValue(estimate);
+    const repository = { resolveUser: vi.fn().mockResolvedValue({ resolved: true, user: { id: DEFAULT_PRIMARY_USER_ID, active: true } }) } as unknown as HealthRepository;
+    const app = createApp({ repository, openclawToken: process.env.HEALTH_API_OPENCLAW_TOKEN, allowedGroupIds: [group], estimator: makeEstimator(generate), logger: false });
+    const fetchMock = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
+      const response = await app.inject({ method: "POST", url: new URL(String(url)).pathname, headers: init?.headers as Record<string, string>, payload: String(init?.body) });
+      return new Response(response.body, { status: response.statusCode });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const h = harness();
+    const turn = await h.inbound({ id: "album", runId: "album-run", paths: [photo, second, photo], text: "190g fried vermicelli with carrots and eggs, and this banana. Estimate only, do not save." });
+    const results = await Promise.all([turn.execute("estimate_nutrition", "album-1", { text: "Banana" }), turn.execute("estimate_nutrition", "album-2", { text: "Vermicelli" })]);
+    for (const result of results) expect(result).toMatchObject({ estimate });
+    expect(fetchMock).toHaveBeenCalledTimes(1); expect(generate).toHaveBeenCalledTimes(1);
+    expect(generate.mock.calls[0]?.[0].images).toEqual([{ mimeType: "image/png", base64: bytes.toString("base64") }, { mimeType: "image/png", base64: secondBytes.toString("base64") }]);
+    expect(generate.mock.calls[0]?.[0].prompt).toContain("190g fried vermicelli with carrots and eggs");
+    expect(await turn.execute("estimate_nutrition", "album-3", { text: "Again" })).toMatchObject({ estimate });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await app.close();
   });
 
   it("does not permit tool-context ownership overrides or cross-account call reuse", async () => {
     const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
     const h = harness(); const a = await h.inbound({ id: "owned", runId: "owned-run", paths: [photo] });
-    expect(await a.execute("estimate_nutrition", "wrong-account", { text: "Food", imagePath: photo }, { agentAccountId: "other", authorizedMediaPaths: [photo], authContext: { senderId: sender } })).toMatchObject({ error: "unauthorized_media" });
+    expect(await a.execute("estimate_nutrition", "wrong-account", { text: "Food" }, { agentAccountId: "other", authorizedMediaPaths: [photo], authContext: { senderId: sender } })).toMatchObject({ error: "unauthorized_media" });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it.each(["media://inbound/%ZZ", "media://inbound/%2e%2e%2Fsecret", "/other/sender/meal.png"])("fails safely for %s and does not invoke inference on retry", async ref => {
+  it.each([
+    { requesterSenderId: "+60222222222" },
+    { deliveryContext: { to: "another-group@g.us" } },
+    { sessionKey: "another-session" },
+    { agentAccountId: "other" },
+  ])("does not reuse a photo or cached estimate across a different trusted identity: %j", async override => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ estimate }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const h = harness(); const turn = await h.inbound({ id: "owner", runId: "owner-run", paths: [photo] });
+    expect(await turn.execute("estimate_nutrition", "original", { text: "Food" })).toMatchObject({ estimate });
+    // A disallowed group is rejected even before attachment resolution.
+    const denied = await turn.execute("estimate_nutrition", "different", { text: "Food" }, override);
+    expect(denied).toHaveProperty("error");
+    expect(denied).not.toHaveProperty("estimate");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["media://inbound/whatsapp/photo", "media://inbound/2026/meal", "media://inbound/%ZZ", "media://inbound/%2e%2e%2Fsecret", "/other/sender/meal.png"])("fails safely for %s and does not invoke inference on retry", async ref => {
     const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
     const h = harness(); const turn = await h.inbound({ id: "bad", runId: "bad-run", paths: [photo] });
     expect(await turn.execute("estimate_nutrition", "bad-1", { text: "Food", imagePath: ref })).toMatchObject({ retryable: false });
@@ -166,6 +234,20 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
     await h.terminal("api-run", "end"); expect(turn.replies).toEqual([{ text: TEMPORARY_FAILURE }]); expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("replaces invented nutrition after a 503 before marking the final reply delivered", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: "NUTRITION_UNAVAILABLE", message: "Unavailable" } }), { status: 503 })));
+    const h = harness(); const turn = await h.inbound({ id: "guessed", runId: "guessed-run", paths: [photo] });
+    await turn.execute("estimate_nutrition", "failed", { text: "Food" });
+    const result = await h.emit("reply_payload_sending", { runId: "guessed-run", kind: "final", payload: { text: "This meal has 850 kcal and 40g protein. Shall I log it?", mediaUrl: "old-photo" } });
+    expect(result).toEqual({ payload: { text: TEMPORARY_FAILURE, isError: true } });
+    expect(JSON.stringify(result)).not.toMatch(/850|40g|log it|old-photo/);
+    await h.terminal("guessed-run", "end");
+    expect(turn.replies).toEqual([]);
+    expect(await h.emit("reply_payload_sending", { runId: "guessed-run", kind: "final", payload: { text: "850 kcal" } })).toMatchObject({ cancel: true });
+    const next = await h.inbound({ id: "next", runId: "next-run", senderId: "+60222222222" });
+    expect(await h.emit("reply_payload_sending", { runId: next.run.runId, kind: "final", payload: { text: "Hello" } })).toBeUndefined();
+  });
+
   it("turns a real estimator's primary 503 and fallback 429 into a clear temporary failure without saving or retrying", async () => {
     const generate = vi.fn().mockRejectedValueOnce(new Error("HTTP 503 SERVICE_UNAVAILABLE")).mockRejectedValueOnce(new Error("HTTP 429 RESOURCE_EXHAUSTED"));
     const repository = { resolveUser: vi.fn().mockResolvedValue({ resolved: true, user: { id: DEFAULT_PRIMARY_USER_ID, active: true } }), createMeal: vi.fn(), createPendingMeal: vi.fn() } as unknown as HealthRepository;
@@ -186,7 +268,7 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
     // The SDK queues its own terminal failure after lifecycle/error. Only one
     // user-facing reply is allowed even if that core error would also be sent.
     expect(await h.emit("reply_payload_sending", { runId: "failed-estimator-run", kind: "final", payload: { text: "HTTP 503", isError: true } })).toMatchObject({ cancel: true });
-    expect(await h.emit("reply_payload_sending", { runId: "failed-estimator-run", kind: "final", payload: { text: TEMPORARY_FAILURE, channelData: { clawfitTerminalReply: "failed-estimator-run" } } })).toBeUndefined();
+    expect(await h.emit("reply_payload_sending", { runId: "failed-estimator-run", kind: "final", payload: { text: TEMPORARY_FAILURE, channelData: { clawfitTerminalReply: "failed-estimator-run" } } })).toMatchObject({ payload: { text: TEMPORARY_FAILURE, isError: true } });
     expect(await h.emit("reply_payload_sending", { runId: "failed-estimator-run", kind: "final", payload: { text: TEMPORARY_FAILURE, channelData: { clawfitTerminalReply: "failed-estimator-run" } } })).toMatchObject({ cancel: true });
     await app.close();
   });
@@ -198,7 +280,7 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
     expect((await unbound.execute("missing-context", estimate)).details).toMatchObject({ error: "meal_write_blocked", retryable: false });
     await h.inbound({ id: "old-photo", runId: "old-photo-run", paths: [photo] });
     const current = await h.inbound({ id: "new-text", runId: "new-text-run", text: "Estimate a banana" });
-    expect(await current.execute("estimate_nutrition", "old-ref", { text: "Food", imagePath: photo })).toMatchObject({ error: "unauthorized_media" });
+    expect(await current.execute("estimate_nutrition", "old-ref", { text: "Food", imagePath: photo })).toMatchObject({ error: "invalid_estimate_request" });
     const injected = await h.inbound({ id: "injected-bytes", runId: "injected-run", paths: [photo] });
     expect(await injected.execute("estimate_nutrition", "bytes", { text: "Food", images: [{ mimeType: "image/png", base64: bytes.toString("base64") }] })).toMatchObject({ error: "invalid_estimate_request", retryable: false });
     expect(fetchMock).not.toHaveBeenCalled();
