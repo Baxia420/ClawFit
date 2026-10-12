@@ -15,7 +15,10 @@ function routingTool(fn: any, originalContext: any, api: any) {
     const hooks = (name: string) => api.on.mock.calls.filter((c: any[]) => c[0] === name).map((c: any[]) => c[1]);
     for (const hook of hooks("reply_dispatch")) await hook({ ctx: { Provider: "whatsapp", SessionKey: toolContext.sessionKey, SenderId: context.senderId, To: context.chatId, MessageSid: runId, RawBody: "Log it" }, sendPolicy: "allow" }, { dispatcher: { sendFinalReply: vi.fn() } });
     for (const hook of hooks("before_prompt_build")) await hook({ prompt: "Log it", messages: [] }, context);
-    for (const hook of hooks("before_tool_call")) await hook({ toolName: tool.name, toolCallId: id, params }, context);
+    for (const hook of hooks("before_tool_call")) {
+      const result = await hook({ toolName: tool.name, toolCallId: id, params }, context);
+      if (result?.params) params = result.params;
+    }
     return tool.execute(id, params);
   } };
 }
@@ -454,16 +457,18 @@ describe("OpenClaw group routing and multi-user isolation", () => {
       const runContext = { sessionKey: "image-session", runId: "image-run", senderId: userAPhone, chatId: approvedGroupId };
       for (const handler of hook("reply_dispatch")) handler({ ctx: { Provider: "whatsapp", SessionKey: "image-session", SenderId: userAPhone, To: approvedGroupId, MessageSid: "image-message", MediaPaths: [testImagePath], RawBody: "Estimate this photo" }, sendPolicy: "allow" }, { dispatcher: { sendFinalReply: vi.fn() } });
       for (const handler of hook("before_prompt_build")) handler({ prompt: "Estimate this photo" }, runContext);
-      for (const handler of hook("before_tool_call")) handler({ toolName: "estimate_nutrition", toolCallId: "call-estimate-img", params: {} }, runContext);
+      let estimateParams: unknown = { text: "Healthy protein bowl with chicken and greens" };
+      for (const handler of hook("before_tool_call")) {
+        const result = handler({ toolName: "estimate_nutrition", toolCallId: "call-estimate-img", params: estimateParams }, runContext);
+        if (result?.params) estimateParams = result.params;
+      }
       const tool = findTool("estimate_nutrition", {
         messageChannel: "whatsapp", sessionKey: "image-session",
         requesterSenderId: userAPhone,
         deliveryContext: { to: approvedGroupId },
       });
 
-      const res = await tool.execute("call-estimate-img", {
-        text: "Healthy protein bowl with chicken and greens",
-      });
+      const res = await tool.execute("call-estimate-img", estimateParams);
 
       const data = JSON.parse((res as any).content[0].text);
       expect(data.model).toBe("gemini-3.8-flash");
