@@ -26,7 +26,7 @@ describe("OpenClaw Health API client", () => {
 
   it("logs diagnostics but throws a typed user-safe network error", async () => {
     vi.stubEnv("HEALTH_API_OPENCLAW_TOKEN", "test-token-that-is-at-least-24-chars");
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
     const fetchImpl = vi.fn(async () => {
       throw new TypeError("fetch failed: ECONNREFUSED 127.0.0.1");
     });
@@ -35,7 +35,22 @@ describe("OpenClaw Health API client", () => {
 
     expect(error).toBeInstanceOf(HealthApiNetworkError);
     expect((error as Error).message).not.toContain("ECONNREFUSED");
-    expect(log).toHaveBeenCalledWith("[HEALTH_API_NETWORK] request failed", { path: "/v1/settings" }, expect.any(TypeError));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('"reason":"network_error"'));
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(/ECONNREFUSED|127\.0\.0\.1|settings|test-token/);
+  });
+
+  it.each([429, 503])("records a privacy-safe non-success outcome for HTTP %s", async status => {
+    vi.stubEnv("HEALTH_API_OPENCLAW_TOKEN", "test-secret");
+    const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    await expect(healthFetch({}, "/v1/nutrition/estimate", {
+      body: { text: "private caption", image: { base64: "private bytes" } },
+      sender: { senderId: "private sender", conversationId: "private group" },
+      fetchImpl: async () => Response.json({ error: { code: "PRIVATE_CODE", message: "private provider error" } }, { status }),
+    })).rejects.toMatchObject({ status });
+    expect(log).toHaveBeenCalledTimes(1);
+    const record = JSON.parse(String(log.mock.calls[0]![0]).slice("[clawfit-api] ".length));
+    expect(record).toEqual({ operation: "nutrition_estimate", reason: "http_error", status, durationMs: expect.any(Number) });
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(/private|PRIVATE|test-secret/);
   });
 
   it("injects sender identity and conversation headers when sender context is provided", async () => {

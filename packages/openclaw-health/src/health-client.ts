@@ -65,6 +65,12 @@ export async function healthFetch<T = unknown>(config: HealthPluginConfig, path:
   const apiUrl = config.apiUrl ?? process.env.HEALTH_API_URL ?? "http://127.0.0.1:4000";
   const start = performance.now();
   let response: Response;
+  // Fixed categories only: never log URLs, query strings, raw exceptions,
+  // response bodies, sender identifiers, captions, or image payloads.
+  const operation = path === "/v1/nutrition/estimate" ? "nutrition_estimate" : "health_request";
+  const diagnostic = (reason: "success" | "http_error" | "network_error" | "invalid_response", status?: number) => {
+    console.info(`[clawfit-api] ${JSON.stringify({ operation, reason, ...(status === undefined ? {} : { status }), durationMs: Math.round(performance.now() - start) })}`);
+  };
 
   const headers: Record<string, string> = {
     authorization: `Bearer ${token}`,
@@ -85,24 +91,24 @@ export async function healthFetch<T = unknown>(config: HealthPluginConfig, path:
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
       signal: options.signal ?? AbortSignal.timeout(30_000),
     });
-  } catch (error) {
-    console.error("[HEALTH_API_NETWORK] request failed", { path }, error);
+  } catch {
+    diagnostic("network_error");
     throw new HealthApiNetworkError();
   }
 
-  const durationMs = Math.round(performance.now() - start);
   let payload: unknown;
   try {
     payload = await response.json();
-  } catch (error) {
-    console.error("[HEALTH_API_NETWORK] invalid response", { path, status: response.status }, error);
+  } catch {
+    diagnostic("invalid_response", response.status);
     throw new HealthApiNetworkError();
   }
   if (!response.ok) {
+    diagnostic("http_error", response.status);
     const apiError = payload as { error?: { code?: string; message?: string } };
     throw new HealthApiResponseError(response.status, apiError.error?.code ?? "HEALTH_API_ERROR", apiError.error?.message ?? `Health API returned ${response.status}`);
   }
-  if (durationMs > 200) console.log(`[LATENCY] healthFetch path=${path} durationMs=${durationMs}`);
+  diagnostic("success", response.status);
   return payload as T;
 }
 

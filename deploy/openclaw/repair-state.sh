@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Repair only the dedicated service's agent/workspace directories. No credential reset.
+# Repair dedicated service ownership and refresh its repository-owned unit.
+# No credential reset.
 set -euo pipefail
 [[ "$(id -u)" -eq 0 ]] || { echo "Run as root: sudo bash deploy/openclaw/repair-state.sh" >&2; exit 1; }
 id clawfit >/dev/null
@@ -13,4 +14,12 @@ done
 for directory in "$STATE_DIR/agents/main" "$STATE_DIR/workspace"; do
   find "$directory" -xdev -user root \( -type f -o -type d \) -exec chown clawfit:clawfit {} +
 done
-echo "Service-user state directories repaired; credentials and secrets preserved."
+# The old redeploy.sh calls this file AFTER checking out the new commit. Install
+# the launcher here too, so the first upgrade from the old script takes effect.
+# New redeploy.sh also installs the target unit, including on rollback to an old
+# commit whose repair script does not know about the launcher.
+APP_DIR=/home/clawfit/app
+sudo -u clawfit -H node "$APP_DIR/scripts/openclaw-gateway.mjs" --check
+install -m 644 "$APP_DIR/deploy/openclaw/clawfit-openclaw.service" /etc/systemd/system/clawfit-openclaw.service
+systemctl daemon-reload
+echo "Service-user directories and unit updated; credentials and secrets preserved."
