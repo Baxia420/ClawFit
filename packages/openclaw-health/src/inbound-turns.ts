@@ -32,21 +32,25 @@ export interface InboundTurn {
 
 // The host can register the plugin again for read-only tool discovery. Its
 // factory API is not necessarily the API which received the active hooks.
-// Share only hook-issued call receipts across registrations/module copies, never
-// a "latest photo" lookup. Every receipt still requires the complete identity.
+// Share hook-issued receipts and bounded turn metadata across registrations/
+// module copies, never a "latest photo" lookup. Receipts require full identity.
 const CALL_RECEIPTS = Symbol.for("clawfit-health.inbound-call-receipts.v1");
 const CALL_GRANT_PARAM = "__clawfitInboundCallGrant";
 type CallReceipt = { turn: InboundTurn; toolName: string; callId: string; receivedAt: number };
-const host = globalThis as typeof globalThis & { [CALL_RECEIPTS]?: Map<string, CallReceipt> };
+type RejectedRun = { failure: NonNullable<InboundTurn["failure"]>; receivedAt: number; delivered: boolean };
+type TurnState = { turns: InboundTurn[]; runs: Map<string, InboundTurn>; rejectedRuns: Map<string, RejectedRun> };
+const TURN_STATE = Symbol.for("clawfit-health.inbound-turn-state.v1");
+const host = globalThis as typeof globalThis & { [CALL_RECEIPTS]?: Map<string, CallReceipt>; [TURN_STATE]?: TurnState };
+// The host can replace its active registry between dispatch and prompt build,
+// not just create a discovery registry. Keep bounded metadata across that handoff.
+const turnState = host[TURN_STATE] ??= { turns: [], runs: new Map(), rejectedRuns: new Map() };
 const callReceipts = host[CALL_RECEIPTS] ??= new Map<string, CallReceipt>();
 type DiagnosticReason = "turn_captured" | "missing_inbound_identity" | "run_bound" | "run_unbound" | "call_bound" | "call_unbound" | "missing_call_receipt" | "closed_turn" | "identity_mismatch" | "call_authorized" | "media_resolved" | "unauthorized_media" | "image_not_found" | "invalid_image_content" | "oversized_image" | "path_traversal" | "symlink_escape" | "too_many_images";
 
 // Ephemeral metadata only. Never infer ownership from the prompt, model
 // parameters, session history, or a directory's contents.
 export class InboundTurns {
-  private turns: InboundTurn[] = [];
-  private runs = new Map<string, InboundTurn>();
-  private rejectedRuns = new Map<string, { failure: NonNullable<InboundTurn["failure"]>; receivedAt: number; delivered: boolean }>();
+  private readonly state = turnState;
 
   constructor(private api: OpenClawPluginApi) {
     api.on("reply_dispatch", (event, context) => {
@@ -66,7 +70,7 @@ export class InboundTurns {
         return;
       }
       // Tail dispatch is the same inbound message, not a new authorization grant.
-      if (this.turns.some(t => t.sessionKey === sessionKey && t.messageId === messageId
+      if (this.state.turns.some(t => t.sessionKey === sessionKey && t.messageId === messageId
         && t.senderId === senderId && t.conversationId === conversationId
         && normalizeAccountId(t.accountId) === normalizeAccountId(accountId))) return;
       const paths = [...new Set([...(msg.MediaPaths ?? []), ...(msg.MediaPath ? [msg.MediaPath] : [])])];
@@ -83,14 +87,14 @@ export class InboundTurns {
         dispatcher: context.dispatcher,
         canDeliver: event.sendPolicy === "allow" && !event.suppressUserDelivery && !event.shouldRouteToOriginating,
       };
-      this.turns.push(turn);
+      this.state.turns.push(turn);
       this.diagnostic("turn_captured", turn, { hasDispatchRun: Boolean(event.runId) });
       if (event.runId) this.bind(event.runId, turn);
     });
     api.on("before_prompt_build", (_event, context) => {
       this.prune();
-      if (!context.runId || this.runs.has(context.runId) || this.rejectedRuns.has(context.runId)) return; // retain across model failover
-      const candidates = this.turns.filter(t => !t.closed && !t.runId && t.sessionKey === context.sessionKey
+      if (!context.runId || this.state.runs.has(context.runId) || this.state.rejectedRuns.has(context.runId)) return; // retain across model failover
+      const candidates = this.state.turns.filter(t => !t.closed && !t.runId && t.sessionKey === context.sessionKey
         && t.senderId === context.senderId && t.conversationId === (context.chatId ?? context.channelId));
       if (candidates.length === 1 && candidates[0]) this.bind(context.runId, candidates[0]);
       else this.diagnostic("run_unbound", undefined, { candidateCount: candidates.length, hasSession: Boolean(context.sessionKey), hasSender: Boolean(context.senderId), hasConversation: Boolean(context.chatId ?? context.channelId) });
@@ -98,7 +102,7 @@ export class InboundTurns {
     api.on("before_tool_call", (event, context) => {
       this.prune();
       const runId = context.runId ?? event.runId;
-      const turn = runId ? this.runs.get(runId) : undefined;
+      const turn = runId ? this.state.runs.get(runId) : undefined;
       const callId = event.toolCallId ?? context.toolCallId;
       const bindingValid = turn && !turn.closed && callId && context.sessionKey === turn.sessionKey
         && (!event.runId || !context.runId || event.runId === context.runId);
@@ -118,13 +122,13 @@ export class InboundTurns {
       }
       // A missing binding grants no attachments. Also keep failure-only state
       // so an unbound run cannot turn a veto into guessed nutrition or a write.
-      if (runId && !turn && event.toolName === "estimate_nutrition" && !this.rejectedRuns.has(runId)) {
-        this.rejectedRuns.set(runId, { failure: { error: "unauthorized_media", message: MEDIA_FAILURE, retryable: false }, receivedAt: Date.now(), delivered: false });
+      if (runId && !turn && event.toolName === "estimate_nutrition" && !this.state.rejectedRuns.has(runId)) {
+        this.state.rejectedRuns.set(runId, { failure: { error: "unauthorized_media", message: MEDIA_FAILURE, retryable: false }, receivedAt: Date.now(), delivered: false });
         // Retire ambiguous/unbound grants instead of letting them poison the
         // next message's candidate search or become stale photo fallbacks.
-        for (const pending of this.turns) if (!pending.runId && pending.sessionKey === context.sessionKey) pending.closed = true;
+        for (const pending of this.state.turns) if (!pending.runId && pending.sessionKey === context.sessionKey) pending.closed = true;
       }
-      const rejected = runId ? this.rejectedRuns.get(runId) : undefined;
+      const rejected = runId ? this.state.rejectedRuns.get(runId) : undefined;
       if (rejected && (event.toolName === "estimate_nutrition" || MEAL_WRITES.has(event.toolName))) return { block: true, blockReason: `${rejected.failure.message} Do not retry, guess nutrition or save a meal in this turn.` };
       if (turn?.failure && (turn.failedTools.has(event.toolName) || MEAL_WRITES.has(event.toolName))) {
         return { block: true, blockReason: `${turn.failure.message} Do not retry or save a meal in this turn.` };
@@ -140,9 +144,9 @@ export class InboundTurns {
       return grantedParams;
     }, { priority: 200 });
     api.on("reply_payload_sending", (event) => {
-      const turn = event.runId ? this.runs.get(event.runId) : undefined;
+      const turn = event.runId ? this.state.runs.get(event.runId) : undefined;
       if (event.kind !== "final" || event.payload.isFallbackNotice || isFallbackNotice(event.payload.text)) return;
-      const rejected = event.runId ? this.rejectedRuns.get(event.runId) : undefined;
+      const rejected = event.runId ? this.state.rejectedRuns.get(event.runId) : undefined;
       if (!turn && rejected) {
         if (rejected.delivered) return { cancel: true, reason: "clawfit-failure-already-delivered" };
         rejected.delivered = true;
@@ -164,7 +168,7 @@ export class InboundTurns {
       turn.delivered = true;
     }, { priority: 200 });
     api.on("before_agent_finalize", (_event, context) => {
-      if (context.runId && (this.runs.get(context.runId)?.failure || this.rejectedRuns.has(context.runId))) return { action: "finalize", reason: "ClawFit tool failed terminally for this turn; no revision or retries." };
+      if (context.runId && (this.state.runs.get(context.runId)?.failure || this.state.rejectedRuns.has(context.runId))) return { action: "finalize", reason: "ClawFit tool failed terminally for this turn; no revision or retries." };
     }, { priority: 200 });
     // The host terminal lifecycle event occurs after model failover is exhausted.
     // agent_end occurs per attempt and must not generate premature failure replies.
@@ -172,7 +176,7 @@ export class InboundTurns {
       id: "clawfit-terminal-reply", streams: ["lifecycle"],
       handle: (event) => {
         if (event.data.phase !== "error" && event.data.phase !== "end") return;
-        const turn = this.runs.get(event.runId);
+        const turn = this.state.runs.get(event.runId);
         if (!turn) return;
         if (turn.canDeliver && !turn.delivered && !turn.fallbackSent && (event.data.phase === "error" || turn.failure)) {
           turn.fallbackSent = turn.dispatcher.sendFinalReply({ text: turn.failure?.message ?? TEMPORARY_FAILURE, channelData: { clawfitTerminalReply: turn.runId } });
@@ -255,7 +259,7 @@ export class InboundTurns {
     this.api.logger?.info(`[clawfit-media] ${JSON.stringify({ reason, attachmentCount: turn?.paths.length ?? 0, bound: Boolean(turn?.runId), hasTrustedMetadata: Boolean(turn), hasInboundAccount: Boolean(turn?.accountId), activeRegistration: this.api.registrationMode === "full", ...metadata })}`);
   }
 
-  private bind(runId: string, turn: InboundTurn) { turn.runId = runId; this.runs.set(runId, turn); this.diagnostic("run_bound", turn); }
+  private bind(runId: string, turn: InboundTurn) { turn.runId = runId; this.state.runs.set(runId, turn); this.diagnostic("run_bound", turn); }
   private receipt(params: unknown, callId: string, toolName: string): CallReceipt | undefined {
     const grant = params && typeof params === "object" ? (params as Record<string, unknown>)[CALL_GRANT_PARAM] : undefined;
     const receipt = typeof grant === "string" ? callReceipts.get(grant) : undefined;
@@ -263,13 +267,13 @@ export class InboundTurns {
   }
   private prune() {
     const cutoff = Date.now() - 30 * 60_000;
-    const remaining = this.turns.filter(t => t.receivedAt >= cutoff).slice(-256);
+    const remaining = this.state.turns.filter(t => t.receivedAt >= cutoff).slice(-256);
     const retained = new Set(remaining);
-    for (const turn of this.turns) if (!retained.has(turn)) turn.closed = true;
-    this.turns = remaining;
-    for (const [key, turn] of this.runs) if (!retained.has(turn)) this.runs.delete(key);
-    for (const [key, state] of this.rejectedRuns) if (state.receivedAt < cutoff) this.rejectedRuns.delete(key);
-    while (this.rejectedRuns.size > 256) this.rejectedRuns.delete(this.rejectedRuns.keys().next().value!);
+    for (const turn of this.state.turns) if (!retained.has(turn)) turn.closed = true;
+    this.state.turns = remaining;
+    for (const [key, turn] of this.state.runs) if (!retained.has(turn)) this.state.runs.delete(key);
+    for (const [key, state] of this.state.rejectedRuns) if (state.receivedAt < cutoff) this.state.rejectedRuns.delete(key);
+    while (this.state.rejectedRuns.size > 256) this.state.rejectedRuns.delete(this.state.rejectedRuns.keys().next().value!);
     for (const [key, receipt] of callReceipts) if (receipt.receivedAt < cutoff || (receipt.turn && receipt.turn.receivedAt < cutoff)) callReceipts.delete(key);
     // Bound tool-call metadata too, including pathological model retry loops.
     while (callReceipts.size > 2048) callReceipts.delete(callReceipts.keys().next().value!);

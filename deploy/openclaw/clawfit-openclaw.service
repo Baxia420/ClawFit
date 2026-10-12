@@ -14,7 +14,7 @@ EnvironmentFile=/home/clawfit/.openclaw/.env
 Environment=NODE_ENV=production
 Environment=OPENCLAW_NO_RESPAWN=1
 Environment=NODE_COMPILE_CACHE=/home/clawfit/.cache/openclaw
-ExecStart=/usr/bin/env openclaw gateway run
+ExecStart=/usr/bin/env node /home/clawfit/app/scripts/openclaw-gateway.mjs gateway run
 Restart=on-failure
 RestartSec=5s
 RestartPreventExitStatus=78

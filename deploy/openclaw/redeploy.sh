@@ -21,11 +21,16 @@ sudo -u clawfit -H bash -c '
   pnpm --filter @clawfit/health-core build
   pnpm --filter @clawfit/db build
   pnpm openclaw:plugin:validate
+  if [[ -f scripts/openclaw-gateway.mjs ]]; then node scripts/openclaw-gateway.mjs --check; fi
 ' bash "$APP_DIR" "$TARGET_REF"
 
 systemctl stop clawfit-openclaw
 trap 'systemctl stop clawfit-openclaw; echo "Upgrade stopped before verification completed. Gateway is stopped; restore the previous commit/config or resolve the reported check before restarting." >&2' ERR
 bash "$APP_DIR/deploy/openclaw/repair-state.sh"
+# Refresh the repository-owned unit so upgrades actually use the compatibility
+# launcher; changing a workspace SDK alone does not affect the global gateway.
+install -m 644 "$APP_DIR/deploy/openclaw/clawfit-openclaw.service" /etc/systemd/system/clawfit-openclaw.service
+systemctl daemon-reload
 sudo -u clawfit -H bash -c '
   set -euo pipefail
   cd "$1"

@@ -530,10 +530,14 @@ The script executes:
 2. `pnpm install --frozen-lockfile` (as user `clawfit`)
 3. Build the health core and database packages (as user `clawfit`).
 4. `pnpm openclaw:plugin:validate` (as user `clawfit`)
-5. Stop the Gateway, repair only scoped state ownership, run setup/model configuration and the pre-restart checks. A fresh verified model report is required; no Gemini probes run automatically.
+5. Verify the pinned runtime compatibility bundle, stop the Gateway, repair scoped state ownership, refresh the repository-owned service unit, and run setup/model configuration and pre-restart checks. A fresh verified model report is required; no Gemini probes run automatically.
 6. Start the Gateway and run authenticated RPC/channel checks. A failed check stops the Gateway. Complete the separate live acceptance checks in section 18 before declaring success.
 
 All build outputs and repository files remain strictly owned by `clawfit:clawfit`.
+
+For the OpenClaw 2026.7.1-2 photo burst correction, see
+[WhatsApp burst handoff](whatsapp-burst-handoff.md) for runtime evidence,
+compatibility scope, first-upgrade handling and no-save acceptance tests.
 
 ### Rollback Procedure
 If an issue arises, roll back immediately to the previous approved commit:

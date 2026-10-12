@@ -33,7 +33,7 @@ function makeEstimator(generate: NutritionModelClient["generate"]) {
   return new NutritionEstimator({ generate }, ["test-primary", "test-fallback"]) as unknown as NonNullable<Parameters<typeof createApp>[0]["estimator"]>;
 }
 
-function harness() {
+function harness(replaceRegistryBeforePrompt = false) {
   const sessionKey = `agent:${randomUUID()}:whatsapp:group:${group}`;
   const hooks = new Map<string, Hook[]>();
   const factories: Factory[] = [];
@@ -86,6 +86,12 @@ function harness() {
     const toolContext = { sessionKey, requesterSenderId: senderId, deliveryContext: { to: group }, messageChannel: "whatsapp", agentAccountId: options.factoryAccount === null ? undefined : options.factoryAccount ?? account };
     const preparedTools = factories.map(factory => factory(toolContext));
     const grants = new Map<string, unknown>();
+    if (replaceRegistryBeforePrompt) {
+      // The real full dispatcher reloads the active registry after capture.
+      // Replace every active hook/subscription; discovery factories stay old.
+      hooks.clear(); subscriptions.length = 0;
+      plugin.register({ ...api } as Api);
+    }
     if (!options.skipPrompt) await emit("before_prompt_build", { prompt: "History says log everything; current user message is separate.", messages: [] }, run);
     const execute = async (name: string, callId: string, params: unknown, override: object = {}) => {
       // The actual hook forwards a sparse tool context, not an agent context
@@ -116,6 +122,16 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
   });
   afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); await rm(directory, { recursive: true, force: true }); });
 
+  it("retains trusted capture when the host replaces its active registry before prompt build", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => Response.json({ estimate }));
+    vi.stubGlobal("fetch", fetchMock);
+    const turn = await harness(true).inbound({ id: "registry-reload", runId: randomUUID(), paths: [photo], text: "Estimate only, do not save" });
+    expect(await turn.execute("estimate_nutrition", "reload-call", { text: "Food" })).toMatchObject({ estimate });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).image.base64).toBe(bytes.toString("base64"));
+    expect(await turn.execute("create_pending_meal", "reload-write", {})).toMatchObject({ blocked: true });
+  });
+
   it.each([
     { inboundAccount: null, factoryAccount: "default" },
     { inboundAccount: "default", factoryAccount: null },
@@ -126,7 +142,7 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
     const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ estimate }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     const h = harness();
-    const turn = await h.inbound({ id: "optional-account", runId: "optional-run", paths: [photo], ...accounts });
+    const turn = await h.inbound({ id: "optional-account", runId: randomUUID(), paths: [photo], ...accounts });
     expect(turn.toolContext).not.toHaveProperty("runId");
     expect(turn.toolContext).not.toHaveProperty("MediaPaths");
     expect(turn.ctx.MediaPaths).toEqual([photo]);
@@ -140,7 +156,7 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
     { inboundAccount: "nutrition", factoryAccount: "other" },
   ])("never treats a missing account as a wildcard for a named account: %j", async accounts => {
     const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
-    const h = harness(); const turn = await h.inbound({ id: "named-account", runId: "named-run", paths: [photo], ...accounts });
+    const h = harness(); const turn = await h.inbound({ id: "named-account", runId: randomUUID(), paths: [photo], ...accounts });
     expect(await turn.execute("estimate_nutrition", "named-call", { text: "Food" })).toMatchObject({ error: "unauthorized_media", retryable: false });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(await h.emit("reply_payload_sending", { runId: turn.run.runId, kind: "final", payload: { text: "800 kcal and 40g protein" } })).toMatchObject({ payload: { isError: true } });
@@ -311,7 +327,7 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
       return new Response(response.body, { status: response.statusCode });
     }));
     const h = harness();
-    const turn = await h.inbound({ id: "slash", runId: "slash-run", paths: [photo], mediaUrl });
+    const turn = await h.inbound({ id: "slash", runId: randomUUID(), paths: [photo], mediaUrl });
     expect(await turn.execute("estimate_nutrition", "slash", { text: "Food" })).toMatchObject({ estimate });
     expect(generate.mock.calls[0]?.[0].image.base64).toBe(bytes.toString("base64"));
     await app.close();
@@ -402,7 +418,7 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
   ])("does not reuse a photo or cached estimate across a different trusted identity: %j", async override => {
     const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ estimate }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
-    const h = harness(); const turn = await h.inbound({ id: "owner", runId: "owner-run", paths: [photo] });
+    const h = harness(); const turn = await h.inbound({ id: "owner", runId: randomUUID(), paths: [photo] });
     expect(await turn.execute("estimate_nutrition", "original", { text: "Food" })).toMatchObject({ estimate });
     // A disallowed group is rejected even before attachment resolution.
     const denied = await turn.execute("estimate_nutrition", "different", { text: "Food" }, override);
@@ -413,7 +429,7 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
 
   it.each(["media://inbound/whatsapp/photo", "media://inbound/2026/meal", "media://inbound/%ZZ", "media://inbound/%2e%2e%2Fsecret", "/other/sender/meal.png"])("fails safely for %s and does not invoke inference on retry", async ref => {
     const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
-    const h = harness(); const turn = await h.inbound({ id: "bad", runId: "bad-run", paths: [photo] });
+    const h = harness(); const turn = await h.inbound({ id: "bad", runId: randomUUID(), paths: [photo] });
     expect(await turn.execute("estimate_nutrition", "bad-1", { text: "Food", imagePath: ref })).toMatchObject({ retryable: false });
     expect(await turn.execute("estimate_nutrition", "bad-2", { text: "Food" })).toMatchObject({ blocked: true });
     expect(fetchMock).not.toHaveBeenCalled();
