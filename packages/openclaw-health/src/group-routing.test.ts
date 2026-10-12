@@ -463,13 +463,12 @@ describe("OpenClaw group routing and multi-user isolation", () => {
 
       const res = await tool.execute("call-estimate-img", {
         text: "Healthy protein bowl with chicken and greens",
-        imagePath: testImagePath,
       });
 
       const data = JSON.parse((res as any).content[0].text);
       expect(data.model).toBe("gemini-3.8-flash");
       expect(capturedRequestBody).toBeDefined();
-      expect(capturedRequestBody.text).toBe("Healthy protein bowl with chicken and greens");
+      expect(capturedRequestBody.text).toContain("Healthy protein bowl with chicken and greens");
       expect(capturedRequestBody.image).toBeDefined();
       expect(capturedRequestBody.image.mimeType).toBe("image/jpeg");
       expect(capturedRequestBody.image.base64).toBe(jpegBuffer.toString("base64"));
@@ -817,7 +816,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
     });
     const data = JSON.parse((res as any).content[0].text);
 
-    expect(data.error).toBe("unauthorized_media");
+    expect(data.error).toBe("invalid_estimate_request");
     expect(data.message).toBeDefined();
     // Verify inference was NEVER invoked
     expect(mockFetch).not.toHaveBeenCalled();

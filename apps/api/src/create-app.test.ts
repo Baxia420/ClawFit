@@ -31,6 +31,14 @@ const repository = {
 } as unknown as HealthRepository;
 
 describe("Health API", () => {
+  it("returns JSON null for no active workout so the web can render its empty state", async () => {
+    const scoped = { getUser: vi.fn().mockResolvedValue({ id: DEFAULT_PRIMARY_USER_ID, active: true }), getActiveWorkout: vi.fn().mockResolvedValue(null) } as unknown as HealthRepository;
+    const app = createApp({ repository: scoped, webToken, openclawToken, assertionSecret, logger: false });
+    const response = await app.inject({ method: "GET", url: "/v1/workouts/active", headers: { authorization: `Bearer ${validWebAssertion}` } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toBeNull();
+    await app.close();
+  });
   beforeAll(async () => {
     validWebAssertion = await makeWebAssertion();
   });

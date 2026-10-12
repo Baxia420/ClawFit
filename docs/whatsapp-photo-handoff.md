@@ -10,7 +10,7 @@ A second issue was independent of media: the guidance demanded persistence of ev
 
 ## Result and safeguards
 
-- Current image paths are handed to the resolver automatically when the model omits a reference. Explicit paths or media aliases must identify exactly one current authorized attachment. No directory search can substitute another sender's file with the same basename.
+- The ordinary nutrition tool accepts only `text`. All current trusted attachment paths are handed to the resolver automatically. Model-provided paths, media aliases and image bytes are rejected before inference. A `media://inbound/` URL containing literal slashes is never interpreted as a local path. No directory search can substitute another sender's file with the same basename.
 - Model-supplied base64 is removed from the WhatsApp tool schema. The plugin reads the authorized attachment itself. The Health API's independent image input remains available.
 - Traversal and malformed encoded IDs fail safely. Filesystem matching is case-sensitive. Every symlink path component is rejected, and a regular-file descriptor is read with a hard byte bound. The file is not re-opened between header inspection and byte forwarding.
 - The four-image, per-image and aggregate byte limits remain enforced. Encoded image sizes and JSON request budgets are also checked before forwarding. MIME types come from image magic bytes.
@@ -18,6 +18,8 @@ A second issue was independent of media: the guidance demanded persistence of ev
 - The outer terminal lifecycle event supplies one clear error if no final reply was delivered. Per-attempt `agent_end` events do not trigger a premature error. Core terminal error replies queued after that fallback are suppressed, while intermediate model-fallback notices remain silent. Suppressed delivery and cross-origin routing are not overridden.
 - Nutrition model exhaustion is returned by the API as a sanitized HTTP 503, including primary 503 plus fallback 429. No model diagnostics or credentials are shown to the user, and generic failure text does not claim a previous successful write was undone.
 - The bridge retains bounded, ephemeral message/attachment metadata for at most 30 minutes. It does not persist image data, change pairing or credentials, write identities, or touch historical meals.
+- All photos in one trusted inbound collection are forwarded in one request, with current user captions and quantities. Concurrent or subsequent estimate calls in the same turn share its first result. Separate messages retain separate ownership and estimates; attachments are never collected from another turn merely because their send times are close.
+- After a tool failure, outbound final payloads are replaced with the returned failure message before being marked delivered. A general-agent guess, stale estimate, logging offer, or media attachment cannot be delivered as a successful nutrition result for that failed turn.
 
 ## Validation
 

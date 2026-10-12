@@ -124,12 +124,15 @@ function createSenderTool<TParams extends TSchema>(
           const writeBlock = turns.writeBlock(turn, options.name);
           if (writeBlock) return jsonResult({ error: "meal_write_blocked", message: writeBlock, retryable: false });
           try {
-            const result = await options.execute(rawParams as Static<TParams>, {
+            const execute = () => options.execute(rawParams as Static<TParams>, {
               config,
               sender,
               toolContext, turns, ...(turn ? { turn } : {}),
               ...(signal ? { signal } : {}),
             });
+            const result = options.name === "estimate_nutrition" && turn
+              ? await turns.estimateOnce(turn, execute)
+              : await execute();
             return jsonResult(result);
           } catch (err) {
             const message = (err as Error).message;
@@ -161,26 +164,27 @@ const plugin = defineToolPlugin({
   tools: (tool) => [
     createSenderTool(tool, {
       name: "estimate_nutrition",
-      description: "Estimate a difficult or uncertain meal synchronously via the strong nutrition model. This returns a draft only; it does not log anything.",
+      description: "Estimate all food in the current message once via the dedicated nutrition model. All current authorized photos are supplied automatically; never supply image paths, URIs or image bytes. This does not save anything.",
       parameters: Type.Object({
         text: Type.String({ maxLength: 4_000, description: "Meal description and all visual details available from attached photo(s). Current inbound image bytes are supplied automatically." }),
-        imagePath: Type.Optional(Type.String({ description: "Optional local path or media URI (e.g. media://inbound/<id>) of the meal image to analyze." })),
-        imagePaths: Type.Optional(Type.Array(Type.String(), { description: "Optional local paths or media URIs of attached meal images (e.g. package front + nutrition label)." })),
       }, { additionalProperties: false }),
       execute: async (params, { config, sender, toolContext, turn, turns, signal }) => {
         const authContext = turns.authorization(turn, toolContext);
+        // The current user's quantities/captions take priority over the
+        // general agent's potentially incomplete description of an album.
+        const text = (turn?.text ? `${turn.text}\nAssistant description: ${params.text}` : params.text).slice(0, 4_000);
         let resolved: { images?: ResolvedImage[]; image?: ResolvedImage };
         try {
+          if (!turn) throw new MediaResolutionError("unauthorized_media", "Missing trusted current-message attachment context.");
           if (turn?.hasImageAttachment && !turn.paths.length) throw new MediaResolutionError("image_not_found", "No local image attachment available from the trusted inbound event.");
           resolved = await resolveImagePayload({
-            imagePath: params.imagePath,
-            imagePaths: (params.imagePaths?.length ? params.imagePaths : !params.imagePath ? turn?.paths : undefined),
+            imagePaths: turn.paths,
             authContext,
           });
           // Match the API's per-image encoded limit and total JSON body budget,
           // in addition to the resolver's raw byte and image-count limits.
           if (resolved.images?.some(image => image.base64.length > 6_000_000)
-            || Buffer.byteLength(JSON.stringify({ text: params.text, images: resolved.images })) > 16 * 1024 * 1024) {
+            || Buffer.byteLength(JSON.stringify({ text, images: resolved.images })) > 16 * 1024 * 1024) {
             throw new MediaResolutionError("oversized_image", "Encoded images exceed the API request budget.");
           }
         } catch (err) {
@@ -199,7 +203,7 @@ const plugin = defineToolPlugin({
         return healthFetch(config, "/v1/nutrition/estimate", {
           method: "POST",
           body: {
-            text: params.text,
+            text,
             ...(resolved.images && resolved.images.length > 1
               ? { images: resolved.images }
               : resolved.image
@@ -730,7 +734,7 @@ ClawFit health tracking policy:
 - Treat clear workout phrases as actions without unnecessary clarification: "starting push" starts a Push workout; "bench 80 x 8" adds that set; "8 again" reuses the latest exercise and weight; "only got 6" adds another set unless explicitly called a correction. Resolve current state with get_active_workout when needed.
 - Corrections update the existing meal or workout-set ID after resolving it from recent/active state. Never create a replacement. Reuse a stable idempotency key when retrying a create action.
 - Perform only the action in the latest user message. Earlier unanswered or failed user messages are context, not queued actions: never replay them. A retry of the same current action must reuse its original idempotency key.
-- ALL food and meal estimation (including food photos, restaurant meals, mixed dishes, and food descriptions) MUST use estimate_nutrition. The dedicated strong nutrition model (Gemini 3.8 Flash / 3.7 Flash) performs nutritional calculation; never guess or compute calories/macros mentally. For ordinary estimates, create a pending draft before presenting it. If the current user asks for estimate-only or no saving, present the estimate without creating or modifying any draft or meal. Never retry a tool error marked retryable=false in this turn; explain its message to the user. Current inbound photos are supplied automatically: omit image paths unless selecting a specific attached photo; never invent references or image bytes. Do not call log_meal until the user confirms, unless their first message explicitly asks to log/save/track it.
+- ALL food and meal estimation (including food photos, restaurant meals, mixed dishes, and food descriptions) MUST use estimate_nutrition. The dedicated nutrition model performs nutritional calculation; never guess or compute calories/macros mentally. Call it once for all foods and photos in the current inbound message, including an album; all trusted current attachments are supplied automatically. Never supply image paths, URIs or image bytes. Repeated calls in the same turn reuse its first result. For ordinary successful estimates, create a pending draft before presenting it. If the current user asks for estimate-only or no saving, present the successful estimate without creating or modifying any draft or meal. If estimation fails, provide only the returned error message: never supply new calories/macros from your own knowledge or a previous meal, and never offer to log a failed estimate. Never retry a tool error marked retryable=false in this turn. Do not call log_meal until the user confirms, unless their first message explicitly asks to log/save/track it.
 - When an image of a product and an image of its nutrition label are both available, inspect both; printed nutrition label values take precedence over visual estimation.
 - On user confirmation ("log it", "log both", "yes", "save it"): DO NOT re-run estimate_nutrition. Confirm the relevant draft(s) with confirm_pending_meal. For a single draft, "log it" confirms that pending meal; for multiple items, "log both" confirms the active drafts.
 - Updating unconfirmed drafts before confirmation: use update_pending_meal. Updating confirmed/logged meals: use update_meal with the confirmed meal ID (confirmedMealId). Never use a pending draft ID with update_meal.
