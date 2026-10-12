@@ -663,7 +663,9 @@ export function createApp(options: CreateAppOptions) {
     const body = confirmPendingMealSchema.parse(request.body ?? {});
     const owner = await pendingOwner(request, params.id, body.scopeKey);
     await setMealRecipient(request, reply, owner);
-    const confirmation = { ...body, scopeKey: request.pendingMealScope ?? body.scopeKey, confirmedByUserId: requireRequestUserId(request) };
+    const confirmation = { ...body, scopeKey: request.pendingMealScope ?? body.scopeKey,
+      ...(owner !== requireRequestUserId(request) ? { confirmedByUserId: requireRequestUserId(request) } : {}),
+    };
     return reply.code(200).send(await options.repository.confirmPendingMeal(owner, params.id, confirmation));
   });
   app.get("/v1/meals/recent", async (request) => {
