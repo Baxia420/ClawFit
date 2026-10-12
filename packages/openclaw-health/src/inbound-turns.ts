@@ -1,4 +1,6 @@
 import type { OpenClawPluginApi, OpenClawPluginToolContext, PluginHookReplyDispatchContext } from "openclaw/plugin-sdk/plugin-runtime";
+import { normalizeAccountId } from "openclaw/plugin-sdk/routing";
+import { randomUUID } from "node:crypto";
 import { isMealLogConfirmation, isNoSaveRequest, isFallbackNotice, TEMPORARY_FAILURE } from "./confirmation.js";
 import type { MediaAuthorizationContext } from "./media-resolver.js";
 
@@ -22,18 +24,31 @@ export interface InboundTurn {
   delivered: boolean;
   fallbackSent: boolean;
   estimation?: Promise<unknown>;
+  photoDraft?: Promise<unknown>;
   dispatcher: PluginHookReplyDispatchContext["dispatcher"];
   canDeliver: boolean;
+  closed?: boolean;
 }
 
-// Per-plugin-instance, ephemeral metadata only. Never infer ownership from the prompt,
-// model parameters, session history, or a directory's contents.
+// The host can register the plugin again for read-only tool discovery. Its
+// factory API is not necessarily the API which received the active hooks.
+// Share only hook-issued call receipts across registrations/module copies, never
+// a "latest photo" lookup. Every receipt still requires the complete identity.
+const CALL_RECEIPTS = Symbol.for("clawfit-health.inbound-call-receipts.v1");
+const CALL_GRANT_PARAM = "__clawfitInboundCallGrant";
+type CallReceipt = { turn: InboundTurn; toolName: string; callId: string; receivedAt: number };
+const host = globalThis as typeof globalThis & { [CALL_RECEIPTS]?: Map<string, CallReceipt> };
+const callReceipts = host[CALL_RECEIPTS] ??= new Map<string, CallReceipt>();
+type DiagnosticReason = "turn_captured" | "missing_inbound_identity" | "run_bound" | "run_unbound" | "call_bound" | "call_unbound" | "missing_call_receipt" | "closed_turn" | "identity_mismatch" | "call_authorized" | "media_resolved" | "unauthorized_media" | "image_not_found" | "invalid_image_content" | "oversized_image" | "path_traversal" | "symlink_escape" | "too_many_images";
+
+// Ephemeral metadata only. Never infer ownership from the prompt, model
+// parameters, session history, or a directory's contents.
 export class InboundTurns {
   private turns: InboundTurn[] = [];
   private runs = new Map<string, InboundTurn>();
-  private calls = new Map<string, InboundTurn>();
+  private rejectedRuns = new Map<string, { failure: NonNullable<InboundTurn["failure"]>; receivedAt: number; delivered: boolean }>();
 
-  constructor(api: OpenClawPluginApi) {
+  constructor(private api: OpenClawPluginApi) {
     api.on("reply_dispatch", (event, context) => {
       this.prune();
       const msg = event.ctx;
@@ -42,14 +57,22 @@ export class InboundTurns {
       const senderId = msg.SenderId;
       const conversationId = msg.OriginatingTo ?? msg.To;
       const messageId = msg.MessageSidFull ?? msg.MessageSid;
-      if (provider !== "whatsapp" || !sessionKey || !senderId || !conversationId || !messageId) return;
+      const accountId = msg.AccountId ?? event.originatingAccountId;
+      if (provider !== "whatsapp") return;
+      if (!sessionKey || !senderId || !conversationId || !messageId) {
+        this.diagnostic("missing_inbound_identity", undefined, {
+          hasSession: Boolean(sessionKey), hasSender: Boolean(senderId), hasConversation: Boolean(conversationId), hasMessage: Boolean(messageId),
+        });
+        return;
+      }
       // Tail dispatch is the same inbound message, not a new authorization grant.
       if (this.turns.some(t => t.sessionKey === sessionKey && t.messageId === messageId
-        && t.senderId === senderId && t.conversationId === conversationId && t.accountId === msg.AccountId)) return;
+        && t.senderId === senderId && t.conversationId === conversationId
+        && normalizeAccountId(t.accountId) === normalizeAccountId(accountId))) return;
       const paths = [...new Set([...(msg.MediaPaths ?? []), ...(msg.MediaPath ? [msg.MediaPath] : [])])];
       const turn: InboundTurn = {
         sessionKey, senderId, conversationId, messageId,
-        accountId: msg.AccountId,
+        accountId,
         text: msg.BodyForCommands ?? msg.RawBody ?? "",
         paths,
         hasImageAttachment: paths.length > 0 || Boolean(event.images?.length)
@@ -61,36 +84,71 @@ export class InboundTurns {
         canDeliver: event.sendPolicy === "allow" && !event.suppressUserDelivery && !event.shouldRouteToOriginating,
       };
       this.turns.push(turn);
+      this.diagnostic("turn_captured", turn, { hasDispatchRun: Boolean(event.runId) });
       if (event.runId) this.bind(event.runId, turn);
     });
     api.on("before_prompt_build", (_event, context) => {
       this.prune();
-      if (!context.runId || this.runs.has(context.runId)) return; // retain across model failover
-      const candidates = this.turns.filter(t => !t.runId && t.sessionKey === context.sessionKey
+      if (!context.runId || this.runs.has(context.runId) || this.rejectedRuns.has(context.runId)) return; // retain across model failover
+      const candidates = this.turns.filter(t => !t.closed && !t.runId && t.sessionKey === context.sessionKey
         && t.senderId === context.senderId && t.conversationId === (context.chatId ?? context.channelId));
       if (candidates.length === 1 && candidates[0]) this.bind(context.runId, candidates[0]);
+      else this.diagnostic("run_unbound", undefined, { candidateCount: candidates.length, hasSession: Boolean(context.sessionKey), hasSender: Boolean(context.senderId), hasConversation: Boolean(context.chatId ?? context.channelId) });
     }, { priority: 200 });
     api.on("before_tool_call", (event, context) => {
+      this.prune();
       const runId = context.runId ?? event.runId;
       const turn = runId ? this.runs.get(runId) : undefined;
-      if (turn && event.toolCallId && context.sessionKey === turn.sessionKey) {
-        this.calls.set(this.callKey(turn.sessionKey, event.toolCallId), turn);
+      const callId = event.toolCallId ?? context.toolCallId;
+      const bindingValid = turn && !turn.closed && callId && context.sessionKey === turn.sessionKey
+        && (!event.runId || !context.runId || event.runId === context.runId);
+      let grantedParams: { params: Record<string, unknown> } | undefined;
+      if (bindingValid) {
+        // Call IDs need only be unique inside a run. The host wrapper forwards
+        // this hook's adjusted params to execute, even for cached descriptors
+        // whose factory belongs to another registration. Never expose the
+        // unpredictable grant in the model-facing schema or tool result.
+        const grant = randomUUID();
+        callReceipts.set(grant, { turn, toolName: event.toolName, callId, receivedAt: Date.now() });
+        grantedParams = { params: { ...event.params, [CALL_GRANT_PARAM]: grant } };
+        this.diagnostic("call_bound", turn);
+      } else if (event.toolName === "estimate_nutrition" || MEAL_WRITES.has(event.toolName)) {
+        this.diagnostic("call_unbound", turn, { hasRun: Boolean(runId), hasCall: Boolean(callId), hasSession: Boolean(context.sessionKey) });
+        if (turn && event.toolName === "estimate_nutrition") this.fail(turn, event.toolName, { error: "unauthorized_media", message: MEDIA_FAILURE, retryable: false });
       }
+      // A missing binding grants no attachments. Also keep failure-only state
+      // so an unbound run cannot turn a veto into guessed nutrition or a write.
+      if (runId && !turn && event.toolName === "estimate_nutrition" && !this.rejectedRuns.has(runId)) {
+        this.rejectedRuns.set(runId, { failure: { error: "unauthorized_media", message: MEDIA_FAILURE, retryable: false }, receivedAt: Date.now(), delivered: false });
+        // Retire ambiguous/unbound grants instead of letting them poison the
+        // next message's candidate search or become stale photo fallbacks.
+        for (const pending of this.turns) if (!pending.runId && pending.sessionKey === context.sessionKey) pending.closed = true;
+      }
+      const rejected = runId ? this.rejectedRuns.get(runId) : undefined;
+      if (rejected && (event.toolName === "estimate_nutrition" || MEAL_WRITES.has(event.toolName))) return { block: true, blockReason: `${rejected.failure.message} Do not retry, guess nutrition or save a meal in this turn.` };
       if (turn?.failure && (turn.failedTools.has(event.toolName) || MEAL_WRITES.has(event.toolName))) {
         return { block: true, blockReason: `${turn.failure.message} Do not retry or save a meal in this turn.` };
       }
-      if (!MEAL_WRITES.has(event.toolName)) return;
-      if (!turn) return { block: true, blockReason: "Missing trusted current-message context. Do not save a draft or meal; ask the user to resend their request." };
+      if (!MEAL_WRITES.has(event.toolName)) return grantedParams;
+      if (!bindingValid) return { block: true, blockReason: "Missing trusted current-message context. Do not save a draft or meal; ask the user to resend their request." };
       if (isNoSaveRequest(turn.text)) {
         return { block: true, blockReason: "The user explicitly requested no saving. Do not create or modify a pending draft or logged meal." };
       }
       if ((event.toolName === "log_meal" || event.toolName === "confirm_pending_meal") && !isMealLogConfirmation(turn.text)) {
         return { block: true, blockReason: "No confirmation in the current trusted user message. Do not retry logging; present the estimate and ask whether to log it." };
       }
+      return grantedParams;
     }, { priority: 200 });
     api.on("reply_payload_sending", (event) => {
       const turn = event.runId ? this.runs.get(event.runId) : undefined;
-      if (!turn || event.kind !== "final" || event.payload.isFallbackNotice || isFallbackNotice(event.payload.text)) return;
+      if (event.kind !== "final" || event.payload.isFallbackNotice || isFallbackNotice(event.payload.text)) return;
+      const rejected = event.runId ? this.rejectedRuns.get(event.runId) : undefined;
+      if (!turn && rejected) {
+        if (rejected.delivered) return { cancel: true, reason: "clawfit-failure-already-delivered" };
+        rejected.delivered = true;
+        return { payload: { text: rejected.failure.message, isError: true } };
+      }
+      if (!turn) return;
       if (turn.fallbackSent) {
         // The SDK can queue its own final error after emitting lifecycle/error.
         // Allow our one queued failure, then suppress duplicate terminal replies.
@@ -106,7 +164,7 @@ export class InboundTurns {
       turn.delivered = true;
     }, { priority: 200 });
     api.on("before_agent_finalize", (_event, context) => {
-      if (context.runId && this.runs.get(context.runId)?.failure) return { action: "finalize", reason: "ClawFit tool failed terminally for this turn; no revision or retries." };
+      if (context.runId && (this.runs.get(context.runId)?.failure || this.rejectedRuns.has(context.runId))) return { action: "finalize", reason: "ClawFit tool failed terminally for this turn; no revision or retries." };
     }, { priority: 200 });
     // The host terminal lifecycle event occurs after model failover is exhausted.
     // agent_end occurs per attempt and must not generate premature failure replies.
@@ -119,16 +177,34 @@ export class InboundTurns {
         if (turn.canDeliver && !turn.delivered && !turn.fallbackSent && (event.data.phase === "error" || turn.failure)) {
           turn.fallbackSent = turn.dispatcher.sendFinalReply({ text: turn.failure?.message ?? TEMPORARY_FAILURE, channelData: { clawfitTerminalReply: turn.runId } });
         }
+        turn.closed = true;
       },
     });
   }
 
-  forCall(context: OpenClawPluginToolContext, callId: string): InboundTurn | undefined {
+  forCall(context: OpenClawPluginToolContext, callId: string, toolName: string, params: unknown): InboundTurn | undefined {
     this.prune();
-    const turn = context.sessionKey ? this.calls.get(this.callKey(context.sessionKey, callId)) : undefined;
-    if (!turn || turn.senderId !== context.requesterSenderId || turn.conversationId !== context.deliveryContext?.to
-      || turn.accountId !== context.agentAccountId || context.messageChannel !== "whatsapp") return;
+    const receipt = this.receipt(params, callId, toolName);
+    const turn = receipt?.turn;
+    if (!turn) { this.diagnostic("missing_call_receipt"); return; }
+    if (turn.closed) { this.diagnostic("closed_turn", turn); return; }
+    if (turn.sessionKey !== context.sessionKey || turn.senderId !== context.requesterSenderId || turn.conversationId !== context.deliveryContext?.to
+      || normalizeAccountId(turn.accountId) !== normalizeAccountId(context.agentAccountId)
+      || (context.deliveryContext.accountId !== undefined && normalizeAccountId(turn.accountId) !== normalizeAccountId(context.deliveryContext.accountId))
+      || context.messageChannel !== "whatsapp") {
+      this.diagnostic("identity_mismatch", turn, { hasSender: Boolean(context.requesterSenderId), hasConversation: Boolean(context.deliveryContext?.to), hasAccount: Boolean(context.agentAccountId) });
+      return;
+    }
+    this.diagnostic("call_authorized", turn);
     return turn;
+  }
+
+  parametersForCall(params: unknown, callId: string, toolName: string): unknown {
+    // Only strip a genuine host-issued field. An invented model field remains
+    // an extra property and is rejected by estimate_nutrition's strict schema.
+    if (!this.receipt(params, callId, toolName)) return params;
+    const { [CALL_GRANT_PARAM]: _grant, ...request } = params as Record<string, unknown>;
+    return request;
   }
 
   authorization(turn: InboundTurn | undefined, context: OpenClawPluginToolContext): MediaAuthorizationContext {
@@ -142,6 +218,7 @@ export class InboundTurns {
   writeBlock(turn: InboundTurn | undefined, toolName: string): string | undefined {
     if (!MEAL_WRITES.has(toolName)) return;
     if (!turn) return "Missing trusted current-message context; no draft or meal was changed.";
+    if (turn.closed) return "This inbound turn has ended; no draft or meal was changed.";
     if (turn.failure) return turn.failure.message;
     if (isNoSaveRequest(turn.text)) return "The user requested no saving; no draft or meal was changed.";
     // Enforcement here also applies if the runtime invokes a factory tool directly.
@@ -154,22 +231,48 @@ export class InboundTurns {
     turn.failedTools.add(toolName);
   }
 
+  failCall(context: OpenClawPluginToolContext, callId: string, toolName: string, params: unknown, failure: NonNullable<InboundTurn["failure"]>) {
+    const receipt = this.receipt(params, callId, toolName);
+    // Failure propagation is not an attachment authorization grant. It ensures
+    // a factory identity mismatch still suppresses guesses in the owning run.
+    if (receipt && receipt.turn.sessionKey === context.sessionKey) this.fail(receipt.turn, toolName, failure);
+  }
+
   estimateOnce(turn: InboundTurn, execute: () => Promise<unknown>): Promise<unknown> {
     // Store the promise before work starts so concurrent tool calls for the
     // same album share one read/estimate. Ownership is checked before this.
     return turn.estimation ??= Promise.resolve().then(execute);
   }
 
-  private bind(runId: string, turn: InboundTurn) { turn.runId = runId; this.runs.set(runId, turn); }
-  private callKey(sessionKey: string, callId: string) { return JSON.stringify([sessionKey, callId]); }
+  photoDraftOnce(turn: InboundTurn, execute: () => Promise<unknown>): Promise<unknown> {
+    // All photos in this inbound collection describe one combined estimate.
+    // Duplicate model calls must not create another draft with a new key.
+    return turn.photoDraft ??= Promise.resolve().then(execute);
+  }
+
+  diagnostic(reason: DiagnosticReason, turn?: InboundTurn, metadata: Record<string, boolean | number> = {}) {
+    // Fixed codes, counts and booleans only: no IDs, paths, captions or errors.
+    this.api.logger?.info(`[clawfit-media] ${JSON.stringify({ reason, attachmentCount: turn?.paths.length ?? 0, bound: Boolean(turn?.runId), hasTrustedMetadata: Boolean(turn), hasInboundAccount: Boolean(turn?.accountId), activeRegistration: this.api.registrationMode === "full", ...metadata })}`);
+  }
+
+  private bind(runId: string, turn: InboundTurn) { turn.runId = runId; this.runs.set(runId, turn); this.diagnostic("run_bound", turn); }
+  private receipt(params: unknown, callId: string, toolName: string): CallReceipt | undefined {
+    const grant = params && typeof params === "object" ? (params as Record<string, unknown>)[CALL_GRANT_PARAM] : undefined;
+    const receipt = typeof grant === "string" ? callReceipts.get(grant) : undefined;
+    return receipt?.callId === callId && receipt.toolName === toolName ? receipt : undefined;
+  }
   private prune() {
     const cutoff = Date.now() - 30 * 60_000;
-    this.turns = this.turns.filter(t => t.receivedAt >= cutoff).slice(-256);
-    const retained = new Set(this.turns);
+    const remaining = this.turns.filter(t => t.receivedAt >= cutoff).slice(-256);
+    const retained = new Set(remaining);
+    for (const turn of this.turns) if (!retained.has(turn)) turn.closed = true;
+    this.turns = remaining;
     for (const [key, turn] of this.runs) if (!retained.has(turn)) this.runs.delete(key);
-    for (const [key, turn] of this.calls) if (!retained.has(turn)) this.calls.delete(key);
+    for (const [key, state] of this.rejectedRuns) if (state.receivedAt < cutoff) this.rejectedRuns.delete(key);
+    while (this.rejectedRuns.size > 256) this.rejectedRuns.delete(this.rejectedRuns.keys().next().value!);
+    for (const [key, receipt] of callReceipts) if (receipt.receivedAt < cutoff || (receipt.turn && receipt.turn.receivedAt < cutoff)) callReceipts.delete(key);
     // Bound tool-call metadata too, including pathological model retry loops.
-    while (this.calls.size > 2048) this.calls.delete(this.calls.keys().next().value!);
+    while (callReceipts.size > 2048) callReceipts.delete(callReceipts.keys().next().value!);
   }
 }
 

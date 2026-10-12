@@ -1,4 +1,5 @@
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
+import { createHash } from "node:crypto";
 import { jsonResult } from "openclaw/plugin-sdk/tool-results";
 import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
@@ -83,10 +84,16 @@ function createSenderTool<TParams extends TSchema>(
         description: options.description,
         parameters: options.parameters,
         execute: async (_toolCallId: string, rawParams: unknown, signal?: AbortSignal) => {
+          const turns = inboundTurns.get(api)!;
+          const identityFailure = (error: string) => {
+            if (options.name !== "estimate_nutrition") return jsonResult({ error });
+            const failure = { error: "unauthorized_media", message: MEDIA_FAILURE, retryable: false as const };
+            turns.diagnostic("identity_mismatch", undefined, { hasSender: Boolean(senderId), hasConversation: Boolean(conversationId) });
+            turns.failCall(toolContext, _toolCallId, options.name, rawParams, failure);
+            return jsonResult(failure);
+          };
           if (!conversationId) {
-            return jsonResult({
-              error: "Missing WhatsApp conversation context. Request cannot be processed.",
-            });
+            return identityFailure("Missing WhatsApp conversation context. Request cannot be processed.");
           }
 
           if (conversationId.includes("@g.us")) {
@@ -95,16 +102,12 @@ function createSenderTool<TParams extends TSchema>(
                 ? process.env.CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS.split(",").map((s) => s.trim()).filter(Boolean)
                 : []);
             if (!allowedGroupIds.includes(conversationId)) {
-              return jsonResult({
-                error: "This WhatsApp group is not authorized for ClawFit health tracking.",
-              });
+              return identityFailure("This WhatsApp group is not authorized for ClawFit health tracking.");
             }
           }
 
           if (!senderId) {
-            return jsonResult({
-              error: "This WhatsApp account isn't linked to a ClawFit profile yet.",
-            });
+            return identityFailure("This WhatsApp account isn't linked to a ClawFit profile yet.");
           }
 
           const sender: SenderContext = {
@@ -113,43 +116,60 @@ function createSenderTool<TParams extends TSchema>(
             conversationId,
           };
 
-          const turns = inboundTurns.get(api)!;
-          const turn = turns.forCall(toolContext, _toolCallId);
+          const requestParams = rawParams;
+          const turn = turns.forCall(toolContext, _toolCallId, options.name, requestParams);
+          rawParams = turns.parametersForCall(requestParams, _toolCallId, options.name);
           if (turn?.failure && turn.failedTools.has(options.name)) return jsonResult(turn.failure);
           if (options.name === "estimate_nutrition" && !Check(options.parameters, rawParams)) {
             const failure = { error: "invalid_estimate_request", message: "I couldn't validate that estimate request. Please describe the meal again or resend its photo.", retryable: false as const };
             turns.fail(turn, options.name, failure);
             return jsonResult(failure);
           }
+          if (options.name === "estimate_nutrition" && !turn) {
+            const failure = { error: "unauthorized_media", message: MEDIA_FAILURE, retryable: false as const };
+            turns.failCall(toolContext, _toolCallId, options.name, requestParams, failure);
+            return jsonResult(failure);
+          }
           const writeBlock = turns.writeBlock(turn, options.name);
           if (writeBlock) return jsonResult({ error: "meal_write_blocked", message: writeBlock, retryable: false });
-          try {
-            const execute = () => options.execute(rawParams as Static<TParams>, {
-              config,
-              sender,
-              toolContext, turns, ...(turn ? { turn } : {}),
-              ...(signal ? { signal } : {}),
-            });
-            const result = options.name === "estimate_nutrition" && turn
-              ? await turns.estimateOnce(turn, execute)
-              : await execute();
-            return jsonResult(result);
-          } catch (err) {
-            const message = (err as Error).message;
-            if (err instanceof HealthApiResponseError || err instanceof HealthApiNetworkError) {
-              const identityMessage = /UNRESOLVED_SENDER_IDENTITY|INACTIVE_USER|UNAUTHORIZED_GROUP|MISSING_(?:SENDER|CONVERSATION)_IDENTITY/.test(message)
-                ? sanitizeUserFacingError(message) : undefined;
-              const failure = {
-                error: err instanceof HealthApiResponseError ? err.code : "service_unavailable",
-                message: identityMessage ?? (err instanceof HealthApiResponseError && err.status < 500 && err.status !== 429
-                  ? "ClawFit couldn't validate that request. Please correct it before trying again." : TEMPORARY_FAILURE),
-                retryable: false as const,
-              };
-              turns.fail(turn, options.name, failure);
-              return jsonResult(failure);
+          const execute = async () => {
+            try {
+              if (options.name === "create_pending_meal" && turn?.estimation) {
+                await turn.estimation;
+                const block = turns.writeBlock(turn, options.name);
+                if (block) return { error: "meal_write_blocked", message: block, retryable: false };
+              }
+              return await options.execute(rawParams as Static<TParams>, {
+                config,
+                sender,
+                toolContext, turns, ...(turn ? { turn } : {}),
+                ...(signal ? { signal } : {}),
+              });
+            } catch (err) {
+              if (err instanceof HealthApiResponseError || err instanceof HealthApiNetworkError || options.name === "estimate_nutrition") {
+                const message = err instanceof Error ? err.message : "";
+                const identityMessage = err instanceof HealthApiResponseError && /UNRESOLVED_SENDER_IDENTITY|INACTIVE_USER|UNAUTHORIZED_GROUP|MISSING_(?:SENDER|CONVERSATION)_IDENTITY/.test(message)
+                  ? sanitizeUserFacingError(message) : undefined;
+                const failure = {
+                  error: err instanceof HealthApiResponseError ? err.code : "service_unavailable",
+                  message: identityMessage ?? (err instanceof HealthApiResponseError && err.status < 500 && err.status !== 429
+                    ? "ClawFit couldn't validate that request. Please correct it before trying again." : TEMPORARY_FAILURE),
+                  retryable: false as const,
+                };
+                turns.fail(turn, options.name, failure);
+                return failure;
+              }
+              throw err;
             }
-            throw err;
-          }
+          };
+          // Cache the normalized result, including failures, rather than a raw
+          // rejection whose Error class may belong to another plugin module.
+          const result = options.name === "estimate_nutrition" && turn
+            ? await turns.estimateOnce(turn, execute)
+            : options.name === "create_pending_meal" && turn?.hasImageAttachment
+              ? await turns.photoDraftOnce(turn, execute)
+              : await execute();
+          return jsonResult(result);
         },
       };
     },
@@ -181,6 +201,7 @@ const plugin = defineToolPlugin({
             imagePaths: turn.paths,
             authContext,
           });
+          turns.diagnostic("media_resolved", turn, { imageCount: resolved.images?.length ?? 0, fileAccessSucceeded: true });
           // Match the API's per-image encoded limit and total JSON body budget,
           // in addition to the resolver's raw byte and image-count limits.
           if (resolved.images?.some(image => image.base64.length > 6_000_000)
@@ -189,6 +210,7 @@ const plugin = defineToolPlugin({
           }
         } catch (err) {
           if (err instanceof MediaResolutionError) {
+            turns.diagnostic(err.code, turn, { fileAccessSucceeded: false });
             const message = err.code === "oversized_image" ? "These photos are too large. Please resend smaller images."
               : err.code === "too_many_images" ? "Please send at most four photos per estimate."
               : err.code === "invalid_image_content" ? "That attachment isn't a supported photo. Please resend it as JPEG, PNG, WebP or HEIC."
@@ -221,11 +243,14 @@ const plugin = defineToolPlugin({
       name: "create_pending_meal",
       description: "Persist a scoped meal draft for later confirmation. This never logs a meal and always expires after two hours.",
       parameters: PendingMealDraft,
-      execute: (params, { config, sender, toolContext, signal }) => {
+      execute: (params, { config, sender, toolContext, turn, signal }) => {
         const scopeKey = derivePendingMealScope(toolContext);
+        const idempotencyKey = turn?.hasImageAttachment
+          ? `photo-draft:${createHash("sha256").update(JSON.stringify([turn.sessionKey, turn.senderId, turn.conversationId, turn.accountId ?? "default", turn.messageId])).digest("hex")}`
+          : params.idempotencyKey;
         return healthFetch(config, "/v1/meals/pending", {
           method: "POST",
-          body: { ...params, scopeKey, expiresInSeconds: 7_200 },
+          body: { ...params, idempotencyKey, scopeKey, expiresInSeconds: 7_200 },
           sender,
           ...(signal ? { signal } : {}),
         });

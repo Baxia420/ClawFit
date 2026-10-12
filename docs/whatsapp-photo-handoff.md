@@ -1,5 +1,7 @@
 # WhatsApp photo handoff and estimate-only behavior
 
+These are historical notes for the earlier handoff change. For the post-PR #7 runtime investigation, current regression coverage and deployment instructions, see [WhatsApp runtime handoff](whatsapp-runtime-handoff.md).
+
 ## Cause
 
 The health plugin on `2143fa2` looked for `authorizedMediaPaths`, `authContext`, and attachment arrays on the tool factory context. Those fields are not part of OpenClaw `2026.7.1-2`'s `OpenClawPluginToolContext`. Its trusted identity fields include `requesterSenderId`, `deliveryContext`, `agentAccountId`, and `sessionKey`, but not inbound attachments or `runId`. The previous successful image test supplied invented context fields and therefore did not exercise the SDK handoff.
