@@ -17,6 +17,6 @@ export default async function WorkoutsPage({ searchParams }: { searchParams: Pro
     if (tab === "weight") weight = await healthApi<WeightHistory>(`/v1/training/weight?date=${date}&days=${days}`);
     return <TrainingHub tab={tab} date={date} today={today} days={days} settings={settings} active={active} history={history} routines={plans.routines} schedule={plans.schedule} stats={stats} weight={weight} />;
   } catch {
-    return <div className="page training-page"><header className="page-header compact"><div><span className="kicker">TRAINING</span><h1>Your next<br /><em>chapter.</em></h1></div></header><section className="training-card" role="alert"><h2>Training is temporarily unavailable</h2><p>Your records haven’t changed. Try again in a moment.</p><a className="training-button" href={`/workouts?tab=${tab}`}>Retry</a></section></div>;
+    return <div className="page training-page"><header className="page-header compact"><div><span className="kicker">TRAINING</span><h1>Workout<br /><em>log.</em></h1></div></header><section className="panel training-card" role="alert"><h2>Training is temporarily unavailable</h2><p>Your records haven’t changed. Try again in a moment.</p><a className="training-button" href={`/workouts?tab=${tab}`}>Retry</a></section></div>;
   }
 }

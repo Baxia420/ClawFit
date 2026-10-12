@@ -16,7 +16,7 @@ describe("training browser dependency boundary", () => {
     const base = { date: "2026-10-12", today: "2026-10-12", days: 30, settings, active: null, history: [], routines: [], schedule: [], stats: summarizeTraining([], settings.timezone), weight: { entries: [], goalKg: null } };
     for (const tab of ["train", "plans", "stats", "weight"] as const) {
       const html = renderToStaticMarkup(createElement(TrainingHub, { ...base, tab }));
-      expect(html).toContain("Build your");
+      expect(html).toContain("Workout");
       expect(html).not.toContain("Signal");
     }
   });

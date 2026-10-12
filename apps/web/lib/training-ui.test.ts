@@ -15,12 +15,12 @@ describe("training views", () => {
     expect(plans).toContain('aria-label="Sunday routine"');
     expect(plans).toContain('aria-label="Monday routine"');
     const stats = renderToStaticMarkup(createElement(TrainingHub, { ...base, tab: "stats", stats: summarizeTraining([], base.settings.timezone) }));
-    expect(stats).toContain("No completed sessions in this window");
-    expect(stats).toContain("Bodyweight load excluded");
+    expect(stats).toContain("No completed workouts in this date range");
+    expect(stats).toContain("External load only");
     const weight = renderToStaticMarkup(createElement(TrainingHub, { ...base, tab: "weight", weight: { entries: [], goalKg: null } }));
-    expect(weight).toContain("Add your first weigh-in below");
+    expect(weight).toContain("Record your weekly weigh-in below");
     expect(weight).toContain("Needs two weigh-ins");
-    expect(weight).toContain("Saving that day again corrects its existing entry");
+    expect(weight).toContain("To correct an entry, select it in the history below");
   });
   it("prefills routine reps on resume and allows leaving a session with no logged sets", () => {
     const target = { name: "Bench press", muscleGroup: "chest" as const, sets: 3, reps: 12, restSeconds: 90 };
