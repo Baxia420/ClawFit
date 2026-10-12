@@ -42,6 +42,34 @@ it("accepts the pinned runtime and refuses changed code even with the same versi
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+it("does not treat background workers or forked jobs as the CLI entry", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "clawfit-background-"));
+  try {
+    const entry = path.join(directory, "background.mjs");
+    await writeFile(entry, `import { Worker, isMainThread, parentPort } from "node:worker_threads";
+import { fork } from "node:child_process";
+import { fileURLToPath } from "node:url";
+if (!isMainThread) parentPort.postMessage("worker-ready");
+else if (process.env.CLAWFIT_REPLAY_CHILD === "1") { process.send("child-ready"); process.disconnect(); }
+else {
+  const worker = new Worker(new URL(import.meta.url));
+  const child = fork(fileURLToPath(import.meta.url), [], { env: { ...process.env, CLAWFIT_REPLAY_CHILD: "1" }, stdio: ["ignore", "ignore", "inherit", "ipc"] });
+  const wait = (job, expected) => new Promise((resolve, reject) => {
+    let ready = false;
+    job.on("message", value => { ready = value === expected; });
+    job.on("error", reject);
+    job.on("exit", code => code === 0 && ready ? resolve() : reject(new Error("Background preload failed")));
+  });
+  await Promise.all([wait(worker, "worker-ready"), wait(child, "child-ready")]);
+  console.log("BACKGROUND_PRELOAD_OK");
+}`);
+    const preload = fileURLToPath(new URL("openclaw-runtime-preload.mjs", import.meta.url));
+    const { stdout } = await promisify(execFile)(process.execPath, ["--import", preload, entry], { timeout: 30_000 });
+    expect(stdout).toContain("BACKGROUND_PRELOAD_OK");
+    expect(stdout).not.toContain("compatibility_ready");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 it("wires both the first upgrade and a later rollback to the checked-out service unit", async () => {
   const read = (name: string) => readFile(new URL(`../deploy/openclaw/${name}`, import.meta.url), "utf8");
   const [unit, repair, redeploy] = await Promise.all([read("clawfit-openclaw.service"), read("repair-state.sh"), read("redeploy.sh")]);

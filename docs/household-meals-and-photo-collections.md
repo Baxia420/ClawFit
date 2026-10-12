@@ -23,6 +23,8 @@ cache setup and did not exercise it.
 
 The launcher now carries a Node `--import` preload into the child. The preload
 checks the exact pinned version/hash and installs the same process-local hook.
+It activates only for the main CLI entry; inherited flags do not change the
+pinned gateway's background workers or forked jobs.
 The real CLI regression runs a three-photo request after the actual cache
 respawn, with no compatibility installation in the replay itself. It checks that
 both processes installed the hook, the dispatcher was transformed, and all
