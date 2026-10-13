@@ -15,6 +15,17 @@ that the configured nutrition model will successfully generate an estimate.
 
 ## Collect evidence before another upgrade
 
+The archived-source runner can collect evidence on the existing stopped CIA
+installation before any new deployment. Fetch the reviewed diagnostic commit,
+then stream `scripts/run-readiness-diagnostics.mjs` from that immutable commit to
+`node --input-type=module -`, supplying the same full commit SHA as its argument.
+Run this as `clawfit` from `/home/clawfit/app`. It reads the two diagnostic source
+files into a temporary directory, reuses the current checkout's environment
+loader and installed dependencies, and removes the temporary directory afterward.
+It compares `pnpm exec tsx` with direct Node. It never checks out a commit, starts
+a gateway, updates configuration or displays child launch-error stacks/paths.
+Tests verify that both the checkout SHA and its working-tree status are unchanged.
+
 After this diagnostics change is approved and available in the CIA checkout,
 run only the readiness diagnostic as the existing service user:
 

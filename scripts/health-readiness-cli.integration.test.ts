@@ -3,6 +3,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, expect, it } from "vitest";
@@ -65,4 +66,21 @@ it("identifies an inherited token override without revealing either token or wea
   expect(context.protectedEnvironment.HEALTH_API_OPENCLAW_TOKEN).toMatchObject({ present: true, matchesEffective: false });
   expect(stdout).toContain('"reason":"http_unauthorized"');
   expect(stdout).not.toMatch(/different-private-token|private-cli-test-token|private error/);
+});
+
+it.skipIf(process.platform === "win32")("runs archived diagnostics with the current loader without changing the checkout", async () => {
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+  const sha = git("rev-parse", "HEAD");
+  const state = git("status", "--porcelain");
+  const { stdout } = await promisify(execFile)(process.execPath, ["scripts/run-readiness-diagnostics.mjs", sha], { cwd: root, timeout: 60_000,
+    env: { ...process.env, OPENCLAW_ENV_FILE: "", OPENCLAW_STATE_DIR: directory, HEALTH_API_URL: undefined, HEALTH_API_OPENCLAW_TOKEN: undefined },
+  });
+  expect(stdout).toContain('"launch":"pnpm_tsx"');
+  expect(stdout).toContain('"launch":"direct_node"');
+  expect(stdout.match(/"reason":"ready"/g)).toHaveLength(2);
+  expect(stdout).not.toContain(token);
+  expect(stdout).not.toContain(url);
+  expect(stdout).not.toContain(directory);
+  expect(git("rev-parse", "HEAD")).toBe(sha);
+  expect(git("status", "--porcelain")).toBe(state);
 });
