@@ -26,6 +26,9 @@ export interface ResourceDescriptor {
 
 /**
  * Evaluates whether an actor has permission to perform an action on a resource.
+ * This general resource policy grants no delegated writes. The Health API has
+ * a separate, explicit OpenClaw-only household meal operation that validates a
+ * named active recipient and preserves the recorder's draft scope/provenance.
  *
  * Rules:
  * 1. An actor has full read, write, and delete permissions over their own resources.

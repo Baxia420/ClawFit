@@ -11,20 +11,15 @@ const bundle = "dispatch-DnzGTpPs.js";
 const digest = "6b62dc3b875af0a8b72509c69dea53808683eeef658fbb94d25f6875a4d53316";
 const declaration = "async function dispatchInboundMessageWithBufferedDispatcher(params) {";
 const replacement = `
-// ClawFit: admit one WhatsApp message per route before the foreground fence.
-// Do not merge messages, steer an active run, or modify any attachment context.
-const clawfitWhatsAppDispatches = new Map();
+// ClawFit: admit each WhatsApp request before the foreground fence. Collections
+// contain only channel-owned companion images; never steer an active run.
 async function dispatchInboundMessageWithBufferedDispatcher(params) {
   const ctx = finalizeInboundContext(params.ctx);
   const channel = ctx.OriginatingChannel ?? ctx.Surface ?? ctx.Provider;
   const key = channel === "whatsapp" && params.cfg.plugins?.entries?.["clawfit-health"]?.enabled === true
     ? resolveForegroundReplyFenceKey(ctx) : undefined;
   if (!key) return clawfitDispatchWithoutAdmission(params);
-  const previous = clawfitWhatsAppDispatches.get(key) ?? Promise.resolve();
-  const current = previous.catch(() => {}).then(() => clawfitDispatchWithoutAdmission(params));
-  clawfitWhatsAppDispatches.set(key, current);
-  try { return await current; }
-  finally { if (clawfitWhatsAppDispatches.get(key) === current) clawfitWhatsAppDispatches.delete(key); }
+  return clawfitAdmitWhatsAppMessage({ ...params, ctx }, key, clawfitDispatchWithoutAdmission);
 }
 async function clawfitDispatchWithoutAdmission(params) {`;
 
@@ -32,7 +27,7 @@ function checkedSource(source) {
   if (createHash("sha256").update(source).digest("hex") !== digest || source.split(declaration).length !== 2) {
     throw new Error("ClawFit runtime compatibility check failed: dispatch bundle changed. Revalidate before deploying.");
   }
-  return source.replace(declaration, replacement);
+  return `import { admitWhatsAppMessage as clawfitAdmitWhatsAppMessage } from ${JSON.stringify(new URL("whatsapp-admission.mjs", import.meta.url).href)};\n` + source.replace(declaration, replacement);
 }
 
 export function checkRuntimeCompatibility(root) {
@@ -44,16 +39,22 @@ export function checkRuntimeCompatibility(root) {
 
 export function installRuntimeCompatibility(root) {
   checkRuntimeCompatibility(root);
-  return registerHooks({
+  const installed = Symbol.for("clawfit-health.runtime-compatibility.v1");
+  if (globalThis[installed]) return globalThis[installed];
+  const hooks = registerHooks({
     load(url, context, nextLoad) {
       const loaded = nextLoad(url, context);
       // The host can load a separate SDK copy for plugin discovery. Validate
       // every matching copy before transforming it; never patch unknown builds.
       if (url.startsWith("file:") && fileURLToPath(url).endsWith(`/openclaw/dist/${bundle}`)) {
         const source = typeof loaded.source === "string" ? loaded.source : Buffer.from(loaded.source).toString("utf8");
+        console.info('[clawfit-runtime] {"reason":"dispatcher_hook_applied"}');
         return { ...loaded, source: checkedSource(source) };
       }
       return loaded;
     },
   });
+  globalThis[installed] = hooks;
+  console.info('[clawfit-runtime] {"reason":"compatibility_ready","version":"2026.7.1-2"}');
+  return hooks;
 }

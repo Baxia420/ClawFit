@@ -2,7 +2,7 @@
 // layer. Keep its installation, plugin resolution, HOME and state unchanged.
 import { accessSync, constants, realpathSync } from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { checkRuntimeCompatibility, installRuntimeCompatibility } from "./openclaw-runtime-compat.mjs";
 
 const executable = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean)
@@ -16,6 +16,10 @@ if (process.argv[2] === "--check") {
   console.log("ClawFit WhatsApp dispatch compatibility verified for OpenClaw 2026.7.1-2.");
 } else {
   installRuntimeCompatibility(root);
+  // The packaged CLI respawns itself when NODE_COMPILE_CACHE is set to the
+  // service's base directory. Preserve the hook in that child, not only here.
+  const preload = fileURLToPath(new URL("openclaw-runtime-preload.mjs", import.meta.url));
+  process.execArgv.push("--import", preload);
   process.argv = [process.execPath, entry, ...process.argv.slice(2)];
   await import(pathToFileURL(entry).href);
 }

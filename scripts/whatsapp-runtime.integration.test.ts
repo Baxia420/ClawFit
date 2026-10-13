@@ -15,6 +15,15 @@ beforeAll(async () => {
   await execute(process.execPath, [path.join(path.dirname(require.resolve("typescript/package.json")), "bin/tsc"), "-p", "packages/openclaw-health/tsconfig.json"], { cwd: root });
 });
 
+it("replays a three-photo collection through the real CLI compile-cache respawn", async () => {
+  const { stdout } = await execute(process.execPath, [fileURLToPath(new URL("fixtures/whatsapp-cli-replay.mjs", import.meta.url))], { cwd: root, timeout: 58_000, maxBuffer: 4 * 1024 * 1024 });
+  const line = stdout.split("\n").find(line => line.startsWith("CLAWFIT_CLI_RESULT="));
+  expect(line, stdout).toBeDefined();
+  const result = JSON.parse(line!.slice("CLAWFIT_CLI_RESULT=".length));
+  expect(result).toMatchObject({ stockCacheSeeded: true, readyCount: 2, dispatcherPatched: true, requestCount: 1, exactBytes: true, dispatchCount: 1, modelCalls: 4, writeRequestCount: 0 });
+  expect(result.replies).toHaveLength(1);
+});
+
 it("replays the pinned host loader, real inbound finalizer and tool wrapper across separate registrations", async () => {
   const { stdout } = await execute(process.execPath, [fileURLToPath(new URL("fixtures/whatsapp-runtime-replay.mjs", import.meta.url))], { cwd: root, maxBuffer: 1024 * 1024 });
   const line = stdout.split("\n").find(line => line.startsWith("CLAWFIT_REPLAY_RESULT="));
@@ -31,6 +40,12 @@ it.each([
   { name: "simultaneous arrivals bind distinct turns", flags: ["--compat", "--simultaneous"], requests: 2, replies: 2 },
   { name: "a failed estimate cannot hide the next photo or become guessed nutrition", flags: ["--compat", "--fail-first"], requests: 2, replies: 2 },
   { name: "one trusted collection forwards both originals once despite duplicate tool calls", flags: ["--compat", "--collection"], requests: 1, replies: 1 },
+  { name: "two nearby photos with one caption form one estimate", flags: ["--compat", "--album"], requests: 1, replies: 1 },
+  { name: "three nearby photos with one caption form one estimate", flags: ["--compat", "--album", "--three"], requests: 1, replies: 1 },
+  { name: "a failed three-photo estimate has one safe reply and no guessed nutrition", flags: ["--compat", "--album", "--three", "--fail-first"], requests: 1, replies: 1 },
+  { name: "no-save collection blocks valid model attempts to create and confirm a meal", flags: ["--compat", "--album", "--three", "--attempt-writes"], requests: 1, replies: 1 },
+  { name: "three separately captioned photos stay separate", flags: ["--compat", "--simultaneous", "--three"], requests: 3, replies: 3 },
+  { name: "different senders' photos never join a collection", flags: ["--compat", "--album", "--mixed-sender"], requests: 2, replies: 2 },
 ])("full pinned runtime: $name", async ({ flags, requests, replies }) => {
   // The real host generates run IDs, registers/replaces plugins, builds model
   // prompts, invokes tools and delivers replies. Only model/API transports are
@@ -45,12 +60,15 @@ it.each([
   expect(result.dispatchCount).toBe(requests);
   expect(result.registryReplaced).toBe(true);
   expect(result.replies).toHaveLength(replies);
-  expect(result.modelCalls).toBe(flags.includes("--collection") ? 2 : 4);
+  expect(result.modelCalls).toBe(requests * (flags.includes("--attempt-writes") ? 4 : 2));
+  expect(result.writeRequestCount).toBe(0);
+  if (flags.includes("--compat")) expect(result.result.every((dispatch: { observedReplyDelivery?: boolean }) => dispatch.observedReplyDelivery === true)).toBe(true);
+  if (flags.includes("--attempt-writes")) expect(result.replies[0]).toMatchObject({ text: "Offline estimate: 300 kcal" });
   if (flags.includes("--fail-first")) {
     expect(result.replies[0]).toMatchObject({ isError: true });
     expect(result.replies[0].text).not.toMatch(/kcal|300|Private provider failure/);
-    expect(result.replies[1]).toMatchObject({ text: "Offline estimate: 300 kcal", replyToId: "photo-b" });
-  } else if (flags.includes("--compat") && !flags.includes("--collection")) {
-    expect(result.replies.map((reply: { replyToId: string }) => reply.replyToId)).toEqual(["photo-a", "photo-b"]);
+    if (requests > 1) expect(result.replies[1]).toMatchObject({ text: "Offline estimate: 300 kcal", replyToId: "photo-b" });
+  } else if (flags.includes("--compat") && requests > 1) {
+    expect(result.replies.map((reply: { replyToId: string }) => reply.replyToId)).toEqual(requests === 3 ? ["photo-a", "photo-b", "photo-c"] : ["photo-a", "photo-b"]);
   }
 });

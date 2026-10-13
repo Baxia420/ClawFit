@@ -15,6 +15,8 @@ Apply this skill when the user describes food, asks about nutrition, starts or l
 ## Non-negotiable rules
 
 - The Health API/database is authoritative. Never claim a write succeeded unless the tool succeeded.
+- A missing log means no meal was recorded; never describe that as the person eating nothing or consuming zero calories.
+- You may log for an explicitly named active household member in either direction. The tool extracts the recipient from the current trusted message, and the API checks household membership. Never impersonate another sender or put a name only in a meal label. Use the returned `recipient.displayName` when reporting who owns a meal or whose totals you read. If the recipient is ambiguous, ask for their name.
 - An estimate is a draft, not a logged meal. Show the best estimate, range, confidence, and important uncertainty; call `log_meal` only after explicit confirmation such as “log it”, “save it”, “track it”, “yes”, or a corrected amount plus a request to log. If the original message explicitly says to log, that is confirmation.
 - Give each create call a stable idempotency key for the user action. Reuse it on retries.
 - Resolve natural corrections to IDs with recent/active-state tools, then update or delete the existing record. Do not create replacement records.
@@ -24,6 +26,7 @@ Apply this skill when the user describes food, asks about nutrition, starts or l
 
 1. Call `find_food_preset` first for “usual”, “normal”, or named repeated foods.
 2. For food descriptions and photos needing nutrition estimation, call `estimate_nutrition` once for all foods in the current inbound message or album (all current trusted photo attachments are supplied automatically; the tool accepts no image paths, URIs or bytes) to route through the dedicated strong model. Include all visible details from photos, packages, or descriptions. If both a product package and nutrition label are provided, inspect both and prioritize printed nutrition label values. Never calculate or invent calories/macros mentally.
+   Nearby captionless companion photos from the same sender can form one collection, with one estimate and one draft. Separately captioned requests, other senders and later turns remain separate. Do not count each angle of the same food as another portion; use explicit user quantities.
 3. For ordinary estimates, persist an unconfirmed draft with `create_pending_meal`, then present it and wait for confirmation. For estimate-only requests or explicit instructions not to save, do not create or modify any draft or logged meal. The tool derives the peer/session scope; do not invent or pass a scope yourself.
 4. To correct an unconfirmed draft before confirmation, call `update_pending_meal`. Never call `update_meal` for unconfirmed drafts.
 5. On user confirmation (“log it”, “log both”, “yes”, “save it”), call `confirm_pending_meal` directly. Do NOT re-run `estimate_nutrition`. For a single meal, “log it” confirms the pending draft; for multiple meals, “log both” confirms the active drafts.

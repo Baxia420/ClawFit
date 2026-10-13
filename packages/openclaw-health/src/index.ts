@@ -9,6 +9,9 @@ import { resolveImagePayload, MediaResolutionError, type ResolvedImage } from ".
 
 import { inboundTurns, InboundTurns, MEDIA_FAILURE, TEMPORARY_FAILURE, type InboundTurn } from "./inbound-turns.js";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-runtime";
+import { explicitMealRecipient } from "./meal-recipient.js";
+
+const RECIPIENT_TOOLS = new Set(["create_pending_meal", "get_pending_meal", "confirm_pending_meal", "update_pending_meal", "log_meal", "get_meal", "get_recent_meals", "update_meal", "delete_meal", "get_daily_nutrition"]);
 
 const ConfigSchema = Type.Object({
   apiUrl: Type.Optional(Type.String({ default: "http://127.0.0.1:4000" })),
@@ -119,6 +122,12 @@ function createSenderTool<TParams extends TSchema>(
           const requestParams = rawParams;
           const turn = turns.forCall(toolContext, _toolCallId, options.name, requestParams);
           rawParams = turns.parametersForCall(requestParams, _toolCallId, options.name);
+          if (RECIPIENT_TOOLS.has(options.name) && turn) sender.mealFor = explicitMealRecipient(turn.text);
+          if (sender.mealFor === "unresolved-recipient") {
+            const failure = { error: "ambiguous_meal_recipient", message: "Please name the person this meal is for. Nothing was changed.", retryable: false as const };
+            turns.fail(turn, options.name, failure);
+            return jsonResult(failure);
+          }
           if (turn?.failure && turn.failedTools.has(options.name)) return jsonResult(turn.failure);
           if (options.name === "estimate_nutrition" && !Check(options.parameters, rawParams)) {
             const failure = { error: "invalid_estimate_request", message: "I couldn't validate that estimate request. Please describe the meal again or resend its photo.", retryable: false as const };
@@ -336,7 +345,7 @@ const plugin = defineToolPlugin({
             },
             sender,
             ...(signal ? { signal } : {}),
-          })) as { id: string; label?: string; calories?: { best?: number } };
+          })) as { id: string; label?: string; calories?: { best?: number }; recipient?: { userId: string; displayName: string } };
 
           let dailyNutrition: unknown = undefined;
           let summaryError: string | undefined = undefined;
@@ -345,7 +354,7 @@ const plugin = defineToolPlugin({
               dailyNutrition = await healthFetch(
                 config,
                 `/v1/nutrition/daily?date=${encodeURIComponent(params.date)}&timezone=${encodeURIComponent(params.timezone ?? "Asia/Kuala_Lumpur")}`,
-                { sender, ...(signal ? { signal } : {}) },
+                { sender: res.recipient ? { ...sender, mealFor: res.recipient.displayName } : sender, ...(signal ? { signal } : {}) },
               );
             } catch (err) {
               summaryError = sanitizeUserFacingError((err as Error).message);
@@ -370,6 +379,7 @@ const plugin = defineToolPlugin({
           label?: string | undefined;
           calories?: number | undefined;
           meal: unknown;
+          recipient?: { userId: string; displayName: string };
         }> = [];
         const failures: Array<{
           pendingDraftId: string;
@@ -392,7 +402,7 @@ const plugin = defineToolPlugin({
               },
               sender,
               ...(signal ? { signal } : {}),
-            })) as { id: string; label?: string; calories?: { best?: number } };
+            })) as { id: string; label?: string; calories?: { best?: number }; recipient?: { userId: string; displayName: string } };
             confirmedMeals.push({
               confirmedMealId: res.id,
               pendingDraftId: targetId,
@@ -400,6 +410,7 @@ const plugin = defineToolPlugin({
               label: res.label,
               calories: res.calories?.best,
               meal: res,
+              ...(res.recipient ? { recipient: res.recipient } : {}),
             });
           } catch (err) {
             failures.push({
@@ -412,12 +423,12 @@ const plugin = defineToolPlugin({
 
         let dailyNutrition: unknown = undefined;
         let summaryError: string | undefined = undefined;
-        if (params.date && confirmedMeals.length > 0) {
+        if (params.date && confirmedMeals.length > 0 && new Set(confirmedMeals.map(meal => meal.recipient?.userId ?? "self")).size === 1) {
           try {
             dailyNutrition = await healthFetch(
               config,
               `/v1/nutrition/daily?date=${encodeURIComponent(params.date)}&timezone=${encodeURIComponent(params.timezone ?? "Asia/Kuala_Lumpur")}`,
-              { sender, ...(signal ? { signal } : {}) },
+              { sender: confirmedMeals[0]?.recipient ? { ...sender, mealFor: confirmedMeals[0].recipient.displayName } : sender, ...(signal ? { signal } : {}) },
             );
           } catch (err) {
             summaryError = sanitizeUserFacingError((err as Error).message);

@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import Fastify, { type FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
 import {
@@ -37,6 +37,8 @@ const listQuery = z.object({ limit: z.coerce.number().int().min(1).max(100).defa
 declare module "fastify" {
   interface FastifyRequest {
     userId?: string | undefined;
+    mealUserId?: string | undefined;
+    pendingMealScope?: string | undefined;
     clientType?: "web" | "web_machine" | "openclaw" | undefined;
     startTime?: number | undefined;
   }
@@ -86,12 +88,17 @@ export function createApp(options: CreateAppOptions) {
               "headers['x-clawfit-conversation-id']",
               "req.headers['x-clawfit-sender-provider']",
               "headers['x-clawfit-sender-provider']",
+              "req.headers['x-clawfit-meal-for']",
+              "headers['x-clawfit-meal-for']",
+              "res.headers['x-clawfit-meal-recipient']",
             ],
           },
   });
 
   app.decorateRequest("userId", undefined);
   app.decorateRequest("clientType", undefined);
+  app.decorateRequest("mealUserId", undefined);
+  app.decorateRequest("pendingMealScope", undefined);
 
   const requireRequestUserId = (request: FastifyRequest): string => {
     const userId = request.userId;
@@ -99,6 +106,75 @@ export function createApp(options: CreateAppOptions) {
       throw new Error("UNAUTHENTICATED_REQUEST_CONTEXT: User ID context is missing on request");
     }
     return userId;
+  };
+
+  const requireMealUserId = (request: FastifyRequest) => request.mealUserId ?? requireRequestUserId(request);
+  const isMealRoute = (url: string) => /^\/v1\/(?:household\/)?(?:meals(?:[/?]|$)|nutrition\/(?:daily|trend)(?:[?]|$))/.test(url);
+  // Dedicated URLs fail closed against an older API, which would otherwise
+  // ignore a new recipient header and accidentally save to the sender again.
+  app.addHook("onRoute", route => {
+    if (route.method === "HEAD" || route.url.startsWith("/v1/household/") || !isMealRoute(route.url)) return;
+    const url = `/v1/household${route.url.slice(3)}`;
+    app.route({ ...route, url });
+  });
+  const profileAliases = (user: { id: string; displayName: string }) => [...new Set([
+    user.displayName,
+    ...(user.id === DEFAULT_PRIMARY_USER_ID ? ["Mahin", "Jobayer"] : user.id === DEFAULT_PARTNER_USER_ID ? ["Cici", "Athirah"] : []),
+  ])];
+  const householdProfiles = async (actorId: string) => {
+    if (typeof options.repository.getHouseholdForUser !== "function") return [];
+    const household = await options.repository.getHouseholdForUser(actorId);
+    return household ? (await options.repository.getHouseholdMembers(household.household.id)).map(row => row.user).filter(user => user.active) : [];
+  };
+  const setMealRecipient = async (request: FastifyRequest, reply: { header: (name: string, value: string) => unknown }, id: string) => {
+    if (id === requireRequestUserId(request)) { request.mealUserId = id; return; }
+    const user = await options.repository.getUser(id);
+    if (!user.active) throw new ConflictError("Meal recipient is inactive");
+    request.mealUserId = id;
+    reply.header("x-clawfit-meal-recipient", encodeURIComponent(JSON.stringify({ userId: id, displayName: user.displayName })));
+  };
+  // Delegated drafts retain the original sender's peer scope. A plain "yes"
+  // may find that sender's draft for a partner, without borrowing a partner's
+  // own drafts or inferring ownership from conversation history.
+  const actorDraftScope = (request: FastifyRequest) => {
+    const provider = String(request.headers["x-clawfit-sender-provider"] ?? "whatsapp");
+    const channel = provider.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "openclaw";
+    const sender = String(request.headers["x-clawfit-sender-id"] ?? "");
+    return sender ? `openclaw:${channel}:${createHash("sha256").update(`${channel}:peer:${sender}`).digest("hex").slice(0, 32)}` : undefined;
+  };
+  const pendingOwners = async (request: FastifyRequest, scopeKey: string) => {
+    const actorId = requireRequestUserId(request);
+    if (request.clientType === "openclaw" && /^openclaw:[a-z0-9_-]+:[a-f0-9]{32}$/.test(scopeKey) && scopeKey !== actorDraftScope(request)) throw new NotFoundError("Pending meal not found in this sender's scope");
+    if (request.clientType !== "openclaw" || request.headers["x-clawfit-meal-for"] !== undefined) {
+      if (requireMealUserId(request) !== actorId && scopeKey !== actorDraftScope(request)) throw new NotFoundError("Pending meal not found in this sender's scope");
+      return [requireMealUserId(request)];
+    }
+    if (scopeKey !== actorDraftScope(request)) return [actorId];
+    return [...new Set([actorId, ...(await householdProfiles(actorId)).map(user => user.id)])];
+  };
+  const pendingOwner = async (request: FastifyRequest, id: string, scopeKey: string) => {
+    if (request.url.startsWith("/v1/household/meals/pending")) {
+      const owner = requireMealUserId(request);
+      const pending = await options.repository.getHouseholdPendingMeal(owner, id);
+      request.pendingMealScope = pending.scopeKey;
+      return owner;
+    }
+    const owners = await pendingOwners(request, scopeKey);
+    if (owners.length === 1) return owners[0]!; // repository still enforces owner + scope on every operation
+    for (const owner of owners) {
+      try { await options.repository.getPendingMeal(owner, id, scopeKey); return owner; }
+      catch (error) { if (!(error instanceof NotFoundError)) throw error; }
+    }
+    throw new NotFoundError("Pending meal not found in this sender's authorized scope");
+  };
+  const pendingList = async (request: FastifyRequest, scopeKey: string, limit: number) => {
+    if (request.url.startsWith("/v1/household/meals/pending")) return options.repository.listPendingMeals(requireMealUserId(request), undefined, undefined, limit);
+    const rows = (await Promise.all((await pendingOwners(request, scopeKey)).map(owner => options.repository.listPendingMeals(owner, scopeKey, undefined, limit)))).flat();
+    return rows.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, limit);
+  };
+  const withRecorder = <T extends { rawUserText?: string | null | undefined }>(request: FastifyRequest, input: T): T => {
+    const actor = requireRequestUserId(request), recipient = requireMealUserId(request);
+    return actor === recipient ? input : { ...input, rawUserText: JSON.stringify({ recordedByUserId: actor, forUserId: recipient, sourceText: input.rawUserText ?? null }) };
   };
 
   app.addHook("onRequest", async (request, reply) => {
@@ -125,6 +201,8 @@ export function createApp(options: CreateAppOptions) {
     const senderProviderHeader = request.headers["x-clawfit-sender-provider"];
     const senderIdHeader = request.headers["x-clawfit-sender-id"];
     const conversationIdHeader = request.headers["x-clawfit-conversation-id"];
+    const mealForHeader = request.headers["x-clawfit-meal-for"];
+    if (request.url.startsWith("/v1/household/") && (!isOpenClaw || typeof mealForHeader !== "string")) return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Household meal operations require an authenticated sender and an explicit recipient." } });
 
     const senderProvider = typeof senderProviderHeader === "string" ? senderProviderHeader : undefined;
     const senderId = typeof senderIdHeader === "string" ? senderIdHeader : undefined;
@@ -132,7 +210,7 @@ export function createApp(options: CreateAppOptions) {
 
     // Web machine token handling: permitted ONLY for internal auth setup/resolve endpoint
     if (isWebMachine && !isOpenClaw) {
-      if (senderId || senderProvider || conversationId) {
+      if (senderId || senderProvider || conversationId || mealForHeader !== undefined) {
         return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Sender headers not permitted for web client" } });
       }
       if (request.url.startsWith("/v1/auth/google/resolve-or-link")) {
@@ -147,7 +225,7 @@ export function createApp(options: CreateAppOptions) {
 
     // If not OpenClaw, attempt to verify as a signed web assertion
     if (!isOpenClaw) {
-      if (senderId || senderProvider || conversationId) {
+      if (senderId || senderProvider || conversationId || mealForHeader !== undefined) {
         return reply.code(403).send({ error: { code: "FORBIDDEN", message: "Sender headers not permitted for web client" } });
       }
       if (!assertionSecret) {
@@ -230,6 +308,25 @@ export function createApp(options: CreateAppOptions) {
     }
 
     request.userId = resolution.user.id;
+    if (mealForHeader !== undefined) {
+      if (!isMealRoute(request.url) || typeof mealForHeader !== "string" || !/^[\p{L}\p{N}_' -]{1,80}$/u.test(mealForHeader)) {
+        return reply.code(403).send({ error: { code: "INVALID_MEAL_RECIPIENT", message: "Recipient selection is available only for meal operations." } });
+      }
+      const selected = mealForHeader.trim().toLowerCase();
+      if (selected === "self" || selected === "me") request.mealUserId = resolution.user.id;
+      else {
+        const members = await householdProfiles(resolution.user.id);
+        const matches = members.filter(user => selected === "partner" ? user.id !== resolution.user.id : profileAliases(user).some(name => name.toLowerCase() === selected));
+        if (matches.length !== 1) return reply.code(403).send({ error: { code: "UNAUTHORIZED_MEAL_RECIPIENT", message: "Name one active member of your own household. Nothing was changed." } });
+        request.mealUserId = matches[0]!.id;
+      }
+    }
+    if (isMealRoute(request.url)) {
+      if (requireMealUserId(request) === resolution.user.id) {
+        request.mealUserId = resolution.user.id;
+        reply.header("x-clawfit-meal-recipient", encodeURIComponent(JSON.stringify({ userId: resolution.user.id, displayName: resolution.user.displayName })));
+      } else await setMealRecipient(request, reply, requireMealUserId(request));
+    }
   });
 
   app.addHook("onSend", async (request, reply) => {
@@ -519,45 +616,61 @@ export function createApp(options: CreateAppOptions) {
 
   app.post("/v1/meals", async (request, reply) => {
     const input = mealInputSchema.parse(request.body);
-    return reply.code(201).send(await options.repository.createMeal(requireRequestUserId(request), input));
+    return reply.code(201).send(await options.repository.createMeal(requireMealUserId(request), withRecorder(request, input)));
   });
   app.post("/v1/meals/pending", async (request, reply) => {
     const input = pendingMealInputSchema.parse(request.body);
-    return reply.code(201).send(await options.repository.createPendingMeal(requireRequestUserId(request), input));
+    if (requireMealUserId(request) !== requireRequestUserId(request) && input.scopeKey !== actorDraftScope(request)) throw new ConflictError("A delegated draft must use the authenticated sender's scope");
+    return reply.code(201).send(await options.repository.createPendingMeal(requireMealUserId(request), withRecorder(request, input)));
   });
   app.get("/v1/meals/pending", async (request) => {
     const scopeKey = pendingMealScopeSchema.parse(request.query).scopeKey;
     const limit = listQuery.parse(request.query).limit;
-    return { pending: await options.repository.listPendingMeals(requireRequestUserId(request), scopeKey, undefined, limit) };
+    return { pending: await pendingList(request, scopeKey, limit) };
   });
-  app.get("/v1/meals/pending/latest", async (request) => {
+  app.get("/v1/meals/pending/latest", async (request, reply) => {
     const scopeKey = pendingMealScopeSchema.parse(request.query).scopeKey;
-    return { pending: await options.repository.getLatestPendingMeal(requireRequestUserId(request), scopeKey) };
+    const rows = request.url.startsWith("/v1/household/meals/pending") ? await pendingList(request, scopeKey, 1)
+      : (await Promise.all((await pendingOwners(request, scopeKey)).map(owner => options.repository.getLatestPendingMeal(owner, scopeKey)))).filter(row => row !== null);
+    rows.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    if (rows[0]) await setMealRecipient(request, reply, rows[0].userId);
+    return { pending: rows[0] ?? null };
   });
-  app.get("/v1/meals/pending/:id", async (request) => {
+  app.get("/v1/meals/pending/:id", async (request, reply) => {
     const id = uuidParam.parse(request.params).id;
     const scopeKey = pendingMealScopeSchema.parse(request.query).scopeKey;
-    return options.repository.getPendingMeal(requireRequestUserId(request), id, scopeKey);
+    const owner = await pendingOwner(request, id, scopeKey);
+    await setMealRecipient(request, reply, owner);
+    return options.repository.getPendingMeal(owner, id, request.pendingMealScope ?? scopeKey);
   });
-  app.patch("/v1/meals/pending/:id", async (request) => {
+  app.patch("/v1/meals/pending/:id", async (request, reply) => {
     const id = uuidParam.parse(request.params).id;
     const body = pendingMealPatchSchema.and(pendingMealScopeSchema).parse(request.body);
     const { scopeKey, ...patch } = body;
-    return options.repository.updatePendingMeal(requireRequestUserId(request), id, scopeKey, patch);
+    const owner = await pendingOwner(request, id, scopeKey);
+    await setMealRecipient(request, reply, owner);
+    return options.repository.updatePendingMeal(owner, id, request.pendingMealScope ?? scopeKey, patch);
   });
-  app.delete("/v1/meals/pending/:id", async (request) => {
+  app.delete("/v1/meals/pending/:id", async (request, reply) => {
     const id = uuidParam.parse(request.params).id;
     const scopeKey = pendingMealScopeSchema.parse(request.query).scopeKey;
-    return options.repository.cancelPendingMeal(requireRequestUserId(request), id, scopeKey);
+    const owner = await pendingOwner(request, id, scopeKey);
+    await setMealRecipient(request, reply, owner);
+    return options.repository.cancelPendingMeal(owner, id, request.pendingMealScope ?? scopeKey);
   });
   app.post("/v1/meals/pending/:id/confirm", async (request, reply) => {
     const params = uuidParam.parse(request.params);
     const body = confirmPendingMealSchema.parse(request.body ?? {});
-    return reply.code(200).send(await options.repository.confirmPendingMeal(requireRequestUserId(request), params.id, body));
+    const owner = await pendingOwner(request, params.id, body.scopeKey);
+    await setMealRecipient(request, reply, owner);
+    const confirmation = { ...body, scopeKey: request.pendingMealScope ?? body.scopeKey,
+      ...(owner !== requireRequestUserId(request) ? { confirmedByUserId: requireRequestUserId(request) } : {}),
+    };
+    return reply.code(200).send(await options.repository.confirmPendingMeal(owner, params.id, confirmation));
   });
   app.get("/v1/meals/recent", async (request) => {
     const limit = listQuery.parse(request.query).limit;
-    return options.repository.listRecentMeals(requireRequestUserId(request), limit);
+    return options.repository.listRecentMeals(requireMealUserId(request), limit);
   });
   app.get("/v1/meals/history", async (request) => {
     const query = z.object({
@@ -566,7 +679,7 @@ export function createApp(options: CreateAppOptions) {
       limit: z.coerce.number().int().min(1).max(100).default(40), offset: z.coerce.number().int().min(0).max(100000).default(0),
       search: z.string().trim().max(200).default(""),
     }).parse(request.query);
-    const userId = requireRequestUserId(request);
+    const userId = requireMealUserId(request);
     const settings = await options.repository.getSettings(userId);
     const timezone = query.timezone ?? settings.timezone;
     const startDate = new Date(`${query.date}T12:00:00Z`);
@@ -577,21 +690,21 @@ export function createApp(options: CreateAppOptions) {
   });
   app.get("/v1/meals/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
-    return options.repository.getMeal(requireRequestUserId(request), id);
+    return options.repository.getMeal(requireMealUserId(request), id);
   });
   app.patch("/v1/meals/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
     const patch = mealPatchSchema.parse(request.body);
-    return options.repository.updateMeal(requireRequestUserId(request), id, patch);
+    return options.repository.updateMeal(requireMealUserId(request), id, patch);
   });
   app.delete("/v1/meals/:id", async (request) => {
     const id = uuidParam.parse(request.params).id;
-    return options.repository.deleteMeal(requireRequestUserId(request), id);
+    return options.repository.deleteMeal(requireMealUserId(request), id);
   });
   app.get("/v1/nutrition/daily", async (request) => {
     const query = dateQuery.parse(request.query);
     const { start, end } = zonedDayRange(query.date, query.timezone);
-    const result = await options.repository.dailyNutrition(requireRequestUserId(request), start, end);
+    const result = await options.repository.dailyNutrition(requireMealUserId(request), start, end);
     return { ...result, date: query.date };
   });
   app.get("/v1/nutrition/trend", async (request) => {
@@ -600,7 +713,7 @@ export function createApp(options: CreateAppOptions) {
       timezone: z.string().trim().refine(isValidIanaTimezone, { message: "Invalid IANA timezone" }).optional(),
       date: z.string().refine(isValidCalendarDate, { message: "Invalid calendar date" }).optional(),
     }).parse(request.query);
-    const userId = requireRequestUserId(request);
+    const userId = requireMealUserId(request);
     const settings = await options.repository.getSettings(userId);
     const timezone = query.timezone || settings.timezone || "Asia/Kuala_Lumpur";
 

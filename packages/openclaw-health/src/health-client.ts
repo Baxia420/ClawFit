@@ -9,6 +9,7 @@ export type SenderContext = {
   provider?: string;
   senderId?: string;
   conversationId?: string;
+  mealFor?: string | undefined;
 };
 
 type PendingScopeContext = {
@@ -83,9 +84,12 @@ export async function healthFetch<T = unknown>(config: HealthPluginConfig, path:
   if (options.sender?.conversationId) {
     headers["x-clawfit-conversation-id"] = options.sender.conversationId;
   }
+  if (options.sender?.mealFor) headers["x-clawfit-meal-for"] = options.sender.mealFor;
+  const requestPath = options.sender?.mealFor && options.sender.mealFor !== "self" && /^\/v1\/(?:meals|nutrition\/(?:daily|trend))\b/.test(path)
+    ? path.replace("/v1/", "/v1/household/") : path;
 
   try {
-    response = await (options.fetchImpl ?? fetch)(new URL(path, apiUrl), {
+    response = await (options.fetchImpl ?? fetch)(new URL(requestPath, apiUrl), {
       method: options.method ?? "GET",
       headers,
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
@@ -107,6 +111,17 @@ export async function healthFetch<T = unknown>(config: HealthPluginConfig, path:
     diagnostic("http_error", response.status);
     const apiError = payload as { error?: { code?: string; message?: string } };
     throw new HealthApiResponseError(response.status, apiError.error?.code ?? "HEALTH_API_ERROR", apiError.error?.message ?? `Health API returned ${response.status}`);
+  }
+  const recipient = response.headers.get("x-clawfit-meal-recipient");
+  if (recipient && payload && typeof payload === "object") {
+    let profile: unknown;
+    try {
+      profile = JSON.parse(decodeURIComponent(recipient));
+      const value = profile as { userId?: unknown; displayName?: unknown };
+      if (typeof value.userId !== "string" || typeof value.displayName !== "string" || !value.displayName || value.displayName.length > 120) throw new Error("Invalid recipient response");
+    } catch { diagnostic("invalid_response", response.status); throw new HealthApiNetworkError(); }
+    diagnostic("success", response.status);
+    return { ...(Array.isArray(payload) ? { meals: payload } : payload), recipient: profile } as T;
   }
   diagnostic("success", response.status);
   return payload as T;

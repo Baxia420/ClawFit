@@ -8,7 +8,9 @@ export function isNoSaveRequest(prompt: string): boolean {
 
 export function isMealLogConfirmation(prompt: string | null | undefined): boolean {
   if (!prompt || typeof prompt !== "string") return false;
-  const trimmed = prompt.trim();
+  // "Log it for Cici and not me" excludes a recipient, not the write itself.
+  // Keep all other negative action clauses intact.
+  const trimmed = prompt.trim().replace(/\bnot\s+(?:for\s+)?(?:me|myself)\b/gi, "");
   if (!trimmed || isNoSaveRequest(trimmed)) return false;
   const action = "(?:log(?:ged|ging)?|sav(?:e|ed|ing)|track(?:ed|ing)?|record(?:ed|ing)?)";
   if (new RegExp(`\\b(?:do\\s+not|don't|dont|never|without)\\b[^.!?]{0,60}\\b${action}\\b`, "i").test(trimmed)) return false;

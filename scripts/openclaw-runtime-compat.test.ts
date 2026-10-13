@@ -20,6 +20,12 @@ it.skipIf(process.platform === "win32")("launches the existing CLI entry without
     const execute = promisify(execFile);
     expect((await execute(process.execPath, [launcher, "--check"], options)).stdout).toContain("compatibility verified");
     expect((await execute(process.execPath, [launcher, "--version"], options)).stdout).toContain("2026.7.1-2");
+    const { stdout } = await execute(process.execPath, [launcher, "--help"], {
+      ...options, env: { ...options.env, NODE_COMPILE_CACHE: path.join(directory, "compile-cache") },
+    });
+    // --version exits before the real launcher's cache-respawn path. --help
+    // executes that path: both parent AND child must install the compatibility.
+    expect(stdout.match(/"reason":"compatibility_ready"/g)).toHaveLength(2);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -34,6 +40,34 @@ it("accepts the pinned runtime and refuses changed code even with the same versi
     await writeFile(path.join(root, "package.json"), JSON.stringify({ version: "2026.8.1" }));
     expect(() => checkRuntimeCompatibility(root)).toThrow("requires OpenClaw 2026.7.1-2");
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("does not treat background workers or forked jobs as the CLI entry", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "clawfit-background-"));
+  try {
+    const entry = path.join(directory, "background.mjs");
+    await writeFile(entry, `import { Worker, isMainThread, parentPort } from "node:worker_threads";
+import { fork } from "node:child_process";
+import { fileURLToPath } from "node:url";
+if (!isMainThread) parentPort.postMessage("worker-ready");
+else if (process.env.CLAWFIT_REPLAY_CHILD === "1") { process.send("child-ready"); process.disconnect(); }
+else {
+  const worker = new Worker(new URL(import.meta.url));
+  const child = fork(fileURLToPath(import.meta.url), [], { env: { ...process.env, CLAWFIT_REPLAY_CHILD: "1" }, stdio: ["ignore", "ignore", "inherit", "ipc"] });
+  const wait = (job, expected) => new Promise((resolve, reject) => {
+    let ready = false;
+    job.on("message", value => { ready = value === expected; });
+    job.on("error", reject);
+    job.on("exit", code => code === 0 && ready ? resolve() : reject(new Error("Background preload failed")));
+  });
+  await Promise.all([wait(worker, "worker-ready"), wait(child, "child-ready")]);
+  console.log("BACKGROUND_PRELOAD_OK");
+}`);
+    const preload = fileURLToPath(new URL("openclaw-runtime-preload.mjs", import.meta.url));
+    const { stdout } = await promisify(execFile)(process.execPath, ["--import", preload, entry], { timeout: 30_000 });
+    expect(stdout).toContain("BACKGROUND_PRELOAD_OK");
+    expect(stdout).not.toContain("compatibility_ready");
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 it("wires both the first upgrade and a later rollback to the checked-out service unit", async () => {

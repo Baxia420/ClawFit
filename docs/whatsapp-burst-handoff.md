@@ -1,5 +1,10 @@
 # WhatsApp burst delivery on OpenClaw 2026.7.1-2
 
+PR #10 was followed by a production failure involving simultaneous captures.
+See [Household meals and photo collections](household-meals-and-photo-collections.md)
+for the compile-cache respawn correction, updated collection behavior and
+reciprocal household logging. The sections below record the earlier investigation.
+
 ## Evidence and scope
 
 The October 12 post-PR-9 log contains a successful single-photo API estimate.

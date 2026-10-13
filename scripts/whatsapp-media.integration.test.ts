@@ -122,6 +122,44 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
   });
   afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); await rm(directory, { recursive: true, force: true }); });
 
+  it.each([
+    { actor: sender, target: "Cici", owner: "00000000-0000-4000-8000-000000000002" },
+    { actor: "+60222222222", target: "Mahin", owner: DEFAULT_PRIMARY_USER_ID },
+  ])("routes a real sparse factory call for an explicit household recipient: $target", async ({ actor, target, owner }) => {
+    const partner = "00000000-0000-4000-8000-000000000002";
+    const members = [{ id: DEFAULT_PRIMARY_USER_ID, displayName: "Mahin", active: true }, { id: partner, displayName: "Cici", active: true }];
+    const repository = {
+      resolveUser: vi.fn().mockImplementation(async ({ externalIdentifier }: { externalIdentifier: string }) => ({ resolved: true, user: members[externalIdentifier === sender ? 0 : 1] })),
+      getUser: vi.fn().mockImplementation(async (id: string) => members.find(user => user.id === id)),
+      getHouseholdForUser: vi.fn().mockResolvedValue({ household: { id: "household" } }),
+      getHouseholdMembers: vi.fn().mockResolvedValue(members.map(user => ({ user }))),
+      createPendingMeal: vi.fn().mockImplementation(async (userId: string, input: object) => ({ id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa", userId, ...input, confirmed: false })),
+    } as unknown as HealthRepository;
+    const app = createApp({ repository, openclawToken: process.env.HEALTH_API_OPENCLAW_TOKEN, allowedGroupIds: [group], logger: false });
+    const requests: string[] = [];
+    vi.stubGlobal("fetch", async (url: URL, init: RequestInit) => {
+      requests.push(url.pathname);
+      const response = await app.inject({ method: "POST", url: url.pathname, headers: init.headers as Record<string,string>, payload: String(init.body) });
+      return new Response(response.body, { status: response.statusCode, headers: { "x-clawfit-meal-recipient": String(response.headers["x-clawfit-meal-recipient"] ?? "") } });
+    });
+    const turn = await harness().inbound({ id: randomUUID(), runId: randomUUID(), senderId: actor, text: `Save this for ${target}`, paths: [photo] });
+    const result = await turn.execute("create_pending_meal", "delegate", { ...estimate, source: "photo", occurredAt: "2026-10-12T05:00:00Z", rawUserText: "Model's unrelated label", idempotencyKey: "test-delegated-meal" });
+    expect(result).toMatchObject({ userId: owner, recipient: { displayName: target } });
+    expect(repository.createPendingMeal).toHaveBeenCalledWith(owner, expect.any(Object));
+    expect(requests).toEqual(["/v1/household/meals/pending"]);
+    await app.close();
+  });
+
+  it("does not let a label or invented model field select another profile", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ id: "draft" })); vi.stubGlobal("fetch", fetchMock);
+    const turn = await harness().inbound({ id: randomUUID(), runId: randomUUID(), text: "Log this for me", paths: [photo] });
+    await turn.execute("create_pending_meal", "self-call", { ...estimate, label: "Cici's food", forPerson: "Cici", source: "photo", occurredAt: "2026-10-12T05:00:00Z", idempotencyKey: "self-only-test" });
+    const headers = fetchMock.mock.calls[0]![1]!.headers as Record<string,string>;
+    expect(headers["x-clawfit-sender-id"]).toBe(sender);
+    expect(headers["x-clawfit-meal-for"]).toBe("self");
+    expect(String(fetchMock.mock.calls[0]![0])).not.toContain("/household/");
+  });
+
   it("retains trusted capture when the host replaces its active registry before prompt build", async () => {
     const fetchMock = vi.fn().mockImplementation(async () => Response.json({ estimate }));
     vi.stubGlobal("fetch", fetchMock);
