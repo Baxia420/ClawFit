@@ -5,6 +5,7 @@ import path from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
+import { createHash } from "node:crypto";
 import { afterAll, beforeAll, expect, it } from "vitest";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -32,7 +33,9 @@ beforeAll(async () => {
   await mkdir(path.join(fixture, "state"));
   await mkdir(path.join(fixture, "bin"));
   // Exact deployed gate, not the refactored helper or a synthetic readiness check.
-  let original = execFileSync("git", ["show", "55553367fb1519eac188fe06fca199e1d9cf51a7:scripts/openclaw-preflight.ts"], { cwd: root, encoding: "utf8" });
+  let original = await readFile(path.join(root, "scripts/fixtures/openclaw-preflight-5555336.ts.fixture"), "utf8");
+  // Historical source is committed so shallow CI checkouts need no git/network fetch.
+  expect(createHash("sha256").update(original).digest("hex")).toBe("f31fe0d6158b8dfcbc105983ae37a2367d70bb425db95c79a9c75c9703358cad");
   for (const module of ["load-env", "gateway-state", "openclaw-cli", "openclaw-configuration"]) original = original.replace(JSON.stringify(`./${module}.js`), JSON.stringify(pathToFileURL(path.join(root, "scripts", `${module}.ts`)).href));
   await writeFile(path.join(fixture, "scripts/openclaw-preflight.ts"), original);
   await writeFile(path.join(fixture, "package.json"), JSON.stringify({ type: "module" }));
