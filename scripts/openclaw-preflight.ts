@@ -6,6 +6,7 @@ import { loadClawFitEnv } from "./load-env.js";
 import { ensureGatewayDirectories, readGatewayConfig } from "./gateway-state.js";
 import { runOpenClaw } from "./openclaw-cli.js";
 import { GOOGLE_API, GOOGLE_BASE_URL, OPENCLAW_VERSION, parseAllowlist } from "./openclaw-configuration.js";
+import { inspectHealthReadiness } from "./health-readiness.js";
 
 loadClawFitEnv();
 if (process.argv.includes("--live") && process.argv.includes("--before-restart")) throw new Error("Run --live only after restarting the Gateway.");
@@ -49,12 +50,9 @@ await check("Sender/group allowlists and restricted health tools", async () => {
   if (groups.length ? wa.groupPolicy !== "allowlist" || !same(groups, Object.keys(wa.groups ?? {})) : wa.groupPolicy !== "disabled") throw new Error("groups");
 });
 await check("Health API readiness and configured nutrition estimator", async () => {
-  const base = new URL(z.string().url().parse(process.env.HEALTH_API_URL));
-  if (base.username || base.password || (base.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(base.hostname))) throw new Error("origin");
-  const token = z.string().min(24).parse(process.env.HEALTH_API_OPENCLAW_TOKEN);
-  const response = await fetch(new URL("/ready", base), { headers: { authorization: `Bearer ${token}` }, redirect: "error", signal: AbortSignal.timeout(50_000) });
-  if (!response.ok) throw new Error("ready");
-  z.object({ status: z.literal("ready"), estimator: z.literal("configured") }).parse(await response.json());
+  const result = await inspectHealthReadiness(process.env);
+  console.info(`[clawfit-preflight] ${JSON.stringify(result)}`);
+  if (result.reason !== "ready") throw new Error("Health API readiness check failed");
 });
 if (!process.argv.includes("--before-restart")) {
   await check("Authenticated gateway RPC", () => runOpenClaw(["gateway", "status", "--require-rpc", "--json"], { capture: true }));
