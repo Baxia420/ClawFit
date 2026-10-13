@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { fetchHealthReadiness, readinessDnsCode, type DnsCode } from "./health-readiness-fetch.js";
 
 export type ReadinessReason = "ready" | "missing_api_url" | "invalid_api_url" | "unsafe_api_origin"
   | "invalid_api_token" | "request_timeout" | "dns_failure" | "connection_refused"
@@ -11,6 +12,8 @@ export type ReadinessReport = {
   httpStatus?: number;
   databaseOk?: boolean;
   schemaOk?: boolean;
+  dnsCode?: DnsCode;
+  attempts?: number;
 };
 
 const transportReasons: Record<string, ReadinessReason> = {
@@ -40,7 +43,8 @@ function transportReason(error: unknown, depth = 0): ReadinessReason {
 }
 
 /** The same authenticated readiness gate as deployment, with bounded safe output.
- * No estimator request, retries, model selection, database write or secret output.
+ * Only temporary DNS failures on GET /ready can retry within the same deadline.
+ * No estimator request, model selection, database write or secret output.
  */
 export async function inspectHealthReadiness(
   env: NodeJS.ProcessEnv,
@@ -58,13 +62,18 @@ export async function inspectHealthReadiness(
   const token = z.string().min(24).safeParse(env.HEALTH_API_OPENCLAW_TOKEN);
   if (!token.success || /[\r\n]/.test(token.data)) return report("invalid_api_token");
   let response: Response;
+  let attempts = 0;
+  const countedRequest: typeof fetch = (...args) => { attempts++; return request(...args); };
   try {
-    response = await request(new URL("/ready", base), {
+    response = await fetchHealthReadiness(new URL("/ready", base), {
       headers: { authorization: `Bearer ${token.data}` },
       // Observe redirects without forwarding credentials to another origin.
       redirect: "manual", signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (error) { return report(transportReason(error)); }
+    }, countedRequest);
+  } catch (error) {
+    const dnsCode = readinessDnsCode(error);
+    return report(transportReason(error), { attempts, ...(dnsCode ? { dnsCode } : {}) });
+  }
   const httpStatus = response.status;
   if (!response.ok) {
     // Error bodies can contain proxy HTML, credentials or personal information.
@@ -72,14 +81,14 @@ export async function inspectHealthReadiness(
     const reason = httpStatus >= 300 && httpStatus < 400 ? "redirect_response"
       : httpStatus === 401 ? "http_unauthorized" : httpStatus === 403 ? "http_forbidden"
         : httpStatus >= 500 ? "http_unavailable" : "http_error";
-    return report(reason, { httpStatus });
+    return report(reason, { httpStatus, attempts });
   }
   let body: unknown;
   try { body = await response.json(); }
-  catch (error) { return report(transportReason(error) === "request_failed" ? "invalid_json" : transportReason(error), { httpStatus }); }
+  catch (error) { return report(transportReason(error) === "request_failed" ? "invalid_json" : transportReason(error), { httpStatus, attempts }); }
   const parsed = z.object({ status: z.enum(["ready", "not_ready"]), estimator: z.enum(["configured", "unconfigured"]).optional(), database: z.unknown().optional(), schema: z.unknown().optional() }).safeParse(body);
-  if (!parsed.success) return report("invalid_readiness_response", { httpStatus });
-  const fields = { httpStatus, databaseOk: parsed.data.database === "ok", schemaOk: parsed.data.schema === "ok" };
+  if (!parsed.success) return report("invalid_readiness_response", { httpStatus, attempts });
+  const fields = { httpStatus, attempts, databaseOk: parsed.data.database === "ok", schemaOk: parsed.data.schema === "ok" };
   if (parsed.data.status !== "ready") return report("api_not_ready", fields);
   if (parsed.data.estimator === "unconfigured") return report("estimator_unconfigured", fields);
   if (parsed.data.estimator !== "configured") return report("invalid_readiness_response", fields);

@@ -13,6 +13,38 @@ The gate checks configuration and authenticated `/ready`; it never calls Gemini.
 `estimator: configured` means the API constructed an estimator. It does not prove
 that the configured nutrition model will successfully generate an estimate.
 
+## Confirmed DNS failure and bounded recovery
+
+At 2026-10-13 08:19 UTC (4:19 PM MYT), CIA's original full preflight passed all
+seven earlier checks, accepted its URL/token/origin and reported `dns_failure`
+after 10,044 ms. It never obtained an HTTP response. The effective API values
+matched the protected environment; neither value was inherited from the shell.
+This identifies name resolution as the failing stage. The old observer grouped
+`EAI_AGAIN` and `ENOTFOUND`; it does not establish which code occurred, why that
+lookup failed, or why earlier isolated requests succeeded. No host DNS, Tailscale,
+firewall, provider key/model or database changes are justified by this output.
+
+The repository gate now permits at most three GET `/ready` attempts **only** when
+the transport reports temporary DNS failure `EAI_AGAIN`. The waits are 250 and
+500 ms and share the original 50-second signal with all requests/body reads.
+`ENOTFOUND`, TLS, connection, cancellation, HTTP/authentication, redirect, JSON
+and estimator failures are not retried. Every attempt must pass the existing
+authenticated readiness contract. Exhaustion still fails and stops deployment.
+This handles temporary lookup failures; it cannot repair a persistently broken
+host resolver and is not evidence that CIA has recovered.
+
+To verify on CIA's old stopped checkout before deployment, supply
+`--verify-dns-retry` to the archived runner instead of `--observe-preflight`.
+This explicitly overlays the same reviewed retry helper on the original full
+preflight's readiness fetch, preserving its authorization, URL, redirect
+rejection, response parsing and exit status. It emits retry counts and the
+allowlisted DNS code. It leaves the checkout/configuration and stopped gateway
+in place. The observer detects an already installed repository retry and avoids
+a second retry layer. Plain `--observe-preflight` remains observation only.
+
+Retry code is restricted to readiness; nutrition estimation, pending/confirmed
+meal operations and all existing plugin non-retryable failures are unchanged.
+
 ## Collect evidence before another upgrade
 
 Both isolated probes subsequently passed on CIA, but the original full preflight
@@ -67,7 +99,8 @@ as a boolean. The diagnostic does not modify any environment file, identity,
 configuration or database record.
 
 The ordinary preflight prints the same structured HTTP/readiness result before
-its PASS/FAIL line. Its 50-second limit, success requirements, failure exit and
+its PASS/FAIL line, including request-attempt count and a whitelisted DNS code on
+DNS failure. Its total 50-second limit, success requirements, failure exit and
 deployment stop remain. Redirects are still rejected; the diagnostic observes
 their status without forwarding the bearer token to another origin.
 

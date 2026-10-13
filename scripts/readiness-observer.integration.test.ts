@@ -38,6 +38,17 @@ beforeAll(async () => {
   expect(createHash("sha256").update(original).digest("hex")).toBe("f31fe0d6158b8dfcbc105983ae37a2367d70bb425db95c79a9c75c9703358cad");
   for (const module of ["load-env", "gateway-state", "openclaw-cli", "openclaw-configuration"]) original = original.replace(JSON.stringify(`./${module}.js`), JSON.stringify(pathToFileURL(path.join(root, "scripts", `${module}.ts`)).href));
   await writeFile(path.join(fixture, "scripts/openclaw-preflight.ts"), original);
+  await writeFile(path.join(fixture, "scripts/dns-failure-preload.mjs"), `
+import { resolve } from "node:path";
+if (process.argv[1] && resolve(process.argv[1]) === resolve(process.cwd(), "scripts/openclaw-preflight.ts")) {
+  const original = globalThis.fetch;
+  let failures = Number(process.env.CLAWFIT_TEST_DNS_FAILURES ?? 0);
+  globalThis.fetch = async (...args) => {
+    if (failures-- > 0) throw Object.assign(new TypeError("private fake DNS error"), { cause: { code: process.env.CLAWFIT_TEST_DNS_CODE ?? "EAI_AGAIN" } });
+    return original(...args);
+  };
+}
+`);
   await writeFile(path.join(fixture, "package.json"), JSON.stringify({ type: "module" }));
   await symlink(path.join(root, "node_modules"), path.join(fixture, "node_modules"), "dir");
   const policy = JSON.parse(await readFile(path.join(root, "openclaw/policy.json"), "utf8")) as { healthTools: string[] };
@@ -67,10 +78,11 @@ async function run(pnpm = false, overrides: NodeJS.ProcessEnv = {}) {
       pnpm ? ["openclaw:preflight", "--before-restart"] : ["--import", "tsx", "scripts/openclaw-preflight.ts", "--before-restart"], {
         cwd: pnpm ? root : fixture, timeout: 30_000, env: { ...process.env,
           PATH: `${path.join(fixture, "bin")}${path.delimiter}${process.env.PATH}`,
-          NODE_OPTIONS: `--import=${pathToFileURL(path.join(root, "scripts/readiness-observer.mjs")).href}`,
+          NODE_OPTIONS: `--import=${pathToFileURL(path.join(fixture, "scripts/dns-failure-preload.mjs")).href} --import=${pathToFileURL(path.join(root, "scripts/readiness-observer.mjs")).href}`,
           OPENCLAW_STATE_DIR: path.join(fixture, "state"), OPENCLAW_CONFIG_PATH: undefined, OPENCLAW_ENV_FILE: "",
           HEALTH_API_URL: undefined, HEALTH_API_OPENCLAW_TOKEN: undefined, OPENCLAW_GATEWAY_TOKEN: undefined,
           CLAWFIT_WHATSAPP_ALLOW_FROM: undefined, CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS: "",
+          CLAWFIT_VERIFY_READINESS_DNS_RETRY: "0", CLAWFIT_TEST_DNS_FAILURES: "0", CLAWFIT_TEST_DNS_CODE: "EAI_AGAIN",
           ...overrides,
         },
       }));
@@ -106,6 +118,37 @@ it.skipIf(process.platform === "win32").each([
   expect(requests).toBe(1);
 });
 
+it.skipIf(process.platform === "win32")("shows the exact DNS code in the unchanged gate, without retrying observation mode", async () => {
+  requests = 0;
+  const output = await run(false, { CLAWFIT_TEST_DNS_FAILURES: "1" });
+  expect(output).toContain('"failure":"dns_failure","dnsCode":"EAI_AGAIN"');
+  expect(output).toContain("FAIL Health API readiness and configured nutrition estimator");
+  expect(output).not.toContain('"reason":"readiness_dns_retry"');
+  expect(output).not.toContain("private fake DNS error");
+  expect(requests).toBe(0);
+});
+
+it.skipIf(process.platform === "win32")("verifies temporary DNS recovery inside the exact deployed full preflight with its original request", async () => {
+  status = 200;
+  body = JSON.stringify({ status: "ready", estimator: "configured" });
+  requests = 0;
+  const output = await run(false, { CLAWFIT_TEST_DNS_FAILURES: "1", CLAWFIT_VERIFY_READINESS_DNS_RETRY: "1" });
+  expect(output).toContain('"verifyDnsRetry":true');
+  expect(output).toContain('"reason":"readiness_dns_retry","attempt":1,"dnsCode":"EAI_AGAIN"');
+  expect(output).toContain('"redirectPolicy":"error"');
+  expect(output).toContain("PASS Health API readiness and configured nutrition estimator");
+  expect(requests).toBe(1);
+});
+
+it.skipIf(process.platform === "win32").each(["EAI_AGAIN", "ENOTFOUND"])("retains failure for unrecovered %s in verification mode", async code => {
+  requests = 0;
+  const output = await run(false, { CLAWFIT_TEST_DNS_FAILURES: "3", CLAWFIT_TEST_DNS_CODE: code, CLAWFIT_VERIFY_READINESS_DNS_RETRY: "1" });
+  expect(output).toContain(`"failure":"dns_failure","dnsCode":"${code}"`);
+  expect(output).toContain("FAIL Health API readiness and configured nutrition estimator");
+  expect(output.match(/"reason":"readiness_dns_retry"/g)?.length ?? 0).toBe(code === "EAI_AGAIN" ? 2 : 0);
+  expect(requests).toBe(0);
+});
+
 it.skipIf(process.platform === "win32")("attaches to the actual pnpm package script and its tsx child, but not OpenClaw subprocesses", async () => {
   status = 200;
   body = JSON.stringify({ status: "ready", estimator: "configured" });
@@ -119,6 +162,18 @@ it.skipIf(process.platform === "win32")("attaches to the actual pnpm package scr
   expect(requests).toBe(1);
 });
 
+it.skipIf(process.platform === "win32")("does not nest verification retries when the current package script already contains the fix", async () => {
+  requests = 0;
+  const output = await run(true, { CLAWFIT_TEST_DNS_FAILURES: "3", CLAWFIT_VERIFY_READINESS_DNS_RETRY: "1" });
+  expect(output).toContain('"dnsRetryAlreadyInstalled":true');
+  const report = output.split("\n").filter(line => line.startsWith("[clawfit-preflight] "))
+    .map(line => JSON.parse(line.slice("[clawfit-preflight] ".length))).find(value => value.reason === "dns_failure");
+  expect(report).toMatchObject({ dnsCode: "EAI_AGAIN", attempts: 3 });
+  expect(output).toContain("FAIL Health API readiness and configured nutrition estimator");
+  expect(output).not.toContain('"reason":"readiness_dns_retry"');
+  expect(requests).toBe(0);
+});
+
 it.skipIf(process.platform === "win32")("identifies validation failure before fetch without issuing a replacement request", async () => {
   requests = 0;
   const output = await run(false, { HEALTH_API_OPENCLAW_TOKEN: "short" });
@@ -129,7 +184,7 @@ it.skipIf(process.platform === "win32")("identifies validation failure before fe
   expect(requests).toBe(0);
 });
 
-it.skipIf(process.platform === "win32")("runs the archived observer against the current package script without changing checkout or configuration", async () => {
+it.skipIf(process.platform === "win32").each(["--observe-preflight", "--verify-dns-retry"])("runs the archived observer %s against the current package script without changing checkout or configuration", async mode => {
   const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
   const sha = git("rev-parse", "HEAD");
   const tree = git("status", "--porcelain");
@@ -140,7 +195,7 @@ it.skipIf(process.platform === "win32")("runs the archived observer against the 
   requests = 0;
   let output = "";
   try {
-    const result = await promisify(execFile)(process.execPath, ["scripts/run-readiness-diagnostics.mjs", sha, "--observe-preflight"], { cwd: root, timeout: 45_000,
+    const result = await promisify(execFile)(process.execPath, ["scripts/run-readiness-diagnostics.mjs", sha, mode], { cwd: root, timeout: 45_000,
       env: { ...process.env, PATH: `${path.join(fixture, "bin")}${path.delimiter}${process.env.PATH}`, OPENCLAW_STATE_DIR: path.join(fixture, "state"),
         OPENCLAW_CONFIG_PATH: undefined, OPENCLAW_ENV_FILE: "", HEALTH_API_URL: undefined, HEALTH_API_OPENCLAW_TOKEN: undefined,
         OPENCLAW_GATEWAY_TOKEN: undefined, CLAWFIT_WHATSAPP_ALLOW_FROM: undefined, CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS: "" },
@@ -148,6 +203,7 @@ it.skipIf(process.platform === "win32")("runs the archived observer against the 
     output = result.stdout;
   } catch (error) { output = (error as { stdout?: string }).stdout ?? ""; }
   expect(output).toContain('"reason":"original_readiness_contract","contractAccepted":true');
+  expect(output).toContain(`"verifyDnsRetry":${mode === "--verify-dns-retry"}`);
   expect(output).toContain("PASS Health API readiness and configured nutrition estimator");
   expect(output).not.toContain(token);
   expect(output).not.toContain(endpoint);

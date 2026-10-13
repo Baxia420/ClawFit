@@ -7,6 +7,15 @@ import { z } from "zod";
 
 const target = resolve(process.cwd(), "scripts/openclaw-preflight.ts");
 if (process.argv[1] && resolve(process.argv[1]) === target) {
+  const { fetchHealthReadiness, readinessDnsCode } = await import("./health-readiness-fetch.ts");
+  const verifyDnsRetry = process.env.CLAWFIT_VERIFY_READINESS_DNS_RETRY === "1";
+  // The verification overlay is for the old, single-attempt CIA gate. A checkout
+  // that already has the repository retry must never acquire a second layer.
+  let dnsRetryAlreadyInstalled = false;
+  if (verifyDnsRetry) try {
+    dnsRetryAlreadyInstalled = readFileSync(target, "utf8").includes("inspectHealthReadiness")
+      && readFileSync(resolve(process.cwd(), "scripts/health-readiness.ts"), "utf8").includes("fetchHealthReadiness");
+  } catch { /* The old checkout has no shared readiness helper. */ }
   const emit = fields => console.info(`[clawfit-preflight] ${JSON.stringify(fields)}`);
   const names = ["HEALTH_API_URL", "HEALTH_API_OPENCLAW_TOKEN"];
   const inherited = Object.fromEntries(names.map(name => [name, process.env[name]]));
@@ -49,7 +58,7 @@ if (process.argv[1] && resolve(process.argv[1]) === target) {
     }
     return "request_failed";
   }
-  emit({ reason: "original_preflight_observer_attached", runtime: process.versions.bun ? "bun" : process.release.name, nodeVersion: process.version });
+  emit({ reason: "original_preflight_observer_attached", runtime: process.versions.bun ? "bun" : process.release.name, nodeVersion: process.version, verifyDnsRetry, dnsRetryAlreadyInstalled });
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async function(input, init) {
     let matches = false;
@@ -61,8 +70,16 @@ if (process.argv[1] && resolve(process.argv[1]) === target) {
     const elapsed = () => Math.round(performance.now() - started);
     emit({ reason: "original_readiness_request", ...context(), redirectPolicy: init?.redirect ?? "follow" });
     let response;
-    try { response = await originalFetch.call(this, input, init); }
-    catch (error) { emit({ reason: "original_readiness_transport_failure", failure: reason(error), elapsedMs: elapsed() }); throw error; }
+    try {
+      response = verifyDnsRetry && !dnsRetryAlreadyInstalled
+        ? await fetchHealthReadiness(new URL(String(input)), init, originalFetch.bind(this), report => emit(report))
+        : await originalFetch.call(this, input, init);
+    }
+    catch (error) {
+      const dnsCode = readinessDnsCode(error);
+      emit({ reason: "original_readiness_transport_failure", failure: reason(error), ...(dnsCode ? { dnsCode } : {}), elapsedMs: elapsed() });
+      throw error;
+    }
     emit({ reason: "original_readiness_response", httpStatus: response.status, httpOk: response.ok, elapsedMs: elapsed() });
     const originalJson = response.json;
     response.json = async function(...args) {

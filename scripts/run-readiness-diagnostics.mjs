@@ -12,12 +12,13 @@ const root = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "
 const directory = await mkdtemp(path.join(tmpdir(), "clawfit-readiness-"));
 try {
   const read = file => execFileSync("git", ["show", `${sha}:scripts/${file}`], { encoding: "utf8", cwd: root });
-  if (process.argv.includes("--observe-preflight")) {
+  if (process.argv.includes("--observe-preflight") || process.argv.includes("--verify-dns-retry")) {
     // Run the actual package script and current file, including all prior checks.
     // NODE_OPTIONS carries only a scoped observer into the tsx child. OpenClaw
     // subprocesses do not match its entry point and are left untouched.
     const observer = path.join(directory, "readiness-observer.mjs");
-    await writeFile(observer, read("readiness-observer.mjs"), { mode: 0o600 });
+    await writeFile(observer, read("readiness-observer.mjs").replace('"./health-readiness-fetch.ts"', '"./health-readiness-fetch.mts"'), { mode: 0o600 });
+    await writeFile(path.join(directory, "health-readiness-fetch.mts"), read("health-readiness-fetch.ts"), { mode: 0o600 });
     await symlink(path.join(root, "node_modules"), path.join(directory, "node_modules"), "dir");
     const options = `${process.env.NODE_OPTIONS ?? ""} --import=${pathToFileURL(observer).href}`.trim();
     let stdout = "";
@@ -25,7 +26,7 @@ try {
     let exitCode = 0;
     try {
       ({ stdout, stderr } = await promisify(execFile)("pnpm", ["openclaw:preflight", "--before-restart"], {
-        cwd: root, env: { ...process.env, NODE_OPTIONS: options }, timeout: 290_000, maxBuffer: 512 * 1024,
+        cwd: root, env: { ...process.env, NODE_OPTIONS: options, CLAWFIT_VERIFY_READINESS_DNS_RETRY: process.argv.includes("--verify-dns-retry") ? "1" : "0" }, timeout: 290_000, maxBuffer: 512 * 1024,
       }));
     } catch (error) {
       stdout = typeof error.stdout === "string" ? error.stdout : "";
@@ -45,7 +46,8 @@ try {
   for (const module of ["gateway-state", "load-env"]) diagnostic = diagnostic.replace(JSON.stringify(`./${module}.js`), JSON.stringify(pathToFileURL(path.join(root, "scripts", `${module}.ts`)).href));
   diagnostic = diagnostic.replace('"./health-readiness.js"', '"./health-readiness.mts"');
   diagnostic = diagnostic.replace('fileURLToPath(new URL("../.env", import.meta.url))', `fileURLToPath(new URL(${JSON.stringify(pathToFileURL(path.join(root, ".env")).href)}))`);
-  await writeFile(path.join(directory, "health-readiness.mts"), read("health-readiness.ts"), { mode: 0o600 });
+  await writeFile(path.join(directory, "health-readiness.mts"), read("health-readiness.ts").replace('"./health-readiness-fetch.js"', '"./health-readiness-fetch.mts"'), { mode: 0o600 });
+  await writeFile(path.join(directory, "health-readiness-fetch.mts"), read("health-readiness-fetch.ts"), { mode: 0o600 });
   await writeFile(path.join(directory, "health-readiness-diagnose.mts"), diagnostic, { mode: 0o600 });
   await symlink(path.join(root, "node_modules"), path.join(directory, "node_modules"), "dir");
   const execute = promisify(execFile);
