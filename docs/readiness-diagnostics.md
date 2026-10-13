@@ -15,6 +15,30 @@ that the configured nutrition model will successfully generate an estimate.
 
 ## Collect evidence before another upgrade
 
+Both isolated probes subsequently passed on CIA, but the original full preflight
+still failed. Those probes use a refactored gate and `pnpm exec tsx`; they do not
+establish what failed in the original package script after its preceding checks.
+Do not repeat the isolated probe or redeployment to explain that discrepancy.
+
+Supply `--observe-preflight` after the reviewed SHA to the archived-source runner
+to observe **the current, unchanged** `pnpm openclaw:preflight --before-restart`.
+It installs a temporary Node preload only for that child invocation. The preload
+matches the preflight entry point; OpenClaw subprocesses and other CLI processes
+remain unaffected. The original fetch arguments, redirect rejection, response,
+JSON parsing, schema validation, exception and exit status are preserved. It
+makes no extra request and does not start the gateway. The ordinary directory
+ownership/write-access check still runs, as in the existing preflight.
+
+The observer records attachment, input-validation booleans, effective environment
+equality, request start, safe transport reason, HTTP status and readiness-contract
+booleans. A missing observer is reported explicitly rather than being treated as
+a successful diagnostic. No request indicates a pre-request validation failure
+or earlier termination; HTTP and contract reports identify how far the original
+request progressed. Tests exercise the exact deployed `5555336` gate, the pnpm
+package script/tsx child, denied HTTP, rejected redirects, bad JSON, unconfigured
+estimator and validation failure. No production credentials or provider calls
+are used in these tests.
+
 The archived-source runner can collect evidence on the existing stopped CIA
 installation before any new deployment. Fetch the reviewed diagnostic commit,
 then stream `scripts/run-readiness-diagnostics.mjs` from that immutable commit to
