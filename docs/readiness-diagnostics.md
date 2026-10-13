@@ -1,0 +1,59 @@
+# Diagnose a stopped upgrade at API readiness
+
+The October 13 CIA upgrade twice stopped at the authenticated Health API readiness
+gate. A separate request returned HTTP 200 with ready/configured/database/schema
+flags true. Render confirmed the PR #11 merge was live from 11:39 AM MYT and
+recorded the successful `/ready` request at 1:19 PM. No `/ready` arrival was
+recorded around the second reported upgrade failure, and no service failure or
+restart event was returned in that period. These observations do not establish
+the cause of the failed request. Do not assume a cold start, bad credential,
+wrong model or database problem without the diagnostic reason.
+
+The gate checks configuration and authenticated `/ready`; it never calls Gemini.
+`estimator: configured` means the API constructed an estimator. It does not prove
+that the configured nutrition model will successfully generate an estimate.
+
+## Collect evidence before another upgrade
+
+After this diagnostics change is approved and available in the CIA checkout,
+run only the readiness diagnostic as the existing service user:
+
+```bash
+sudo -u clawfit -H bash -c 'cd /home/clawfit/app && pnpm openclaw:diagnose-api'
+sudo -u clawfit -H bash -c 'cd /home/clawfit/app && node --import tsx scripts/health-readiness-diagnose.ts'
+```
+
+Both commands execute the same gate. Compare runtime, inherited/protected/repo
+environment equality flags, reason, HTTP status and elapsed milliseconds. Output
+contains no variable values, hashes, URLs, actual file paths, message contents or
+credentials. Unknown Error messages, stacks, response bodies and redirect
+locations are never printed. An unreadable environment source is reported only
+as a boolean. The diagnostic does not modify any environment file, identity,
+configuration or database record.
+
+The ordinary preflight prints the same structured HTTP/readiness result before
+its PASS/FAIL line. Its 50-second limit, success requirements, failure exit and
+deployment stop remain. Redirects are still rejected; the diagnostic observes
+their status without forwarding the bearer token to another origin.
+
+| Reason | What the evidence establishes |
+| --- | --- |
+| `missing_api_url`, `invalid_api_url`, `unsafe_api_origin`, `invalid_api_token` | Configuration validation failed before any API request. |
+| `request_timeout` | The request or response body exceeded the allowed wait. |
+| `dns_failure`, `connection_refused`, `connection_reset`, `tls_failure` | A known transport error prevented a usable response. |
+| `request_failed` | Transport failed with an unrecognized safe error classification. |
+| `redirect_response` | The API endpoint redirected; credentials were not forwarded. |
+| `http_unauthorized`, `http_forbidden` | The reached endpoint rejected authentication or access. |
+| `http_unavailable`, `http_error` | The endpoint returned a failing HTTP status. Error bodies are not logged. |
+| `invalid_json`, `invalid_readiness_response` | The response did not satisfy the existing readiness contract. |
+| `api_not_ready`, `estimator_unconfigured` | The parsed response explicitly reported a readiness/configuration problem. |
+| `ready` | This particular authenticated readiness request passed. |
+
+When the reason is `ready` in the deployment runtime, retry the approved
+repository redeployment command. Do not bypass the gate by manually starting
+the stopped gateway. Verify real photo forwarding only after the upgrade passes.
+If this check fails again, retain timestamps and its fixed structured reason so
+Render observations can be matched to that attempt.
+
+No provider model, key, quota, pairing, identity mapping, database migration,
+historical meal, firewall or Tailscale configuration is changed by this patch.

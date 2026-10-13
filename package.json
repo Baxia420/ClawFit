@@ -26,7 +26,8 @@
     "nutrition:smoke": "tsx scripts/manual-nutrition-test.ts --verify-estimator",
     "identity:link": "tsx scripts/link-whatsapp-identity.ts",
     "history:import": "node --import tsx scripts/import-reviewed-history.ts",
-    "openclaw:preflight": "tsx scripts/openclaw-preflight.ts"
+    "openclaw:preflight": "tsx scripts/openclaw-preflight.ts",
+    "openclaw:diagnose-api": "tsx scripts/health-readiness-diagnose.ts"
   },
   "devDependencies": {
     "@electric-sql/pglite": "latest",
