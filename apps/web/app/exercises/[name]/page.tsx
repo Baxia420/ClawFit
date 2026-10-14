@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Metric } from "../../../components/Metric";
 import { TrendChart } from "../../../components/TrendChart";
 import { formatLocalDate, healthApi, type Settings } from "../../../lib/api";
@@ -63,6 +64,7 @@ export default async function ExercisePage({ params }: { params: Promise<{ name:
         </div>
         <div className="header-code">SETS / {rows.length}<br />METHOD / EPLEY</div>
       </header>
+      <p><Link href={`/workouts/library?q=${encodeURIComponent(exerciseName)}`}>Find instructions in the exercise library</Link></p>
       <section className="metric-grid two">
         <Metric label="HEAVIEST" value={bestWeight} unit="kg" accent />
         <Metric label="BEST EST. 1RM" value={bestE1rm} unit="kg" />

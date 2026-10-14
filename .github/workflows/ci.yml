@@ -22,3 +22,13 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm openclaw:plugin:validate
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:library:browser
+        env:
+          CLAWFIT_SCREENSHOT_DIR: test-results/exercise-library
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: exercise-library-screenshots
+          path: test-results/exercise-library
+          if-no-files-found: ignore

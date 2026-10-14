@@ -117,3 +117,9 @@ The API, database migrator, and Next.js app load the repository-root `.env` even
 ## Notifications foundation
 
 The Settings page persists goals, timezone, units, and notification rules (schedule, weekdays, and intended delivery channel). It does not send notifications yet. A future delivery worker must add Web Push subscriptions/VAPID handling and WhatsApp scheduling before any saved rule becomes active.
+
+### Exercise Library
+
+Browse `/workouts/library` or select exercises inside the routine editor. See
+[Exercise Library](docs/exercise-library.md) for usage, the additive migration,
+media coverage, tests and future Android notes, and [source licenses](docs/exercise-sources.md).

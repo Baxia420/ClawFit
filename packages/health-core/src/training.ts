@@ -8,7 +8,8 @@ export const muscleLabels: Record<MuscleGroup, string> = { chest: "Chest", back:
 export const trainingDateSchema = z.string().refine(isValidCalendarDate, "Use a valid calendar date");
 export const weightEntrySchema = z.object({ weightKg: z.number().min(20).max(400), notes: z.string().trim().max(500).default("") });
 export const weightGoalSchema = z.object({ goalKg: z.number().min(20).max(400).nullable() });
-export const routineExerciseSchema = z.object({ name: z.string().trim().min(1).max(160), muscleGroup: muscleGroupSchema, sets: z.number().int().min(1).max(20), reps: z.number().int().min(1).max(100), restSeconds: z.number().int().min(0).max(900).default(90) });
+export const routineExerciseSchema = z.object({
+  libraryId: z.string().regex(/^(edb:\d{4}|custom:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/).optional(), name: z.string().trim().min(1).max(160), muscleGroup: muscleGroupSchema, sets: z.number().int().min(1).max(20), reps: z.number().int().min(1).max(100), restSeconds: z.number().int().min(0).max(900).default(90) });
 export const routineDefinitionSchema = z.object({ name: z.string().trim().min(1).max(120), exercises: z.array(routineExerciseSchema).min(1).max(30).refine(rows => new Set(rows.map(r => r.name.toLowerCase().replace(/\s+/g, " "))).size === rows.length, "Each exercise should appear once"), archived: z.boolean().default(false) });
 export const routineCreateSchema = routineDefinitionSchema.extend({ idempotencyKey: z.string().min(8).max(200) });
 export const routineUpdateSchema = routineDefinitionSchema.extend({ version: z.number().int().positive() });

@@ -6,3 +6,5 @@ export * from "./schemas.js";
 export * from "./historical-data.js";
 
 export * from "./training.js";
+
+export * from "./exercise-library.js";

@@ -15,14 +15,14 @@ const shapes: Partial<Record<MuscleGroup, string[]>> = {
   glutes: ["M68 178 Q85 172 98 190 L96 217 Q78 225 66 209Z", "M102 190 Q115 172 132 178 L134 209 Q122 225 104 217Z"],
   calves: ["M68 295 L87 298 L84 333 Q77 347 69 335Z", "M113 298 L132 295 L131 335 Q123 347 116 333Z"],
 };
-function Body({ back, counts, selected, select }: { back: boolean; counts: Record<MuscleGroup, number>; selected: MuscleGroup | null; select: (muscle: MuscleGroup) => void }) {
+export function Body({ back, counts, selected, select, unit = "sets", interactive = true }: { interactive?: boolean; unit?: string; back: boolean; counts: Record<MuscleGroup, number>; selected: MuscleGroup | null; select: (muscle: MuscleGroup) => void }) {
   const visible: MuscleGroup[] = back ? ["back", "shoulders", "triceps", "glutes", "hamstrings", "calves"] : ["chest", "shoulders", "biceps", "core", "quads", "calves"];
   const max = Math.max(1, ...Object.values(counts));
   return <figure><svg viewBox="0 0 200 380" role="group" aria-label={back ? "Back muscle coverage" : "Front muscle coverage"}>
     <circle cx="100" cy="28" r="22" fill="var(--training-inert)" />
     <path d="M87 50 L113 50 L116 61 Q151 57 163 82 L177 154 L182 191 L170 199 L153 153 L143 119 L134 175 L141 220 L139 292 L133 349 L145 360 L143 369 L111 369 L109 340 L103 278 L100 241 L97 278 L91 340 L89 369 L57 369 L55 360 L67 349 L61 292 L59 220 L66 175 L57 119 L47 153 L30 199 L18 191 L23 154 L37 82 Q49 57 84 61Z" fill="var(--training-inert)" />
-    {visible.map(muscle => <g key={muscle} role="button" tabIndex={0} aria-label={`${muscleLabels[muscle]}: ${counts[muscle]} sets`} aria-pressed={selected === muscle} onClick={() => select(muscle)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(muscle); } }} className={selected === muscle ? "muscle-region selected" : "muscle-region"}>
-      <title>{`${muscleLabels[muscle]} · ${counts[muscle]} sets`}</title>
+    {visible.map(muscle => <g key={muscle} role={interactive ? "button" : "img"} tabIndex={interactive ? 0 : undefined} aria-label={`${muscleLabels[muscle]}: ${counts[muscle]} ${unit}`} aria-pressed={interactive ? selected === muscle : undefined} onClick={interactive ? () => select(muscle) : undefined} onKeyDown={event => { if (interactive && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); select(muscle); } }} className={selected === muscle ? "muscle-region selected" : "muscle-region"}>
+      <title>{`${muscleLabels[muscle]} · ${counts[muscle]} ${unit}`}</title>
       {(shapes[muscle] ?? []).map((path,index) => <path key={index} d={path} fill={counts[muscle] === 0 ? "var(--training-unworked)" : counts[muscle] / max > .6 ? "var(--teal)" : "var(--acid)"} />)}
     </g>)}
   </svg><figcaption>{back ? "Back" : "Front"}</figcaption></figure>;

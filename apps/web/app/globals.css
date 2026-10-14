@@ -186,3 +186,52 @@ h1 em { color:var(--teal); font-style:normal; -webkit-text-stroke:1px var(--ink)
 @media(max-width:1100px){.week-schedule{grid-template-columns:repeat(4,minmax(0,1fr))}.week-schedule label{border-bottom:1px solid var(--line)}.training-session-grid{grid-template-columns:minmax(0,1fr) 280px}.training-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.muscle-coverage{gap:20px}}
 @media(max-width:800px){.training-session-grid,.training-start,.training-two-column,.muscle-coverage{grid-template-columns:1fr}.training-start form{border-left:0;border-top:1px solid var(--line);padding:20px 0 0}.set-entry{position:static}.routine-exercises{grid-template-columns:1fr}.body-map figure{max-width:180px}.training-heading{align-items:flex-start}.training-heading>.training-button{flex-shrink:0;max-width:150px}.training-metrics.weight-metrics{grid-template-columns:1fr 1fr}.weight-metrics>.metric:last-child{grid-column:1/-1}}
 @media(max-width:500px){.training-card{padding:18px}.training-card>.panel-title{margin:-18px -18px 18px;padding:0 12px}.training-tabs{width:100%}.training-tabs a{flex:1;padding:12px 8px;text-align:center;font-size:10px}.week-schedule{grid-template-columns:repeat(2,minmax(0,1fr))}.training-heading{flex-direction:column;align-items:flex-start;gap:12px}.training-heading.panel-title{flex-direction:row;align-items:center}.training-metrics{gap:12px}.training-metrics .metric{padding:16px 13px;min-height:160px}.training-range{align-items:stretch;gap:12px}.training-range form{justify-content:space-between;gap:8px}.training-range form label{font-size:10px;flex:1}.training-range input{width:100%;max-width:160px}.session-history summary{flex-wrap:wrap;gap:8px}.session-history summary>span:nth-child(2){font-size:10px}.history-exercise{flex-direction:column;gap:8px}.history-exercise span{text-align:left}.training-chart{height:240px}.exercise-title{font-size:15px}.body-map{gap:8px;padding:16px 8px}.training-button{font-size:10px;padding:11px 13px}.weight-history button{gap:10px;font-size:11px}}
+/* Exercise library: uses the existing training and Signal design tokens. */
+.exercise-library { padding:24px 0; }
+.library-toolbar { display:flex; align-items:end; gap:16px; margin-bottom:20px; }
+.library-search { flex:1; }
+.library-filters { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; }
+.library-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; }
+.library-card { display:flex; flex-direction:column; padding:0; overflow:hidden; }
+.library-card-open { border:0; background:transparent; text-align:left; cursor:pointer; padding:0; flex:1; }
+.library-card img { width:100%; height:170px; object-fit:contain; background:#fff; display:block; }
+.library-card-copy { display:flex; flex-direction:column; gap:8px; padding:16px; }
+.library-card-copy strong { font-size:18px; line-height:1.25; }
+.library-card-copy small { color:var(--muted); line-height:1.5; }
+.library-card-placeholder { min-height:170px; display:flex; flex-direction:column; justify-content:center; align-items:center; gap:8px; background:var(--paper); border-bottom:1px solid var(--line); }
+.library-card-placeholder span { font:700 18px var(--font-mono); color:var(--teal); text-transform:uppercase; }
+.library-card-placeholder small { color:var(--muted); font-size:12px; }
+.library-attribution { font-size:11px; line-height:1.6; color:var(--muted); margin:8px 16px; }
+.library-muscles { margin-top:16px; border-bottom:1px solid var(--line); padding:12px 0; }
+.library-muscles summary { cursor:pointer; font-weight:700; min-height:32px; }
+.library-muscles .body-map { max-width:370px; margin:auto; }
+.library-pagination { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:24px; }
+.library-dialog { width:min(1080px,95vw); max-height:90dvh; border:2px solid var(--ink); padding:0 24px 24px; background:var(--panel); color:var(--ink); box-shadow:var(--shadow); }
+.library-dialog::backdrop { background:rgba(23,27,24,.55); }
+.library-dialog-header { position:sticky; top:0; z-index:2; background:var(--panel); display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 0; border-bottom:1px solid var(--ink); }
+.library-detail { margin-top:24px; }
+.library-detail h2 { font-size:clamp(26px,4vw,42px); text-transform:none; overflow-wrap:anywhere; }
+.library-demonstrations { display:flex; flex-wrap:wrap; gap:16px; }
+.library-demonstrations figure { flex:1; min-width:220px; margin:0; }
+.library-demonstrations img { display:block; width:100%; height:300px; object-fit:contain; background:white; border:1px solid var(--line); }
+.library-demonstrations figcaption { font-size:11px; line-height:1.6; margin:8px 0; }
+.library-muscle-facts { display:grid; grid-template-columns:1fr 1fr; gap:20px; border-block:1px solid var(--line); padding:20px 0; }
+.library-muscle-facts dt { font-size:12px; color:var(--muted); }
+.library-muscle-facts dd { margin:6px 0 0; }
+.library-instructions { padding-left:24px; max-width:780px; }
+.library-instructions li { padding:4px 0 8px 6px; line-height:1.65; }
+.library-no-media { padding:16px; border:1px dashed var(--line); color:var(--muted); }
+.library-video { width:100%; aspect-ratio:16/9; border:0; }
+.library-history { margin-top:32px; }
+.library-history-scroll { overflow-x:auto; }
+.library-history table { width:100%; border-collapse:collapse; text-align:left; font-size:14px; }
+.library-history th,.library-history td { padding:12px 8px; border-bottom:1px solid var(--line); }
+.custom-exercise-form { display:flex; flex-direction:column; gap:16px; }
+.custom-exercise-form textarea { width:100%; margin-top:6px; padding:12px; border:1px solid var(--ink); font:inherit; background:var(--panel); color:var(--ink); resize:vertical; }
+.custom-exercise-form textarea:focus-visible { outline:3px solid var(--teal); outline-offset:2px; }
+.training-back-link { display:inline-block; padding:12px 0; }
+@media(max-width:1000px) { .library-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:680px) { .library-toolbar { align-items:stretch; flex-direction:column; }.library-filters { grid-template-columns:1fr 1fr; }.library-grid { gap:10px; }.library-card-copy { padding:12px; }.library-card-copy strong { font-size:15px; }.library-card img,.library-card-placeholder { height:140px; min-height:140px; }.library-dialog { width:100%; max-height:95dvh; padding:0 12px 16px; }.library-detail { padding:16px 0; }.library-demonstrations figure { min-width:100%; }.library-muscle-facts { grid-template-columns:1fr; gap:12px; }.library-pagination { font-size:12px; }.training-tabs { overflow-x:auto; } }
+
+.library-target-map { max-width:240px; margin:0 auto; }
+.library-target-map .muscle-region { cursor:default; }

@@ -1,3 +1,4 @@
+import { libraryIdSchema, libraryQuerySchema, customExerciseCreateSchema, customExerciseUpdateSchema } from "@clawfit/health-core";
 import { createHash, timingSafeEqual } from "node:crypto";
 import Fastify, { type FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
@@ -814,6 +815,14 @@ export function createApp(options: CreateAppOptions) {
     const next = new Date(`${date}T12:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
     return { userId, timezone: settings.timezone, start, end, startDay, endDay: next.toISOString().slice(0, 10) };
   };
+  const libraryId = (request: FastifyRequest) => libraryIdSchema.parse((request.params as { id: string }).id);
+  app.get("/v1/exercise-library", async request => options.repository.librarySearch(requireRequestUserId(request), libraryQuerySchema.parse(request.query)));
+  app.get("/v1/exercise-library/:id", async request => options.repository.libraryExercise(requireRequestUserId(request), libraryId(request)));
+  app.get("/v1/exercise-library/:id/history", async request => options.repository.libraryHistory(requireRequestUserId(request), libraryId(request)));
+  app.put("/v1/exercise-library/:id/favorite", async request => options.repository.favoriteExercise(requireRequestUserId(request), libraryId(request), z.object({ favorite: z.boolean() }).parse(request.body).favorite));
+  app.post("/v1/exercise-library/custom", async (request, reply) => reply.code(201).send(await options.repository.createCustomExercise(requireRequestUserId(request), customExerciseCreateSchema.parse(request.body))));
+  app.put("/v1/exercise-library/:id", async request => options.repository.updateCustomExercise(requireRequestUserId(request), libraryId(request), customExerciseUpdateSchema.parse(request.body)));
+
   app.get("/v1/training/plans", async request => {
     const userId = requireRequestUserId(request);
     const [routines, schedule] = await Promise.all([options.repository.listRoutines(userId), options.repository.getSchedule(userId)]);
