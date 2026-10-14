@@ -30,8 +30,8 @@ try {
  await page.getByRole("heading",{name:"Barbell bench press",exact:true}).waitFor();
  await page.getByRole("button",{name:"☆ Favorite",exact:true}).click();
  await page.getByRole("button",{name:"★ Favorited",exact:true}).waitFor();
- await page.getByLabel("Routine",{exact:true}).selectOption({label:"Browser test plan"});
- await page.getByLabel("Position",{exact:true}).selectOption("0");
+ await page.getByLabel(/^Routine\b/).selectOption({label:"Browser test plan"});
+ await page.getByLabel(/^Position\b/).selectOption("0");
  await page.getByRole("button",{name:"Replace exercise",exact:true}).click();
  await page.getByRole("status").filter({hasText:"Exercise replaced."}).waitFor();
  const plans=await (await context.request.get("http://localhost:3009/api/training?plans=true")).json();
@@ -39,7 +39,7 @@ try {
  if(screenshotDir){await mkdir(screenshotDir,{recursive:true});await page.screenshot({path:resolve(screenshotDir,"exercise-detail-desktop.png")});}
  await page.getByRole("button",{name:"Close",exact:true}).click();
  await page.getByRole("searchbox").fill("");
- await page.getByLabel("Collection",{exact:true}).selectOption("favorites");
+ await page.getByLabel(/^Collection\b/).selectOption("favorites");
  await page.getByRole("status").filter({hasText:"1 exercises"}).waitFor();
  // Mobile: no overflow, readable filters, create/edit, and keyboard close.
  await page.setViewportSize({width:390,height:844});
@@ -61,9 +61,9 @@ try {
  // Partner has an independent collection.
  await context.addCookies([await cookie("00000000-0000-0000-0000-000000000003")]);
  await page.reload();
- await page.getByLabel("Collection",{exact:true}).selectOption("favorites");
+ await page.getByLabel(/^Collection\b/).selectOption("favorites");
  await page.getByRole("heading",{name:"No exercises found",exact:true}).waitFor();
- await page.getByLabel("Collection",{exact:true}).selectOption("custom");
+ await page.getByLabel(/^Collection\b/).selectOption("custom");
  await page.getByRole("heading",{name:"No exercises found",exact:true}).waitFor();
  // Routine picker and active workout use the same stable ID and instructions.
  await context.addCookies([await cookie("00000000-0000-0000-0000-000000000002")]);
