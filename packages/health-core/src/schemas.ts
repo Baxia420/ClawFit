@@ -75,6 +75,7 @@ export const startWorkoutSchema = z.object({
 });
 
 export const workoutSetInputSchema = z.object({
+  libraryId: z.string().regex(/^(edb:\d{4}|custom:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/).optional(),
   muscleGroup: muscleGroupSchema.optional(),
   exerciseName: z.string().min(1).max(160),
   weightKg: z.number().nonnegative().max(1_000).nullable(),

@@ -52,6 +52,7 @@ export async function GET(request: Request) {
   if (!session?.user?.id) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
   try {
     const url = new URL(request.url);
+    if (url.searchParams.get("plans") === "true") return NextResponse.json(await healthApiRequest("/v1/training/plans", { userId: session.user.id }), { headers: { "Cache-Control": "private, no-store" } });
     const name = z.string().trim().min(1).max(160).parse(url.searchParams.get("exercise"));
     const before = z.iso.datetime().parse(url.searchParams.get("before"));
     return NextResponse.json(await healthApiRequest(`/v1/exercises/previous?${new URLSearchParams({ name, before })}`, { userId: session.user.id }));

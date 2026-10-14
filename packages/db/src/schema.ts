@@ -1,4 +1,4 @@
-import type { MuscleGroup, RoutineExercise, RoutineSnapshot } from "@clawfit/health-core";
+import type { CustomExerciseInput, MuscleGroup, RoutineExercise, RoutineSnapshot } from "@clawfit/health-core";
 import { sql } from "drizzle-orm";
 import { boolean, date, foreignKey, index, integer, jsonb, pgEnum, pgTable, real, text, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
 
@@ -228,6 +228,7 @@ export const exercises = pgTable(
     workoutId: uuid("workout_id").notNull().references(() => workouts.id, { onDelete: "cascade" }),
     name: varchar("name", { length: 160 }).notNull(),
     normalizedName: varchar("normalized_name", { length: 160 }).notNull(),
+    libraryId: varchar("library_id", { length: 80 }),
     muscleGroup: varchar("muscle_group", { length: 30 }).$type<MuscleGroup>(),
     position: integer("position").notNull(),
   },
@@ -254,3 +255,15 @@ export const workoutSets = pgTable(
     uniqueIndex("workout_sets_exercise_number_uq").on(table.exerciseId, table.setNumber),
   ],
 );
+
+export const customExercises = pgTable("custom_exercises", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  definition: jsonb("definition").$type<CustomExerciseInput>().notNull(),
+  version: integer("version").notNull().default(1),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+}, table => [uniqueIndex("custom_exercises_user_key_uq").on(table.userId, table.idempotencyKey)]);
+export const exerciseFavorites = pgTable("exercise_favorites", {
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  libraryId: varchar("library_id", { length: 80 }).notNull(),
+}, table => [uniqueIndex("exercise_favorites_user_library_uq").on(table.userId, table.libraryId)]);

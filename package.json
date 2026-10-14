@@ -27,7 +27,8 @@
     "identity:link": "tsx scripts/link-whatsapp-identity.ts",
     "history:import": "node --import tsx scripts/import-reviewed-history.ts",
     "openclaw:preflight": "tsx scripts/openclaw-preflight.ts",
-    "openclaw:diagnose-api": "tsx scripts/health-readiness-diagnose.ts"
+    "openclaw:diagnose-api": "tsx scripts/health-readiness-diagnose.ts",
+    "test:library:browser": "node scripts/exercise-library.browser-test.mjs"
   },
   "devDependencies": {
     "@electric-sql/pglite": "latest",
@@ -35,6 +36,7 @@
     "dotenv": "latest",
     "json5": "2.2.3",
     "oxlint": "latest",
+    "playwright": "1.62.1",
     "tsx": "latest",
     "typescript": "latest",
     "vitest": "latest",

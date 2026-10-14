@@ -1,6 +1,8 @@
-import { and, asc, desc, eq, gt, gte, ilike, isNull, lt, sql } from "drizzle-orm";
+import { catalogueById, legacyNames, searchLibrary } from "./catalogue.js";
+import { and, asc, desc, eq, gt, gte, ilike, inArray, isNull, or, lt, sql } from "drizzle-orm";
 import {
   canAccessResource,
+  customExerciseSchema, type CustomExerciseInput, type LibraryExercise, type LibraryQuery,
   routineDefinitionSchema, summarizeTraining, muscleForExercise,
   type RoutineDefinition, type RoutineSnapshot, type TrainingSession,
   estimatedOneRepMax,
@@ -27,7 +29,7 @@ import {
 } from "@clawfit/health-core";
 import type { HealthDatabase } from "./client.js";
 import {
-  bodyWeights, trainingProfiles, workoutRoutines, workoutSchedule,
+  customExercises, exerciseFavorites, bodyWeights, trainingProfiles, workoutRoutines, workoutSchedule,
   exercises,
   externalIdentities,
   foodPresets,
@@ -748,6 +750,57 @@ export class HealthRepository {
     return deleted;
   }
 
+  private customLibraryExercise(row: typeof customExercises.$inferSelect): LibraryExercise {
+    const definition = customExerciseSchema.parse(row.definition);
+    return { ...definition, id: `custom:${row.id}`, aliases: [], media: [], source: "Custom exercise", custom: true, version: row.version };
+  }
+  async librarySearch(userId: string, query: LibraryQuery) {
+    const [custom, favorites] = await Promise.all([
+      this.db.select().from(customExercises).where(eq(customExercises.userId, userId)),
+      this.db.select().from(exerciseFavorites).where(eq(exerciseFavorites.userId, userId)),
+    ]);
+    return searchLibrary(query, custom.map(row => this.customLibraryExercise(row)), new Set(favorites.map(f => f.libraryId)));
+  }
+  async libraryExercise(userId: string, id: string): Promise<LibraryExercise> {
+    let exercise = catalogueById.get(id);
+    if (!exercise && id.startsWith("custom:")) {
+      const row = await this.db.query.customExercises.findFirst({ where: and(eq(customExercises.userId, userId), eq(customExercises.id, id.slice(7))) });
+      if (row) exercise = this.customLibraryExercise(row);
+    }
+    if (!exercise) throw new NotFoundError("Exercise not found");
+    const favorite = await this.db.query.exerciseFavorites.findFirst({ where: and(eq(exerciseFavorites.userId, userId), eq(exerciseFavorites.libraryId, id)) });
+    return { ...exercise, favorite: !!favorite };
+  }
+  async favoriteExercise(userId: string, libraryId: string, favorite: boolean) {
+    await this.libraryExercise(userId, libraryId);
+    if (favorite) await this.db.insert(exerciseFavorites).values({ userId, libraryId }).onConflictDoNothing();
+    else await this.db.delete(exerciseFavorites).where(and(eq(exerciseFavorites.userId, userId), eq(exerciseFavorites.libraryId, libraryId)));
+    return { favorite };
+  }
+  async createCustomExercise(userId: string, input: CustomExerciseInput & { idempotencyKey: string }) {
+    const definition = customExerciseSchema.parse(input);
+    const [row] = await this.db.insert(customExercises).values({ userId, definition, idempotencyKey: input.idempotencyKey }).onConflictDoNothing().returning();
+    const existing = row ?? await this.db.query.customExercises.findFirst({ where: and(eq(customExercises.userId, userId), eq(customExercises.idempotencyKey, input.idempotencyKey)) });
+    if (!existing) throw new ConflictError("Could not create exercise");
+    return this.customLibraryExercise(existing);
+  }
+  async updateCustomExercise(userId: string, id: string, input: CustomExerciseInput & { version: number }) {
+    await this.libraryExercise(userId, id);
+    if (!id.startsWith("custom:")) throw new ConflictError("The shared catalogue is read-only");
+    const [row] = await this.db.update(customExercises).set({ definition: customExerciseSchema.parse(input), version: input.version + 1 }).where(and(eq(customExercises.userId, userId), eq(customExercises.id, id.slice(7)), eq(customExercises.version, input.version))).returning();
+    if (!row) throw new ConflictError("This exercise changed on another device. Reload before saving.");
+    return this.customLibraryExercise(row);
+  }
+  async libraryHistory(userId: string, id: string, limit = 100) {
+    const exercise = await this.libraryExercise(userId, id);
+    const names = legacyNames(exercise);
+    const rows = await this.db.select({ set: workoutSets, workout: workouts }).from(workoutSets)
+      .innerJoin(exercises, eq(workoutSets.exerciseId, exercises.id)).innerJoin(workouts, eq(exercises.workoutId, workouts.id))
+      .where(and(eq(workouts.userId, userId), or(eq(exercises.libraryId, id), names.length ? and(isNull(exercises.libraryId), inArray(exercises.normalizedName, names)) : undefined)))
+      .orderBy(desc(workoutSets.occurredAt)).limit(limit);
+    return rows.map(({ set, workout }) => ({ ...set, workoutName: workout.name, workoutId: workout.id, estimatedOneRepMax: estimatedOneRepMax(set.weightKg, set.reps) }));
+  }
+
   async startWorkout(userId: string, input: { name: string; startedAt?: Date | undefined; routineId?: string | undefined; idempotencyKey: string }): Promise<HydratedWorkout> {
     const id = await this.db.transaction(async tx => {
       // Serialize starts for one owner so retries and two devices cannot create two active sessions.
@@ -765,7 +818,7 @@ export class HealthRepository {
       }
       const [created] = await tx.insert(workouts).values({ userId, name: snapshot?.name ?? input.name, startedAt: input.startedAt ?? new Date(), routineSnapshot: snapshot, idempotencyKey: input.idempotencyKey }).returning();
       if (!created) throw new Error("Workout insert returned no record");
-      if (snapshot) await tx.insert(exercises).values(snapshot.exercises.map((exercise, position) => ({ workoutId: created.id, name: exercise.name, normalizedName: normalizeName(exercise.name), muscleGroup: exercise.muscleGroup, position })));
+      if (snapshot) await tx.insert(exercises).values(snapshot.exercises.map((exercise, position) => ({ workoutId: created.id, name: exercise.name, normalizedName: normalizeName(exercise.name), muscleGroup: exercise.muscleGroup, libraryId: exercise.libraryId ?? null, position })));
       return created.id;
     });
     return this.getWorkout(userId, id);
@@ -776,6 +829,7 @@ export class HealthRepository {
   }
   async saveRoutine(userId: string, input: RoutineDefinition & { idempotencyKey: string }) {
     const definition = routineDefinitionSchema.parse(input);
+    await Promise.all(definition.exercises.filter(e => e.libraryId).map(e => this.libraryExercise(userId, e.libraryId!)));
     const [created] = await this.db.insert(workoutRoutines).values({ userId, ...definition, idempotencyKey: input.idempotencyKey }).onConflictDoNothing().returning();
     if (created) return created;
     const existing = await this.db.query.workoutRoutines.findFirst({ where: and(eq(workoutRoutines.userId, userId), eq(workoutRoutines.idempotencyKey, input.idempotencyKey)) });
@@ -784,6 +838,7 @@ export class HealthRepository {
   }
   async updateRoutine(userId: string, id: string, input: RoutineDefinition & { version: number }) {
     const definition = routineDefinitionSchema.parse(input);
+    await Promise.all(definition.exercises.filter(e => e.libraryId).map(e => this.libraryExercise(userId, e.libraryId!)));
     return this.db.transaction(async tx => {
       const [row] = await tx.update(workoutRoutines).set({ ...definition, version: input.version + 1, updatedAt: new Date() }).where(and(eq(workoutRoutines.userId, userId), eq(workoutRoutines.id, id), eq(workoutRoutines.version, input.version))).returning();
       if (!row) {
@@ -848,6 +903,7 @@ export class HealthRepository {
   }
 
   async addWorkoutSet(userId: string, workoutId: string, input: WorkoutSetInput): Promise<typeof workoutSets.$inferSelect> {
+    if (input.libraryId) await this.libraryExercise(userId, input.libraryId);
     return this.db.transaction(async (tx) => {
       const [workout] = await tx.select().from(workouts).where(and(eq(workouts.id, workoutId), eq(workouts.userId, userId))).for("update");
       if (!workout) throw new NotFoundError("Workout not found");
@@ -869,9 +925,10 @@ export class HealthRepository {
       let exercise = await tx.query.exercises.findFirst({ where: and(eq(exercises.workoutId, workoutId), eq(exercises.normalizedName, normalizedName)) });
       if (!exercise) {
         const positionRows = await tx.select({ count: sql<number>`count(*)::int` }).from(exercises).where(eq(exercises.workoutId, workoutId));
-        [exercise] = await tx.insert(exercises).values({ workoutId, name: input.exerciseName, normalizedName, muscleGroup: input.muscleGroup ?? muscleForExercise(input.exerciseName), position: positionRows[0]?.count ?? 0 }).returning();
+        [exercise] = await tx.insert(exercises).values({ workoutId, name: input.exerciseName, normalizedName, libraryId: input.libraryId ?? null, muscleGroup: input.muscleGroup ?? muscleForExercise(input.exerciseName), position: positionRows[0]?.count ?? 0 }).returning();
       }
       if (!exercise) throw new Error("Exercise insert returned no record");
+      if (input.libraryId && exercise.libraryId !== input.libraryId) throw new ConflictError("This session already uses that name for a different exercise. Keep its original identity or use a distinct name.");
       if (input.muscleGroup && exercise.muscleGroup && input.muscleGroup !== exercise.muscleGroup) throw new ConflictError("Use the same primary muscle for this exercise within the session");
       if (input.muscleGroup && !exercise.muscleGroup) await tx.update(exercises).set({ muscleGroup: input.muscleGroup }).where(eq(exercises.id, exercise.id));
       const countRows = await tx.select({ count: sql<number>`count(*)::int` }).from(workoutSets).where(eq(workoutSets.exerciseId, exercise.id));
@@ -1160,9 +1217,11 @@ export class HealthRepository {
   async checkReady() {
     // Resolve the new tables/columns without scanning training history.
     await this.db.execute(sql`
-      SELECT w.routine_snapshot, ex.muscle_group
+      SELECT w.routine_snapshot, ex.muscle_group, ex.library_id
       FROM workouts w
       LEFT JOIN exercises ex ON ex.workout_id = w.id
+      CROSS JOIN custom_exercises ce
+      CROSS JOIN exercise_favorites ef
       CROSS JOIN body_weights bw
       CROSS JOIN training_profiles tp
       CROSS JOIN workout_routines wr
