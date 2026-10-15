@@ -36,12 +36,14 @@ run("config", "set", "tools.profile", "minimal");
 run("config", "set", "tools.alsoAllow", JSON.stringify(healthTools), "--strict-json");
 run("config", "set", "tools.deny", JSON.stringify(["group:runtime", "group:fs", "browser", "web_fetch"]), "--strict-json");
 
+// Health data lives in PostgreSQL. Filesystem-only memory flushes have no
+// callable tools under this policy; retain compaction without those extra runs.
 // Session hygiene & Compaction
 run("config", "set", "session.dmScope", "per-channel-peer");
 run("config", "set", "session.reset.mode", "idle");
 run("config", "set", "session.reset.idleMinutes", "60", "--strict-json");
 run("config", "set", "session.resetByType.direct", JSON.stringify({ mode: "idle", idleMinutes: 60 }), "--strict-json");
-run("config", "set", "agents.defaults.compaction", JSON.stringify({ mode: "safeguard", reserveTokens: 8192, keepRecentTokens: 4096, maxHistoryShare: 0.5, notifyUser: false }), "--strict-json");
+run("config", "set", "agents.defaults.compaction", JSON.stringify({ mode: "safeguard", reserveTokens: 8192, keepRecentTokens: 4096, maxHistoryShare: 0.5, notifyUser: false, memoryFlush: { enabled: false } }), "--strict-json");
 run("config", "set", "messages.suppressToolErrors", "false", "--strict-json");
 run("config", "set", "messages.inbound.debounceMs", "2000", "--strict-json");
 run("config", "set", "channels.whatsapp.debounceMs", "2000", "--strict-json");

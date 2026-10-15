@@ -9,6 +9,7 @@
       },
     },
   },
+  agents: { defaults: { compaction: { memoryFlush: { enabled: false } } } },
   tools: {
     profile: "minimal",
     alsoAllow: [

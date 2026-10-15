@@ -611,3 +611,26 @@ For a combined approved upgrade use `sudo bash deploy/openclaw/redeploy.sh` with
 Keep the old approved commit, encrypted state backup, and protected environment backup. If the upgrade fails, stop the Gateway, return the checkout to the previous commit, rebuild its plugin, and restore only the config/environment files changed by setup. Keep WhatsApp credentials and identity mappings intact. Restart and repeat authenticated RPC/channel checks. Do not print token values when comparing credentials.
 
 `messages.suppressToolErrors` is disabled so authorized health-tool failures are visible. It is not a fix for AI-provider authentication failures; routing and authentication must pass their own checks. Runtime, filesystem, browser and unrestricted web tools remain denied, and sender/group restrictions remain enabled.
+
+
+### Memory-flush recovery and terminal tool rejection
+
+The pinned runtime's pre-compaction memory flush is a separate `trigger: "memory"` run. It reuses the chat/session but exposes only filesystem read and append-only write. ClawFit denies both tools, so that run can fail with “No callable tools remain.” Previously, it could also claim the pending trusted message before the actual `trigger: "user"` reply, leaving the reply unable to authorize meal tools.
+
+`openclaw:setup` now sets `agents.defaults.compaction.memoryFlush.enabled=false`; compaction itself remains enabled. Preflight requires that setting. The plugin ignores background prompt hooks when assigning inbound message grants, including memory-model failover. It does not infer permissions from history or rebind a closed turn. If a run loses its binding or attempts another tool after a terminal nutrition failure, the plugin blocks the call and synchronously aborts that host session using the pinned SDK. Where an exact trusted dispatcher exists, it sends one safe failure reply. Missing delivery identity never grants permission to send to another conversation. Ordinary no-save and missing-confirmation vetoes still allow the assistant to show the estimate.
+
+Offline regressions exercise the real pinned loader, sparse tool wrapper, model loop and buffered dispatcher, with fake model/API transports. They cover background runs before user binding, a model that keeps retrying after rejection, lost binding on a meal write, and a successful next message after cancellation. These checks do not establish that CIA is running the new code: complete the paired-installation upgrade above, then verify a WhatsApp response and absence of repeated `call_unbound` events.
+
+### Optional Google-grounded web search
+
+The old minimal tool policy excluded `web_search`; enabling a Google chat model alone did not make web search available. ClawFit now supports the host's native `web_search` with the Google plugin's `gemini` search provider. Search is separate from the Health API and cannot change nutrition records. Generic `web_fetch`, browser, shell and filesystem tools remain denied.
+
+To enable search on CIA, run as the service user from `/home/clawfit/app`:
+
+```bash
+pnpm models:smoke --web-search
+```
+
+This explicitly makes real Google requests, including one grounding probe for an available low-cost Gemini candidate. A successful response must include text and web-source metadata. The report records grounding independently of ordinary text, tool and image support. After reviewing its result, use the existing stop/configure/restart upgrade sequence. `pnpm models:configure` adds `web_search` only when the fresh report contains a verified low-cost grounding model, and writes `plugins.entries.google.config.webSearch.model` explicitly. It preserves provider credentials. Older reports without grounding evidence leave search disabled. The generated search configuration limits timeout to 20 seconds and results to five.
+
+Preflight checks that the enabled search tool, Google plugin, provider and explicit registered model agree. Automated tests fake the grounding transport and verify actual host tool availability without making model requests. After restart, ask for a current public fact with its source in WhatsApp and confirm `web_search` runs and the reply has citations. That live search acceptance remains separate from `openclaw:preflight --live`, which only tests general Gateway generation. Do not use search to reconstruct historical meals.

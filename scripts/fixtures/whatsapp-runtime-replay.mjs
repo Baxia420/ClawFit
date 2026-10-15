@@ -75,6 +75,11 @@ try {
   await hooks.runReplyDispatch({ ctx, sessionKey, inboundAudio: false, sendPolicy: "allow", shouldRouteToOriginating: false, shouldSendToolSummaries: false }, { cfg: config, dispatcher: { sendFinalReply: payload => { replies.push(payload); return true; } } });
   // No dispatch run ID. Use the actual host builders for the prompt identity.
   const runId = "collection-run";
+  // Same sender and session, different background run: this must not steal
+  // the current photo grant, including when both memory models fail.
+  for (const trigger of ["memory", "memory", "heartbeat", "cron"]) {
+    await hooks.runBeforePromptBuild({ prompt: "Background task", messages: [] }, { runId: `background-${trigger}`, trigger, sessionKey, ...channelFields({ sessionKey, messageProvider: "whatsapp", currentChannelId: group, senderId: sender }), ...identityFields({ trigger, senderId: sender, chatId: ctx.ChatId }) });
+  }
   await hooks.runBeforePromptBuild({ prompt: "Old history is not authorization", messages: [] }, { runId, sessionKey, ...channelFields({ sessionKey, messageProvider: "whatsapp", currentChannelId: group, senderId: sender }), ...identityFields({ trigger: "user", senderId: sender, chatId: ctx.ChatId }) });
   // The real wrapper invokes before_tool_call with sparse runtime fields, then
   // calls a factory belonging to the distinct read-only discovery registration.

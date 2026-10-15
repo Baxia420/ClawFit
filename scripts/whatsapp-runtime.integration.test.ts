@@ -39,6 +39,7 @@ it.each([
   { name: "serialized photo burst keeps both replies", flags: ["--compat"], requests: 2, replies: 2 },
   { name: "simultaneous arrivals bind distinct turns", flags: ["--compat", "--simultaneous"], requests: 2, replies: 2 },
   { name: "a failed estimate cannot hide the next photo or become guessed nutrition", flags: ["--compat", "--fail-first"], requests: 2, replies: 2 },
+  { name: "native web search coexists with the health tool under the minimal policy", flags: ["--compat", "--collection", "--search-enabled"], requests: 1, replies: 1 },
   { name: "one trusted collection forwards both originals once despite duplicate tool calls", flags: ["--compat", "--collection"], requests: 1, replies: 1 },
   { name: "two nearby photos with one caption form one estimate", flags: ["--compat", "--album"], requests: 1, replies: 1 },
   { name: "three nearby photos with one caption form one estimate", flags: ["--compat", "--album", "--three"], requests: 1, replies: 1 },
@@ -62,6 +63,10 @@ it.each([
   expect(result.replies).toHaveLength(replies);
   expect(result.modelCalls).toBe(requests * (flags.includes("--attempt-writes") ? 4 : 2));
   expect(result.writeRequestCount).toBe(0);
+  for (const names of result.modelTools) {
+    expect(names.includes("web_search")).toBe(flags.includes("--search-enabled"));
+    expect(names).not.toEqual(expect.arrayContaining(["web_fetch"]));
+  }
   if (flags.includes("--compat")) expect(result.result.every((dispatch: { observedReplyDelivery?: boolean }) => dispatch.observedReplyDelivery === true)).toBe(true);
   if (flags.includes("--attempt-writes")) expect(result.replies[0]).toMatchObject({ text: "Offline estimate: 300 kcal" });
   if (flags.includes("--fail-first")) {
@@ -71,4 +76,23 @@ it.each([
   } else if (flags.includes("--compat") && requests > 1) {
     expect(result.replies.map((reply: { replyToId: string }) => reply.replyToId)).toEqual(requests === 3 ? ["photo-a", "photo-b", "photo-c"] : ["photo-a", "photo-b"]);
   }
+});
+
+// The fake model deliberately ignores every rejection and keeps calling tools.
+// The host must stop it; a compliant fake final response cannot prove this.
+it.each([
+  { flags: ["--compat", "--collection", "--fail-first", "--retry-failure"], calls: 2, requests: 1 },
+  { flags: ["--compat", "--collection", "--unbound-write"], calls: 1, requests: 0 },
+  { flags: ["--compat", "--fail-first", "--retry-failure"], calls: 4, requests: 2 },
+])("terminates an unrecoverable tool rejection: $flags", async ({ flags, calls, requests }) => {
+  const { stdout } = await execute(process.execPath, [fileURLToPath(new URL("fixtures/whatsapp-burst-replay.mjs", import.meta.url)), ...flags], { cwd: root, timeout: 55_000, maxBuffer: 2 * 1024 * 1024 });
+  const line = stdout.split("\n").find(line => line.startsWith("CLAWFIT_BURST_RESULT="));
+  expect(line, stdout).toBeDefined();
+  const result = JSON.parse(line!.slice("CLAWFIT_BURST_RESULT=".length));
+  expect(result.modelCalls).toBe(calls);
+  expect(result.requestCount).toBe(requests);
+  expect(result.writeRequestCount).toBe(0);
+  expect(result.replies).toHaveLength(Math.max(1, requests));
+  if (requests === 2) expect(result.replies[1].text).toBe("Offline estimate: 300 kcal");
+  expect(result.replies[0].text).not.toMatch(/kcal|300|Private provider failure/);
 });

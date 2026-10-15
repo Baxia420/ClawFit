@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { buildModelConfiguration, parseAllowlist, selectSmokeModels, type SmokeReport } from "./openclaw-configuration.js";
+import { buildModelConfiguration, validateGatewaySearch, parseAllowlist, selectSmokeModels, type SmokeReport } from "./openclaw-configuration.js";
 import { reconcileGatewayToken } from "./gateway-state.js";
 import { probeModels } from "./model-probes.js";
 
@@ -74,6 +74,38 @@ describe("Gateway model evidence and routing", () => {
       }
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally { fetchSpy.mockRestore(); }
+  });
+  it("requires successful grounding evidence before selecting a web search model", () => {
+    const evidence = report();
+    expect(buildModelConfiguration(evidence).webSearchModel).toBeUndefined();
+    evidence.selected.webSearch = lite;
+    expect(() => buildModelConfiguration(evidence)).toThrow("grounding");
+    evidence.results["Gemini 3.5 Flash-Lite"]!.webSearch = "pass";
+    expect(buildModelConfiguration(evidence).webSearchModel).toBe(lite);
+    expect(selectSmokeModels(evidence.results).webSearch).toBe(lite);
+    evidence.selected.webSearch = strong;
+    evidence.results["Gemini 3.6 Flash"]!.webSearch = "pass";
+    expect(() => buildModelConfiguration(evidence)).toThrow("low-cost");
+  });
+  it("preflight rejects a silent search policy mismatch or implicit model default", () => {
+    expect(validateGatewaySearch({ tools: { alsoAllow: [] } })).toEqual([]);
+    const config = { tools: { alsoAllow: ["web_search"], web: { search: { enabled: true, provider: "gemini" } } }, plugins: { allow: ["google"], entries: { google: { config: { webSearch: { model: lite } } } } }, models: { providers: { google: { models: [{ id: lite }] } } } };
+    expect(validateGatewaySearch(config)).toEqual(["web_search"]);
+    expect(() => validateGatewaySearch({ ...config, tools: { ...config.tools, alsoAllow: [] } })).toThrow();
+    expect(() => validateGatewaySearch({ ...config, plugins: {} })).toThrow();
+    expect(() => validateGatewaySearch({ ...config, models: { providers: { google: { models: [] } } } })).toThrow();
+  });
+  it.each([true, false])("grounding smoke checks actual sources, with citations=%s", async citations => {
+    const request = vi.fn<typeof fetch>().mockImplementation(async (url, init) => {
+      if (String(url).includes("models?")) return Response.json({ models: [{ name: `models/${lite}`, supportedGenerationMethods: ["generateContent"] }] });
+      const body = JSON.parse(String(init?.body));
+      const grounded = body.tools?.[0]?.googleSearch !== undefined;
+      return Response.json({ candidates: [{ content: { parts: !grounded && body.tools ? [{ functionCall: { name: "record_number", args: { value: 7 } } }] : [{ text: "OK" }] }, ...(grounded && citations ? { groundingMetadata: { groundingChunks: [{ web: { uri: "https://nodejs.org/en/about/previous-releases" } }] } } : {}) }] });
+    });
+    const evidence = await probeModels("fake-key", request, { webSearch: true });
+    expect(evidence.selected.webSearch).toBe(citations ? lite : undefined);
+    expect(evidence.results["Gemini 3.5 Flash-Lite"]?.webSearch).toBe(citations ? "pass" : "fail");
+    expect(request).toHaveBeenCalledTimes(5);
   });
   it("checks paginated catalog, tools and image input using injected responses", async () => {
     const request = vi.fn<typeof fetch>();
