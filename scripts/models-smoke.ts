@@ -4,8 +4,10 @@ import { probeModels } from "./model-probes.js";
 loadClawFitEnv();
 const apiKey = process.env.GEMINI_API_KEY;
 if (!apiKey) throw new Error("GEMINI_API_KEY is missing. Configure it in the protected Gateway environment.");
-const report = await probeModels(apiKey);
+const report = await probeModels(apiKey, fetch, { webSearch: process.argv.includes("--web-search") });
 await writeFile(".model-smoke.json", `${JSON.stringify(report, null, 2)}\n`, "utf8");
 console.log("Saved non-secret model evidence to .model-smoke.json.");
 console.log(`Default: ${report.selected.defaultModel ?? "none verified"}; general fallback: ${report.selected.generalFallback ?? "none verified"}`);
 console.log(`Nutrition: ${report.selected.nutritionPrimary ?? "none verified"}; fallback: ${report.selected.nutritionFallback ?? "none verified"}`);
+
+console.log(`Web search: ${report.selected.webSearch ?? "not verified; use --web-search to probe Google Search grounding"}`);

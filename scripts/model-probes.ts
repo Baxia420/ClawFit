@@ -7,7 +7,7 @@ const catalogSchema = z.object({ models: z.array(z.object({
 })).default([]), nextPageToken: z.string().optional() });
 const responseSchema = z.object({ candidates: z.array(z.object({ content: z.object({ parts: z.array(z.object({
   text: z.string().optional(), functionCall: z.object({ name: z.string(), args: z.record(z.string(), z.unknown()).optional() }).optional(),
-})).optional() }).optional() })).optional() });
+})).optional() }).optional(), groundingMetadata: z.object({ groundingChunks: z.array(z.object({ web: z.object({ uri: z.url() }).optional() })).optional() }).optional() })).optional() });
 export const modelProbes = [
   { label: "Gemma 4 26B A4B", pattern: /gemma-4.*26b.*a4b/i, image: false },
   { label: "Gemma 4 31B", pattern: /gemma-4.*31b/i, image: false },
@@ -19,7 +19,7 @@ export const modelProbes = [
 
 // Synthetic one-pixel image: no meal photos or historical reconstruction calls.
 const pixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=";
-export async function probeModels(apiKey: string, request: typeof fetch = fetch): Promise<SmokeReport> {
+export async function probeModels(apiKey: string, request: typeof fetch = fetch, options: { webSearch?: boolean } = {}): Promise<SmokeReport> {
   const models: z.infer<typeof catalogSchema>["models"] = [];
   let pageToken: string | undefined;
   const seen = new Set<string>();
@@ -41,17 +41,19 @@ export async function probeModels(apiKey: string, request: typeof fetch = fetch)
     if (!found) { results[probe.label] = { status: "unavailable", reason: "not returned by authenticated models.list" }; continue; }
     const modelId = found.name.replace(/^models\//, "");
     const result: SmokeReport["results"][string] = {
-      status: "failed", modelId, toolCalling: "not-tested", imageInput: "not-tested",
+      status: "failed", modelId, toolCalling: "not-tested", imageInput: "not-tested", webSearch: "not-tested",
       ...(found.inputTokenLimit ? { contextWindow: found.inputTokenLimit } : {}),
       ...(found.outputTokenLimit ? { maxTokens: found.outputTokenLimit } : {}),
     };
-    const generate = async (body: object) => {
+    const generate = async (body: object, requireGrounding = false) => {
       const response = await request(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent`, {
         method: "POST", headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
         body: JSON.stringify(body), signal: AbortSignal.timeout(30_000),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return responseSchema.parse(await response.json()).candidates?.[0]?.content?.parts ?? [];
+      const candidate = responseSchema.parse(await response.json()).candidates?.[0];
+      if (requireGrounding && !candidate?.groundingMetadata?.groundingChunks?.some(chunk => chunk.web?.uri)) throw new Error("Missing grounded sources");
+      return candidate?.content?.parts ?? [];
     };
     try {
       const parts = await generate({ contents: [{ role: "user", parts: [{ text: "Reply with OK only." }] }], generationConfig: { maxOutputTokens: 256, temperature: 0 } });
@@ -63,6 +65,12 @@ export async function probeModels(apiKey: string, request: typeof fetch = fetch)
           toolConfig: { functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["record_number"] } }, generationConfig: { maxOutputTokens: 256, temperature: 0 } });
         result.toolCalling = toolParts.some(p => p.functionCall?.name === "record_number" && p.functionCall.args?.value === 7) ? "pass" : "fail";
       } catch { result.toolCalling = "fail"; }
+      if (options.webSearch && /^gemini-.*flash[-_.]?lite/i.test(modelId)) {
+        try {
+          const parts = await generate({ contents: [{ role: "user", parts: [{ text: "Use Google Search to find the official Node.js releases page. Cite its source." }] }], tools: [{ googleSearch: {} }], generationConfig: { maxOutputTokens: 512, temperature: 0 } }, true);
+          result.webSearch = parts.some(p => p.text?.trim()) ? "pass" : "fail";
+        } catch { result.webSearch = "fail"; }
+      }
       if (probe.image) {
         try {
           const imageParts = await generate({ contents: [{ role: "user", parts: [{ text: "An image is attached. Reply with OK." }, { inlineData: { mimeType: "image/png", data: pixel } }] }], generationConfig: { maxOutputTokens: 256, temperature: 0 } });
@@ -71,7 +79,7 @@ export async function probeModels(apiKey: string, request: typeof fetch = fetch)
       }
     } catch (error) { result.reason = error instanceof Error && /^HTTP \d+$|^Empty generation/.test(error.message) ? error.message : "generation probe failed"; }
     results[probe.label] = result;
-    console.log(`${probe.label}: ${result.status}; tool calling ${result.toolCalling}; image input ${result.imageInput}`);
+    console.log(`${probe.label}: ${result.status}; tool calling ${result.toolCalling}; image input ${result.imageInput}; web search ${result.webSearch}`);
   }
   return { checkedAt: new Date().toISOString(), results, selected: selectSmokeModels(results) };
 }

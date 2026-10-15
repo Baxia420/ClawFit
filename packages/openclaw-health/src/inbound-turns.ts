@@ -1,11 +1,13 @@
 import type { OpenClawPluginApi, OpenClawPluginToolContext, PluginHookReplyDispatchContext } from "openclaw/plugin-sdk/plugin-runtime";
 import { normalizeAccountId } from "openclaw/plugin-sdk/routing";
+import { abortAgentHarnessRun } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { randomUUID } from "node:crypto";
 import { isMealLogConfirmation, isNoSaveRequest, isFallbackNotice, TEMPORARY_FAILURE } from "./confirmation.js";
 import type { MediaAuthorizationContext } from "./media-resolver.js";
 
 export { TEMPORARY_FAILURE } from "./confirmation.js";
 export const MEDIA_FAILURE = "I couldn't access that photo safely. Please resend it in this chat; I won't retry this image in this turn.";
+export const MESSAGE_FAILURE = "I couldn't verify this request safely. Please check your meals and resend your request.";
 const MEAL_WRITES = new Set(["create_pending_meal", "update_pending_meal", "log_meal", "confirm_pending_meal", "update_meal", "delete_meal", "delete_pending_meal", "save_food_preset", "update_food_preset", "delete_food_preset"]);
 
 export interface InboundTurn {
@@ -37,7 +39,7 @@ export interface InboundTurn {
 const CALL_RECEIPTS = Symbol.for("clawfit-health.inbound-call-receipts.v1");
 const CALL_GRANT_PARAM = "__clawfitInboundCallGrant";
 type CallReceipt = { turn: InboundTurn; toolName: string; callId: string; receivedAt: number };
-type RejectedRun = { failure: NonNullable<InboundTurn["failure"]>; receivedAt: number; delivered: boolean };
+type RejectedRun = { failure: NonNullable<InboundTurn["failure"]>; receivedAt: number; delivered: boolean; queued?: boolean };
 type TurnState = { turns: InboundTurn[]; runs: Map<string, InboundTurn>; rejectedRuns: Map<string, RejectedRun> };
 const TURN_STATE = Symbol.for("clawfit-health.inbound-turn-state.v1");
 const host = globalThis as typeof globalThis & { [CALL_RECEIPTS]?: Map<string, CallReceipt>; [TURN_STATE]?: TurnState };
@@ -93,6 +95,9 @@ export class InboundTurns {
     });
     api.on("before_prompt_build", (_event, context) => {
       this.prune();
+      // Memory flushes reuse the user session/sender but are separate runs with
+      // filesystem-only tools. They must never consume a pending user grant.
+      if (context.trigger && context.trigger !== "user") return;
       if (!context.runId || this.state.runs.has(context.runId) || this.state.rejectedRuns.has(context.runId)) return; // retain across model failover
       const candidates = this.state.turns.filter(t => !t.closed && !t.runId && t.sessionKey === context.sessionKey
         && t.senderId === context.senderId && t.conversationId === (context.chatId ?? context.channelId));
@@ -118,20 +123,34 @@ export class InboundTurns {
         this.diagnostic("call_bound", turn);
       } else if (event.toolName === "estimate_nutrition" || MEAL_WRITES.has(event.toolName)) {
         this.diagnostic("call_unbound", turn, { hasRun: Boolean(runId), hasCall: Boolean(callId), hasSession: Boolean(context.sessionKey) });
-        if (turn && event.toolName === "estimate_nutrition") this.fail(turn, event.toolName, { error: "unauthorized_media", message: MEDIA_FAILURE, retryable: false });
+        if (turn) this.fail(turn, event.toolName, { error: "untrusted_message", message: event.toolName === "estimate_nutrition" ? MEDIA_FAILURE : MESSAGE_FAILURE, retryable: false });
       }
       // A missing binding grants no attachments. Also keep failure-only state
       // so an unbound run cannot turn a veto into guessed nutrition or a write.
-      if (runId && !turn && event.toolName === "estimate_nutrition" && !this.state.rejectedRuns.has(runId)) {
-        this.state.rejectedRuns.set(runId, { failure: { error: "unauthorized_media", message: MEDIA_FAILURE, retryable: false }, receivedAt: Date.now(), delivered: false });
+      if (runId && !turn && (event.toolName === "estimate_nutrition" || MEAL_WRITES.has(event.toolName)) && !this.state.rejectedRuns.has(runId)) {
+        this.state.rejectedRuns.set(runId, { failure: { error: "untrusted_message", message: event.toolName === "estimate_nutrition" ? MEDIA_FAILURE : MESSAGE_FAILURE, retryable: false }, receivedAt: Date.now(), delivered: false });
         // Retire ambiguous/unbound grants instead of letting them poison the
         // next message's candidate search or become stale photo fallbacks.
         for (const pending of this.state.turns) if (!pending.runId && pending.sessionKey === context.sessionKey) pending.closed = true;
       }
       const rejected = runId ? this.state.rejectedRuns.get(runId) : undefined;
-      if (rejected && (event.toolName === "estimate_nutrition" || MEAL_WRITES.has(event.toolName))) return { block: true, blockReason: `${rejected.failure.message} Do not retry, guess nutrition or save a meal in this turn.` };
-      if (turn?.failure && (turn.failedTools.has(event.toolName) || MEAL_WRITES.has(event.toolName))) {
-        return { block: true, blockReason: `${turn.failure.message} Do not retry or save a meal in this turn.` };
+      const terminalFailure = rejected?.failure ?? turn?.failure;
+      if (terminalFailure) {
+        // A textual veto alone invites another model/tool cycle. Cancel the
+        // exact session from this synchronous host hook, never a latest-session
+        // lookup, delayed callback, or global cancellation. Queue a safe reply
+        // first when we have its original trusted dispatcher.
+        // A lost lookup is not permission to reconstruct a grant. An exact
+        // already-recorded run/session may still deliver its failure through
+        // its own dispatcher; never use a different or most recent turn.
+        const replyTurn = turn ?? this.state.turns.find(t => !t.closed && t.runId === runId && t.sessionKey === context.sessionKey);
+        if (replyTurn) {
+          if (rejected) replyTurn.failure = rejected.failure;
+          this.sendFailure(replyTurn);
+          if (rejected) rejected.queued = replyTurn.fallbackSent;
+        }
+        if (context.sessionId && !turn?.closed) abortAgentHarnessRun(context.sessionId);
+        return { block: true, blockReason: `${terminalFailure.message} Do not retry or save a meal in this turn.` };
       }
       if (!MEAL_WRITES.has(event.toolName)) return grantedParams;
       if (!bindingValid) return { block: true, blockReason: "Missing trusted current-message context. Do not save a draft or meal; ask the user to resend their request." };
@@ -148,6 +167,9 @@ export class InboundTurns {
       if (event.kind !== "final" || event.payload.isFallbackNotice || isFallbackNotice(event.payload.text)) return;
       const rejected = event.runId ? this.state.rejectedRuns.get(event.runId) : undefined;
       if (!turn && rejected) {
+        // Our dispatcher queued this exact run's safe terminal reply before
+        // cancellation. Other final payloads from it must stay suppressed.
+        if (rejected.queued && event.payload.channelData?.clawfitTerminalReply !== event.runId) return { cancel: true, reason: "clawfit-terminal-reply-already-queued" };
         if (rejected.delivered) return { cancel: true, reason: "clawfit-failure-already-delivered" };
         rejected.delivered = true;
         return { payload: { text: rejected.failure.message, isError: true } };
@@ -178,12 +200,16 @@ export class InboundTurns {
         if (event.data.phase !== "error" && event.data.phase !== "end") return;
         const turn = this.state.runs.get(event.runId);
         if (!turn) return;
-        if (turn.canDeliver && !turn.delivered && !turn.fallbackSent && (event.data.phase === "error" || turn.failure)) {
-          turn.fallbackSent = turn.dispatcher.sendFinalReply({ text: turn.failure?.message ?? TEMPORARY_FAILURE, channelData: { clawfitTerminalReply: turn.runId } });
-        }
+        if (event.data.phase === "error" || turn.failure) this.sendFailure(turn);
         turn.closed = true;
       },
     });
+  }
+
+  private sendFailure(turn: InboundTurn) {
+    if (turn.canDeliver && !turn.delivered && !turn.fallbackSent) {
+      turn.fallbackSent = turn.dispatcher.sendFinalReply({ text: turn.failure?.message ?? TEMPORARY_FAILURE, isError: true, channelData: { clawfitTerminalReply: turn.runId } });
+    }
   }
 
   forCall(context: OpenClawPluginToolContext, callId: string, toolName: string, params: unknown): InboundTurn | undefined {

@@ -228,7 +228,9 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
     const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
     const h = harness(); const turn = await h.inbound({ id: "no-call-id", runId: "no-call-id-run", paths: [photo] });
     expect(await h.emit("before_tool_call", { toolName: "estimate_nutrition", params: { text: "Food" } }, { sessionKey: turn.run.sessionKey, runId: turn.run.runId })).toMatchObject({ block: true });
-    expect(await h.emit("reply_payload_sending", { runId: turn.run.runId, kind: "final", payload: { text: "900 kcal" } })).toMatchObject({ payload: { isError: true } });
+    expect(await h.emit("reply_payload_sending", { runId: turn.run.runId, kind: "final", payload: { text: "900 kcal" } })).toMatchObject({ cancel: true });
+    expect(turn.replies).toHaveLength(1);
+    expect(turn.replies[0]?.text).not.toContain("kcal");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

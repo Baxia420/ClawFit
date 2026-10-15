@@ -5,7 +5,7 @@ import { z } from "zod";
 import { loadClawFitEnv } from "./load-env.js";
 import { ensureGatewayDirectories, readGatewayConfig } from "./gateway-state.js";
 import { runOpenClaw } from "./openclaw-cli.js";
-import { GOOGLE_API, GOOGLE_BASE_URL, OPENCLAW_VERSION, parseAllowlist } from "./openclaw-configuration.js";
+import { validateGatewaySearch, GOOGLE_API, GOOGLE_BASE_URL, OPENCLAW_VERSION, parseAllowlist } from "./openclaw-configuration.js";
 import { inspectHealthReadiness } from "./health-readiness.js";
 
 loadClawFitEnv();
@@ -40,7 +40,8 @@ await check("Sender/group allowlists and restricted health tools", async () => {
   const expected = z.object({ healthTools: z.array(z.string()) }).parse(JSON.parse(await readFile("openclaw/policy.json", "utf8")));
   const parsed = z.object({ tools: z.object({ profile: z.literal("minimal"), alsoAllow: z.array(z.string()), deny: z.array(z.string()) }),
     channels: z.object({ whatsapp: z.object({ dmPolicy: z.literal("allowlist"), allowFrom: z.array(z.string()).min(1), groupAllowFrom: z.array(z.string()).min(1), groupPolicy: z.enum(["allowlist", "disabled"]), groups: z.record(z.string(), z.unknown()).optional() }) }) }).parse(config);
-  if (JSON.stringify([...parsed.tools.alsoAllow].sort()) !== JSON.stringify([...expected.healthTools].sort())) throw new Error("tools");
+  const searchTools = validateGatewaySearch(config);
+  if (JSON.stringify([...parsed.tools.alsoAllow].sort()) !== JSON.stringify([...expected.healthTools, ...searchTools].sort())) throw new Error("tools");
   if (!["group:runtime", "group:fs", "browser", "web_fetch"].every(t => parsed.tools.deny.includes(t))) throw new Error("deny");
   const senders = parseAllowlist(process.env.CLAWFIT_WHATSAPP_ALLOW_FROM, "senders");
   const groups = parseAllowlist(process.env.CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS, "groups");
@@ -48,6 +49,9 @@ await check("Sender/group allowlists and restricted health tools", async () => {
   const wa = parsed.channels.whatsapp;
   if (!same(senders, wa.allowFrom) || !same(senders, wa.groupAllowFrom)) throw new Error("senders");
   if (groups.length ? wa.groupPolicy !== "allowlist" || !same(groups, Object.keys(wa.groups ?? {})) : wa.groupPolicy !== "disabled") throw new Error("groups");
+});
+await check("Background filesystem memory flush disabled", () => {
+  z.object({ agents: z.object({ defaults: z.object({ compaction: z.object({ memoryFlush: z.object({ enabled: z.literal(false) }) }) }) }) }).parse(config);
 });
 await check("Health API readiness and configured nutrition estimator", async () => {
   const result = await inspectHealthReadiness(process.env);
