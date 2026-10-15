@@ -505,15 +505,17 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
     await h.terminal("api-run", "end"); expect(turn.replies).toEqual([{ text: TEMPORARY_FAILURE }]); expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("replaces invented nutrition after a 503 before marking the final reply delivered", async () => {
+  it("queues the failure immediately and suppresses invented nutrition after a 503", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: "NUTRITION_UNAVAILABLE", message: "Unavailable" } }), { status: 503 })));
     const h = harness(); const turn = await h.inbound({ id: "guessed", runId: "guessed-run", paths: [photo] });
     await turn.execute("estimate_nutrition", "failed", { text: "Food" });
+    // No lifecycle event or model final answer has happened yet.
+    expect(turn.replies).toEqual([{ text: TEMPORARY_FAILURE }]);
     const result = await h.emit("reply_payload_sending", { runId: "guessed-run", kind: "final", payload: { text: "This meal has 850 kcal and 40g protein. Shall I log it?", mediaUrl: "old-photo" } });
-    expect(result).toEqual({ payload: { text: TEMPORARY_FAILURE, isError: true } });
+    expect(result).toMatchObject({ cancel: true });
     expect(JSON.stringify(result)).not.toMatch(/850|40g|log it|old-photo/);
     await h.terminal("guessed-run", "end");
-    expect(turn.replies).toEqual([]);
+    expect(turn.replies).toEqual([{ text: TEMPORARY_FAILURE }]);
     expect(await h.emit("reply_payload_sending", { runId: "guessed-run", kind: "final", payload: { text: "850 kcal" } })).toMatchObject({ cancel: true });
     const next = await h.inbound({ id: "next", runId: "next-run", senderId: "+60222222222" });
     expect(await h.emit("reply_payload_sending", { runId: next.run.runId, kind: "final", payload: { text: "Hello" } })).toBeUndefined();

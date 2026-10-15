@@ -349,6 +349,7 @@ export function createApp(options: CreateAppOptions) {
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof NutritionEstimationError) {
+      app.log.warn({ attempts: error.diagnostics() }, "nutrition estimation failed");
       return reply.code(503).send({ error: { code: "NUTRITION_UNAVAILABLE", message: "Nutrition estimation is temporarily unavailable. Please try again later." } });
     }
     if (error instanceof ZodError) {
