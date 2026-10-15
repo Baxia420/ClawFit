@@ -61,6 +61,7 @@ function harness(replaceRegistryBeforePrompt = false) {
     const senderId = options.senderId ?? sender;
     const replies: Array<{ text?: string }> = [];
     const dispatcher = {
+      waitForIdle: async () => {},
       sendFinalReply: (payload: { text?: string }) => { replies.push(payload.text === undefined ? {} : { text: payload.text }); return true; },
     };
     // Use the exact pinned SDK builder/finalizer called by WhatsApp. The input
@@ -197,7 +198,8 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
     const h = harness(); const turn = await h.inbound({ id: "named-account", runId: randomUUID(), paths: [photo], ...accounts });
     expect(await turn.execute("estimate_nutrition", "named-call", { text: "Food" })).toMatchObject({ error: "unauthorized_media", retryable: false });
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(await h.emit("reply_payload_sending", { runId: turn.run.runId, kind: "final", payload: { text: "800 kcal and 40g protein" } })).toMatchObject({ payload: { isError: true } });
+    expect(await h.emit("reply_payload_sending", { runId: turn.run.runId, kind: "final", payload: { text: "800 kcal and 40g protein" } })).toMatchObject({ cancel: true });
+    expect(turn.replies).toHaveLength(1);
   });
 
   it("fails closed when tool execution precedes prompt binding and suppresses guessed output", async () => {
@@ -238,7 +240,8 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
     const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
     const h = harness(); const turn = await h.inbound({ id: "missing-factory-sender", runId: "missing-factory-sender-run", paths: [photo] });
     expect(await turn.execute("estimate_nutrition", "missing-factory-call", { text: "Food" }, { requesterSenderId: undefined })).toMatchObject({ error: "unauthorized_media", retryable: false });
-    expect(await h.emit("reply_payload_sending", { runId: turn.run.runId, kind: "final", payload: { text: "900 kcal" } })).toMatchObject({ payload: { isError: true } });
+    expect(await h.emit("reply_payload_sending", { runId: turn.run.runId, kind: "final", payload: { text: "900 kcal" } })).toMatchObject({ cancel: true });
+    expect(turn.replies).toHaveLength(1);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -505,15 +508,17 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
     await h.terminal("api-run", "end"); expect(turn.replies).toEqual([{ text: TEMPORARY_FAILURE }]); expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("replaces invented nutrition after a 503 before marking the final reply delivered", async () => {
+  it("queues the failure immediately and suppresses invented nutrition after a 503", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: "NUTRITION_UNAVAILABLE", message: "Unavailable" } }), { status: 503 })));
     const h = harness(); const turn = await h.inbound({ id: "guessed", runId: "guessed-run", paths: [photo] });
     await turn.execute("estimate_nutrition", "failed", { text: "Food" });
+    // No lifecycle event or model final answer has happened yet.
+    expect(turn.replies).toEqual([{ text: TEMPORARY_FAILURE }]);
     const result = await h.emit("reply_payload_sending", { runId: "guessed-run", kind: "final", payload: { text: "This meal has 850 kcal and 40g protein. Shall I log it?", mediaUrl: "old-photo" } });
-    expect(result).toEqual({ payload: { text: TEMPORARY_FAILURE, isError: true } });
+    expect(result).toMatchObject({ cancel: true });
     expect(JSON.stringify(result)).not.toMatch(/850|40g|log it|old-photo/);
     await h.terminal("guessed-run", "end");
-    expect(turn.replies).toEqual([]);
+    expect(turn.replies).toEqual([{ text: TEMPORARY_FAILURE }]);
     expect(await h.emit("reply_payload_sending", { runId: "guessed-run", kind: "final", payload: { text: "850 kcal" } })).toMatchObject({ cancel: true });
     const next = await h.inbound({ id: "next", runId: "next-run", senderId: "+60222222222" });
     expect(await h.emit("reply_payload_sending", { runId: next.run.runId, kind: "final", payload: { text: "Hello" } })).toBeUndefined();

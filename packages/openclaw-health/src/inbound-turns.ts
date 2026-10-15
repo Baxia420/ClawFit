@@ -47,7 +47,7 @@ const host = globalThis as typeof globalThis & { [CALL_RECEIPTS]?: Map<string, C
 // not just create a discovery registry. Keep bounded metadata across that handoff.
 const turnState = host[TURN_STATE] ??= { turns: [], runs: new Map(), rejectedRuns: new Map() };
 const callReceipts = host[CALL_RECEIPTS] ??= new Map<string, CallReceipt>();
-type DiagnosticReason = "turn_captured" | "missing_inbound_identity" | "run_bound" | "run_unbound" | "call_bound" | "call_unbound" | "missing_call_receipt" | "closed_turn" | "identity_mismatch" | "call_authorized" | "media_resolved" | "unauthorized_media" | "image_not_found" | "invalid_image_content" | "oversized_image" | "path_traversal" | "symlink_escape" | "too_many_images";
+type DiagnosticReason = "failure_reply" | "turn_captured" | "missing_inbound_identity" | "run_bound" | "run_unbound" | "call_bound" | "call_unbound" | "missing_call_receipt" | "closed_turn" | "identity_mismatch" | "call_authorized" | "media_resolved" | "unauthorized_media" | "image_not_found" | "invalid_image_content" | "oversized_image" | "path_traversal" | "symlink_escape" | "too_many_images";
 
 // Ephemeral metadata only. Never infer ownership from the prompt, model
 // parameters, session history, or a directory's contents.
@@ -90,7 +90,7 @@ export class InboundTurns {
         canDeliver: event.sendPolicy === "allow" && !event.suppressUserDelivery && !event.shouldRouteToOriginating,
       };
       this.state.turns.push(turn);
-      this.diagnostic("turn_captured", turn, { hasDispatchRun: Boolean(event.runId) });
+      this.diagnostic("turn_captured", turn, { hasDispatchRun: Boolean(event.runId), canDeliver: turn.canDeliver, sendAllowed: event.sendPolicy === "allow", suppressed: Boolean(event.suppressUserDelivery), routed: Boolean(event.shouldRouteToOriginating) });
       if (event.runId) this.bind(event.runId, turn);
     });
     api.on("before_prompt_build", (_event, context) => {
@@ -104,7 +104,7 @@ export class InboundTurns {
       if (candidates.length === 1 && candidates[0]) this.bind(context.runId, candidates[0]);
       else this.diagnostic("run_unbound", undefined, { candidateCount: candidates.length, hasSession: Boolean(context.sessionKey), hasSender: Boolean(context.senderId), hasConversation: Boolean(context.chatId ?? context.channelId) });
     }, { priority: 200 });
-    api.on("before_tool_call", (event, context) => {
+    api.on("before_tool_call", async (event, context) => {
       this.prune();
       const runId = context.runId ?? event.runId;
       const turn = runId ? this.state.runs.get(runId) : undefined;
@@ -137,7 +137,7 @@ export class InboundTurns {
       const terminalFailure = rejected?.failure ?? turn?.failure;
       if (terminalFailure) {
         // A textual veto alone invites another model/tool cycle. Cancel the
-        // exact session from this synchronous host hook, never a latest-session
+        // exact session from this host hook, never a latest-session
         // lookup, delayed callback, or global cancellation. Queue a safe reply
         // first when we have its original trusted dispatcher.
         // A lost lookup is not permission to reconstruct a grant. An exact
@@ -148,6 +148,9 @@ export class InboundTurns {
           if (rejected) replyTurn.failure = rejected.failure;
           this.sendFailure(replyTurn);
           if (rejected) rejected.queued = replyTurn.fallbackSent;
+          // Cancellation also aborts the reply operation. Drain the trusted
+          // dispatcher before stopping the model so its error is not discarded.
+          if (replyTurn.fallbackSent) await replyTurn.dispatcher.waitForIdle();
         }
         if (context.sessionId && !turn?.closed) abortAgentHarnessRun(context.sessionId);
         return { block: true, blockReason: `${terminalFailure.message} Do not retry or save a meal in this turn.` };
@@ -209,6 +212,7 @@ export class InboundTurns {
   private sendFailure(turn: InboundTurn) {
     if (turn.canDeliver && !turn.delivered && !turn.fallbackSent) {
       turn.fallbackSent = turn.dispatcher.sendFinalReply({ text: turn.failure?.message ?? TEMPORARY_FAILURE, isError: true, channelData: { clawfitTerminalReply: turn.runId } });
+      this.diagnostic("failure_reply", turn, { queued: turn.fallbackSent });
     }
   }
 
@@ -259,6 +263,9 @@ export class InboundTurns {
     if (!turn) return;
     turn.failure = failure;
     turn.failedTools.add(toolName);
+    // Tool execution has already exhausted API fallbacks. Do not depend on a
+    // provider lifecycle event or a model final answer (which may be NO_REPLY).
+    this.sendFailure(turn);
   }
 
   failCall(context: OpenClawPluginToolContext, callId: string, toolName: string, params: unknown, failure: NonNullable<InboundTurn["failure"]>) {

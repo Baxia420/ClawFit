@@ -39,6 +39,7 @@ it.each([
   { name: "serialized photo burst keeps both replies", flags: ["--compat"], requests: 2, replies: 2 },
   { name: "simultaneous arrivals bind distinct turns", flags: ["--compat", "--simultaneous"], requests: 2, replies: 2 },
   { name: "a failed estimate cannot hide the next photo or become guessed nutrition", flags: ["--compat", "--fail-first"], requests: 2, replies: 2 },
+  { name: "a model NO_REPLY after API failure still delivers the safe error", flags: ["--compat", "--collection", "--fail-first", "--silent-failure"], requests: 1, replies: 1 },
   { name: "native web search coexists with the health tool under the minimal policy", flags: ["--compat", "--collection", "--search-enabled"], requests: 1, replies: 1 },
   { name: "one trusted collection forwards both originals once despite duplicate tool calls", flags: ["--compat", "--collection"], requests: 1, replies: 1 },
   { name: "two nearby photos with one caption form one estimate", flags: ["--compat", "--album"], requests: 1, replies: 1 },

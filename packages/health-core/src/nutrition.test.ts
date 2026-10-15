@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { NutritionEstimator, nutritionEstimateSchema, type NutritionModelClient } from "./index.js";
+import { NutritionEstimator, NutritionEstimationError, nutritionEstimateSchema, type NutritionModelClient } from "./index.js";
 
 const valid = {
   label: "Eggs on toast",
@@ -63,3 +63,17 @@ describe("nutrition model boundary", () => {
   });
 });
 
+
+it("reports only safe model failure categories, never raw provider content", () => {
+  const error = new NutritionEstimationError("private", [
+    { model: "test-primary", reason: "Gemini request failed (404) secret=private meal contents" },
+    { model: "test-fallback", reason: "429 RESOURCE_EXHAUSTED private" },
+    { model: "bad model?key=private", reason: "private" },
+  ]);
+  expect(error.diagnostics()).toEqual([
+    { model: "test-primary", category: "model_not_found" },
+    { model: "test-fallback", category: "rate_limited" },
+    { model: "invalid-model-id", category: "unknown" },
+  ]);
+  expect(JSON.stringify(error.diagnostics())).not.toContain("private");
+});

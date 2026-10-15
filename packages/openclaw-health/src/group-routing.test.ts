@@ -459,7 +459,7 @@ describe("OpenClaw group routing and multi-user isolation", () => {
       for (const handler of hook("before_prompt_build")) handler({ prompt: "Estimate this photo" }, runContext);
       let estimateParams: unknown = { text: "Healthy protein bowl with chicken and greens" };
       for (const handler of hook("before_tool_call")) {
-        const result = handler({ toolName: "estimate_nutrition", toolCallId: "call-estimate-img", params: estimateParams }, runContext);
+        const result = await handler({ toolName: "estimate_nutrition", toolCallId: "call-estimate-img", params: estimateParams }, runContext);
         if (result?.params) estimateParams = result.params;
       }
       const tool = findTool("estimate_nutrition", {

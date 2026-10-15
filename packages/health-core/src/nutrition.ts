@@ -19,6 +19,22 @@ export class NutritionEstimationError extends Error {
     super(message);
     this.name = "NutritionEstimationError";
   }
+
+  // Never log raw provider messages: they may contain prompts or credentials.
+  diagnostics() {
+    return this.attempts.map(({ model, reason }) => ({
+      model: /^[a-zA-Z0-9._/-]{1,100}$/.test(model) ? model : "invalid-model-id",
+      category: /\b429\b|RESOURCE_EXHAUSTED/i.test(reason) ? "rate_limited"
+        : /\b404\b|NOT_FOUND/i.test(reason) ? "model_not_found"
+        : /\b401\b|\b403\b|API_KEY_INVALID|PERMISSION_DENIED|UNAUTHENTICATED/i.test(reason) ? "authentication"
+        : /\b400\b|INVALID_ARGUMENT/i.test(reason) ? "invalid_request"
+        : /\b50[0-9]\b|UNAVAILABLE/i.test(reason) ? "provider_unavailable"
+        : /timeout|timed out|aborted/i.test(reason) ? "timeout"
+        : /blocked request/i.test(reason) ? "blocked"
+        : /JSON|invalid_type|invalid_value|too_small|too_big/i.test(reason) ? "invalid_output"
+        : "unknown",
+    }));
+  }
 }
 
 export function isRetryableNutritionError(error: unknown): boolean {
