@@ -53,11 +53,12 @@ await check("Sender/group allowlists and restricted health tools", async () => {
 await check("Background filesystem memory flush disabled", () => {
   z.object({ agents: z.object({ defaults: z.object({ compaction: z.object({ memoryFlush: z.object({ enabled: z.literal(false) }) }) }) }) }).parse(config);
 });
-await check("Health API readiness; nutrition estimator configured (generation not tested)", async () => {
+await check("Health API readiness and configured nutrition estimator", async () => {
   const result = await inspectHealthReadiness(process.env);
   console.info(`[clawfit-preflight] ${JSON.stringify(result)}`);
   if (result.reason !== "ready") throw new Error("Health API readiness check failed");
 });
+console.log("Nutrition readiness checks configuration only; live nutrition generation and WhatsApp delivery are not tested here.");
 if (!process.argv.includes("--before-restart")) {
   await check("Authenticated gateway RPC", () => runOpenClaw(["gateway", "status", "--require-rpc", "--json"], { capture: true }));
   await check("WhatsApp channel connected", () => {
