@@ -431,6 +431,9 @@ describe("OpenClaw group routing and multi-user isolation", () => {
           fallbackUsed: false,
           calories: { best: 520, low: 480, high: 560 },
           label: "Protein bowl",
+          macros: { proteinG: 30, carbsG: 50, fatG: 20, fiberG: 4 },
+          confidence: "medium",
+          uncertaintyReasons: ["Cooking oil unknown"],
         }), { status: 200 });
       }
       return new Response(JSON.stringify({}), { status: 200 });

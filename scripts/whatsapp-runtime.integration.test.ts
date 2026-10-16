@@ -30,7 +30,7 @@ it("replays the pinned host loader, real inbound finalizer and tool wrapper acro
   expect(line, stdout).toBeDefined();
   const result = JSON.parse(line!.slice("CLAWFIT_REPLAY_RESULT=".length));
   expect(result).toMatchObject({ runtimeVersion: "2026.7.1-2", storedInInboundCache: true, distinctRegistrations: true, factoryHasMedia: false, factoryHasRun: false, dispatchHasRun: false, requestCount: 1, exactBytes: true, blocked: true, directWrite: { error: "meal_write_blocked", retryable: false }, stale: { error: "unauthorized_media", retryable: false }, safeDiagnostics: true });
-  expect(result.results).toEqual([{ estimate: { label: "Original photo estimate" } }, { estimate: { label: "Original photo estimate" } }]);
+  expect(result.results).toMatchObject([{ estimate: { label: "Original photo estimate" } }, { estimate: { label: "Original photo estimate" } }]);
   expect(result.hooks).toEqual(expect.arrayContaining(["reply_dispatch", "before_prompt_build", "before_tool_call", "reply_payload_sending"]));
 });
 
@@ -64,16 +64,24 @@ it.each([
   expect(result.replies).toHaveLength(replies);
   expect(result.modelCalls).toBe(requests * (flags.includes("--attempt-writes") ? 4 : 2));
   expect(result.writeRequestCount).toBe(0);
+  for (const reply of result.replies) {
+    expect(reply.text).not.toMatch(/9999|42 g|verified this online|Logged!/);
+    if (reply.text.includes("kcal")) {
+      expect(reply.text).toContain("Estimated calories: 300 kcal (250–350)");
+      expect(reply.text).toContain("Confidence: medium");
+      expect(reply.text).toContain("Not logged.");
+    }
+  }
   for (const names of result.modelTools) {
     expect(names.includes("web_search")).toBe(flags.includes("--search-enabled"));
     expect(names).not.toEqual(expect.arrayContaining(["web_fetch"]));
   }
   if (flags.includes("--compat")) expect(result.result.every((dispatch: { observedReplyDelivery?: boolean }) => dispatch.observedReplyDelivery === true)).toBe(true);
-  if (flags.includes("--attempt-writes")) expect(result.replies[0]).toMatchObject({ text: "Offline estimate: 300 kcal" });
+  if (flags.includes("--attempt-writes")) expect(result.replies[0]).toMatchObject({ text: expect.stringContaining("Estimated calories: 300 kcal (250–350)") });
   if (flags.includes("--fail-first")) {
     expect(result.replies[0]).toMatchObject({ isError: false });
     expect(result.replies[0].text).not.toMatch(/kcal|300|Private provider failure/);
-    if (requests > 1) expect(result.replies[1]).toMatchObject({ text: "Offline estimate: 300 kcal", replyToId: "photo-b" });
+    if (requests > 1) expect(result.replies[1]).toMatchObject({ text: expect.stringContaining("Estimated calories: 300 kcal (250–350)"), replyToId: "photo-b" });
   } else if (flags.includes("--compat") && requests > 1) {
     expect(result.replies.map((reply: { replyToId: string }) => reply.replyToId)).toEqual(requests === 3 ? ["photo-a", "photo-b", "photo-c"] : ["photo-a", "photo-b"]);
   }
@@ -94,6 +102,6 @@ it.each([
   expect(result.requestCount).toBe(requests);
   expect(result.writeRequestCount).toBe(0);
   expect(result.replies).toHaveLength(Math.max(1, requests));
-  if (requests === 2) expect(result.replies[1].text).toBe("Offline estimate: 300 kcal");
+  if (requests === 2) expect(result.replies[1].text).toContain("Estimated calories: 300 kcal (250–350)");
   expect(result.replies[0].text).not.toMatch(/kcal|300|Private provider failure/);
 });

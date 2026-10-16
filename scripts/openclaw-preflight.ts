@@ -53,7 +53,7 @@ await check("Sender/group allowlists and restricted health tools", async () => {
 await check("Background filesystem memory flush disabled", () => {
   z.object({ agents: z.object({ defaults: z.object({ compaction: z.object({ memoryFlush: z.object({ enabled: z.literal(false) }) }) }) }) }).parse(config);
 });
-await check("Health API readiness and configured nutrition estimator", async () => {
+await check("Health API readiness; nutrition estimator configured (generation not tested)", async () => {
   const result = await inspectHealthReadiness(process.env);
   console.info(`[clawfit-preflight] ${JSON.stringify(result)}`);
   if (result.reason !== "ready") throw new Error("Health API readiness check failed");

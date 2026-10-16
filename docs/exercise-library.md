@@ -8,11 +8,19 @@ add/replace operations on existing routines. Replacement retains sets, reps and
 rest. Instructions can be opened from an active workout without leaving its form.
 The existing `/exercises/[name]` history route remains available.
 
+The browser uses compact text rows: name, primary muscle, equipment, favorite,
+and Add to plan (or Select in a routine picker). There are no image tiles or
+blank preview panels. Mobile filters open from the Filters button, which shows
+the active-filter count. Exercise details start with instructions; available
+licensed illustrations and user-linked videos are in an optional Demonstration
+section. The Add to plan row action opens details focused on the routine selector.
+
 ## Catalogue and media
 
 - 1,324 exercise records, all with English step-by-step instructions.
 - 19 exercises have 38 locally hosted still illustrations (4.53 MB total).
-- No bundled animations or videos. Entries without demonstrations say so.
+- No bundled animations or videos. Entries without demonstrations show instructions
+  without an empty media section.
 - Custom exercises can reference an HTTPS YouTube watch link; the privacy-enhanced
   embed loads only after the user selects Load. No backend URL fetching or uploads.
 - Unknown difficulty is left null. Difficulty filters appear when a user's custom

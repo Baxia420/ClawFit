@@ -25,10 +25,17 @@ try {
  page=await context.newPage();page.setDefaultTimeout(15000);const errors=[];page.on("pageerror",e=>errors.push(e.message));
  await page.goto("http://localhost:3009/workouts/library");console.log("Library opened",page.url());
  await page.getByRole("status").filter({hasText:"1324 exercises"}).waitFor();
+ assert.equal(await page.locator(".library-card-placeholder").count(),0);
+ assert.equal(await page.locator(".library-list img").count(),0);
+ if(screenshotDir){await mkdir(screenshotDir,{recursive:true});await page.screenshot({path:resolve(screenshotDir,"exercise-library-desktop.png"),fullPage:true});}
  await page.getByRole("searchbox").fill("flat bench press");
- await page.getByRole("button",{name:/Barbell bench press illustration/}).click();
+ await page.getByRole("button",{name:"Favorite Barbell bench press",exact:true}).click();
+ await page.getByRole("button",{name:"Unfavorite Barbell bench press",exact:true}).waitFor();
+ await page.getByRole("button",{name:"Add to plan",exact:true}).click();
  await page.getByRole("heading",{name:"Barbell bench press",exact:true}).waitFor();
- await page.getByRole("button",{name:"☆ Favorite",exact:true}).click();
+ await page.waitForFunction(()=>document.activeElement?.closest(".library-plan")!==null);
+ assert(await page.getByLabel(/^Routine/).evaluate(el=>el===document.activeElement));
+
  await page.getByRole("button",{name:"★ Favorited",exact:true}).waitFor();
  await page.getByLabel(/^Routine/).selectOption({label:"Browser test plan"});
  await page.getByLabel(/^Position/).selectOption("0");
@@ -44,6 +51,12 @@ try {
  // Mobile: no overflow, readable filters, create/edit, and keyboard close.
  await page.setViewportSize({width:390,height:844});
  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
+ await page.getByRole("button",{name:/^Filters/}).click();
+ await page.getByLabel(/^Equipment/).selectOption("barbell");
+ await page.getByRole("status").filter({hasText:"1 exercises"}).waitFor();
+ assert.equal(await page.getByRole("button",{name:"Filters (2)",exact:true}).getAttribute("aria-expanded"),"true");
+ await page.getByRole("button",{name:/^Filters/}).click();
+ await page.getByLabel(/^Equipment/).waitFor({state:"hidden"});
  if(screenshotDir)await page.screenshot({path:resolve(screenshotDir,"exercise-library-mobile.png"),fullPage:true});
  await page.getByRole("button",{name:"Create exercise",exact:true}).click();
  await page.getByLabel("Name",{exact:true}).fill("Browser custom press");
@@ -61,6 +74,7 @@ try {
  // Partner has an independent collection.
  await context.addCookies([await cookie("00000000-0000-0000-0000-000000000003")]);
  await page.reload();
+ await page.getByRole("button",{name:/^Filters/}).click();
  await page.getByLabel(/^Collection/).selectOption("favorites");
  await page.getByRole("heading",{name:"No exercises found",exact:true}).waitFor();
  await page.getByLabel(/^Collection/).selectOption("custom");

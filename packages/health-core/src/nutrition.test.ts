@@ -61,6 +61,15 @@ describe("nutrition model boundary", () => {
       nutritionEstimateSchema.safeParse({ ...valid, confidence: "low", calories: { best: 500, low: 500, high: 500 } }).success,
     ).toBe(false);
   });
+  it("does not start a fallback after the shared deadline expires", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1000);
+    const generate = vi.fn(async (_request: unknown) => { now.mockReturnValue(23_001); throw new Error("503 UNAVAILABLE"); });
+    try {
+      await expect(new NutritionEstimator({ generate }, ["primary", "fallback"]).estimate({ text: "meal" })).rejects.toBeInstanceOf(NutritionEstimationError);
+      expect(generate).toHaveBeenCalledTimes(1);
+      expect(generate.mock.calls[0]?.[0]).toMatchObject({ deadline: 23_000 });
+    } finally { now.mockRestore(); }
+  });
 });
 
 

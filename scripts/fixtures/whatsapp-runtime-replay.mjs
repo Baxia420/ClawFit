@@ -54,7 +54,7 @@ try {
   const requests = [];
   globalThis.fetch = async (_url, init) => {
     requests.push(JSON.parse(init.body));
-    return new Response(JSON.stringify({ estimate: { label: "Original photo estimate" } }), { status: 200 });
+    return new Response(JSON.stringify({ estimate: { label: "Original photo estimate", calories: { best: 300, low: 250, high: 350 }, macros: { proteinG: 10, carbsG: 40, fatG: 10, fiberG: null }, confidence: "medium", uncertaintyReasons: [] } }), { status: 200 });
   };
   const toolContext = { sessionKey, requesterSenderId: sender, messageChannel: "whatsapp", agentAccountId: "default", deliveryContext: { to: group, channel: "whatsapp", accountId: "default" } };
   const tool = entry.factory(toolContext);

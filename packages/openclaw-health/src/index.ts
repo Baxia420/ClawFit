@@ -10,6 +10,7 @@ import { resolveImagePayload, MediaResolutionError, type ResolvedImage } from ".
 import { inboundTurns, InboundTurns, MEDIA_FAILURE, TEMPORARY_FAILURE, type InboundTurn } from "./inbound-turns.js";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-runtime";
 import { explicitMealRecipient } from "./meal-recipient.js";
+import { readReplyEstimate, NUTRITION_BASIS } from "./nutrition-reply.js";
 
 const RECIPIENT_TOOLS = new Set(["create_pending_meal", "get_pending_meal", "confirm_pending_meal", "update_pending_meal", "log_meal", "get_meal", "get_recent_meals", "update_meal", "delete_meal", "get_daily_nutrition"]);
 
@@ -148,12 +149,14 @@ function createSenderTool<TParams extends TSchema>(
                 const block = turns.writeBlock(turn, options.name);
                 if (block) return { error: "meal_write_blocked", message: block, retryable: false };
               }
-              return await options.execute(rawParams as Static<TParams>, {
+              const result = await options.execute(rawParams as Static<TParams>, {
                 config,
                 sender,
                 toolContext, turns, ...(turn ? { turn } : {}),
                 ...(signal ? { signal } : {}),
               });
+              if (turn && (options.name === "log_meal" || options.name === "confirm_pending_meal") && result && typeof result === "object" && !("error" in result)) turn.mealLogged = true;
+              return result;
             } catch (err) {
               if (err instanceof HealthApiResponseError || err instanceof HealthApiNetworkError || options.name === "estimate_nutrition") {
                 const message = err instanceof Error ? err.message : "";
@@ -231,7 +234,7 @@ const plugin = defineToolPlugin({
           throw err;
         }
 
-        return healthFetch(config, "/v1/nutrition/estimate", {
+        const result = await healthFetch(config, "/v1/nutrition/estimate", {
           method: "POST",
           body: {
             text,
@@ -246,6 +249,10 @@ const plugin = defineToolPlugin({
           sender,
           ...(signal ? { signal } : {}),
         });
+        const estimate = readReplyEstimate(result);
+        if (!estimate) throw new Error("Invalid nutrition estimate response");
+        turn!.replyEstimate = estimate;
+        return { ...(result as Record<string, unknown>), basis: NUTRITION_BASIS };
       },
     }),
     createSenderTool(tool, {
@@ -772,6 +779,7 @@ ClawFit health tracking policy:
 - Perform only the action in the latest user message. Earlier unanswered or failed user messages are context, not queued actions: never replay them. A retry of the same current action must reuse its original idempotency key.
 - ALL food and meal estimation (including food photos, restaurant meals, mixed dishes, and food descriptions) MUST use estimate_nutrition. The dedicated nutrition model performs nutritional calculation; never guess or compute calories/macros mentally. Call it once for all foods and photos in the current inbound message, including an album; all trusted current attachments are supplied automatically. Never supply image paths, URIs or image bytes. Repeated calls in the same turn reuse its first result. For ordinary successful estimates, create a pending draft before presenting it. If the current user asks for estimate-only or no saving, present the successful estimate without creating or modifying any draft or meal. If estimation fails, provide only the returned error message: never supply new calories/macros from your own knowledge or a previous meal, and never offer to log a failed estimate. Never retry a tool error marked retryable=false in this turn. Do not call log_meal until the user confirms, unless their first message explicitly asks to log/save/track it.
 - When an image of a product and an image of its nutrition label are both available, inspect both; printed nutrition label values take precedence over visual estimation.
+- The nutrition estimator has no web search or food database lookup. Never say that it searched online, accessed a database, or verified manufacturer information. Explain that numbers and unstated packet weights are estimates. A separate successful web search is evidence only for the sources it actually returns; it does not retroactively verify an earlier estimate. Include the API calorie range, confidence and relevant uncertainty when presenting an estimate.
 - On user confirmation ("log it", "log both", "yes", "save it"): DO NOT re-run estimate_nutrition. Confirm the relevant draft(s) with confirm_pending_meal. For a single draft, "log it" confirms that pending meal; for multiple items, "log both" confirms the active drafts.
 - Updating unconfirmed drafts before confirmation: use update_pending_meal. Updating confirmed/logged meals: use update_meal with the confirmed meal ID (confirmedMealId). Never use a pending draft ID with update_meal.
 - Date corrections ("that was yesterday", "move meals to yesterday", "I ate this last night"): Use the local calendar date for yesterday in Asia/Kuala_Lumpur. If meals were already logged today, update their occurredAt via update_meal to yesterday's date. If confirming a pending draft from yesterday, pass occurredAt with yesterday's timestamp to confirm_pending_meal.
