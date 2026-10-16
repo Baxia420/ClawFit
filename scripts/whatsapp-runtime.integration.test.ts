@@ -71,7 +71,7 @@ it.each([
   if (flags.includes("--compat")) expect(result.result.every((dispatch: { observedReplyDelivery?: boolean }) => dispatch.observedReplyDelivery === true)).toBe(true);
   if (flags.includes("--attempt-writes")) expect(result.replies[0]).toMatchObject({ text: "Offline estimate: 300 kcal" });
   if (flags.includes("--fail-first")) {
-    expect(result.replies[0]).toMatchObject({ isError: true });
+    expect(result.replies[0]).toMatchObject({ isError: false });
     expect(result.replies[0].text).not.toMatch(/kcal|300|Private provider failure/);
     if (requests > 1) expect(result.replies[1]).toMatchObject({ text: "Offline estimate: 300 kcal", replyToId: "photo-b" });
   } else if (flags.includes("--compat") && requests > 1) {

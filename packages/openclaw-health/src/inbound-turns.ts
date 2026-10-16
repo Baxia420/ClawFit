@@ -175,7 +175,7 @@ export class InboundTurns {
         if (rejected.queued && event.payload.channelData?.clawfitTerminalReply !== event.runId) return { cancel: true, reason: "clawfit-terminal-reply-already-queued" };
         if (rejected.delivered) return { cancel: true, reason: "clawfit-failure-already-delivered" };
         rejected.delivered = true;
-        return { payload: { text: rejected.failure.message, isError: true } };
+        return { payload: { text: rejected.failure.message, isError: false } };
       }
       if (!turn) return;
       if (turn.fallbackSent) {
@@ -188,7 +188,7 @@ export class InboundTurns {
         turn.delivered = true;
         // Do not allow a general-agent guess, stale estimate, attachment or
         // logging offer to turn a failed tool result into apparent success.
-        return { payload: { text: turn.failure.message, isError: true } };
+        return { payload: { text: turn.failure.message, isError: false } };
       }
       turn.delivered = true;
     }, { priority: 200 });
@@ -210,8 +210,11 @@ export class InboundTurns {
   }
 
   private sendFailure(turn: InboundTurn) {
+    // WhatsApp drops isError payloads at both inbound and outbound delivery.
+    // This is a curated user notice, not a raw tool/provider error. The tool
+    // result remains terminal and every subsequent write/retry stays blocked.
     if (turn.canDeliver && !turn.delivered && !turn.fallbackSent) {
-      turn.fallbackSent = turn.dispatcher.sendFinalReply({ text: turn.failure?.message ?? TEMPORARY_FAILURE, isError: true, channelData: { clawfitTerminalReply: turn.runId } });
+      turn.fallbackSent = turn.dispatcher.sendFinalReply({ text: turn.failure?.message ?? TEMPORARY_FAILURE, isError: false, channelData: { clawfitTerminalReply: turn.runId } });
       this.diagnostic("failure_reply", turn, { queued: turn.fallbackSent });
     }
   }
