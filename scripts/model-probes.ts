@@ -69,7 +69,12 @@ export async function probeModels(apiKey: string, request: typeof fetch = fetch,
         try {
           const parts = await generate({ contents: [{ role: "user", parts: [{ text: "Use Google Search to find the official Node.js releases page. Cite its source." }] }], tools: [{ googleSearch: {} }], generationConfig: { maxOutputTokens: 512, temperature: 0 } }, true);
           result.webSearch = parts.some(p => p.text?.trim()) ? "pass" : "fail";
-        } catch { result.webSearch = "fail"; }
+        } catch (error) {
+          result.webSearch = "fail";
+          result.webSearchReason = error instanceof Error && /^HTTP \d{3}$/.test(error.message) ? error.message
+            : error instanceof Error && error.message === "Missing grounded sources" ? "missing_grounded_sources"
+            : error instanceof Error && /TimeoutError|AbortError/.test(error.name) ? "timeout" : "invalid_response";
+        }
       }
       if (probe.image) {
         try {
@@ -79,7 +84,7 @@ export async function probeModels(apiKey: string, request: typeof fetch = fetch,
       }
     } catch (error) { result.reason = error instanceof Error && /^HTTP \d+$|^Empty generation/.test(error.message) ? error.message : "generation probe failed"; }
     results[probe.label] = result;
-    console.log(`${probe.label}: ${result.status}; tool calling ${result.toolCalling}; image input ${result.imageInput}; web search ${result.webSearch}`);
+    console.log(`${probe.label}: ${result.status}; tool calling ${result.toolCalling}; image input ${result.imageInput}; web search ${result.webSearch}${result.webSearchReason ? ` (${result.webSearchReason})` : ""}`);
   }
   return { checkedAt: new Date().toISOString(), results, selected: selectSmokeModels(results) };
 }

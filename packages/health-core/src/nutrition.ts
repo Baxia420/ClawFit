@@ -2,6 +2,7 @@ import { nutritionEstimateSchema, type NutritionEstimate } from "./schemas.js";
 
 export type NutritionModelRequest = {
   model: string;
+  deadline?: number;
   prompt: string;
   image?: { mimeType: string; base64: string };
   images?: { mimeType: string; base64: string }[];
@@ -64,10 +65,13 @@ export class NutritionEstimator {
     fallbackUsed: boolean;
   }> {
     const attempts: { model: string; reason: string }[] = [];
+    const deadline = Date.now() + 22_000;
     for (const [index, model] of this.models.entries()) {
+      if (Date.now() >= deadline) break;
       try {
         const raw = await this.client.generate({
           model,
+          deadline,
           prompt: nutritionPrompt(input.text),
           ...(input.images && input.images.length > 0
             ? { images: input.images }
@@ -100,6 +104,7 @@ export function nutritionPrompt(userText: string): string {
     "Several photos can show components or different views of one meal. Do not count the same food twice. User-stated amounts take priority over the number of food items pictured.",
     "Use only the current supplied photos and current user description. An assistant description is supplementary; do not include previous meals mentioned in it.",
     "Use realistic ranges; never imply false precision. Hidden oils, sauces, and restaurant portions lower confidence.",
+    "No online lookup or food database tool is available. Do not claim to have searched or verified manufacturer data. Use printed label values only when legible in the supplied input. Treat unspecified packet weights and serving sizes as assumptions, lower confidence, and include those assumptions in uncertainty_reasons.",
     "Required keys: label, items[{name, portion_description}], calories{best,low,high},",
     "macros{protein_g,carbs_g,fat_g,fiber_g}, confidence(high|medium|low), uncertainty_reasons[].",
     `User description: ${userText || "No text supplied; infer from the attached meal image."}`,

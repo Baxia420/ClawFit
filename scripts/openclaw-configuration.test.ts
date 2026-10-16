@@ -105,7 +105,19 @@ describe("Gateway model evidence and routing", () => {
     const evidence = await probeModels("fake-key", request, { webSearch: true });
     expect(evidence.selected.webSearch).toBe(citations ? lite : undefined);
     expect(evidence.results["Gemini 3.5 Flash-Lite"]?.webSearch).toBe(citations ? "pass" : "fail");
+    expect(evidence.results["Gemini 3.5 Flash-Lite"]?.webSearchReason).toBe(citations ? undefined : "missing_grounded_sources");
     expect(request).toHaveBeenCalledTimes(5);
+  });
+  it("retains a safe search rejection status without provider messages or credentials", async () => {
+    const request = vi.fn<typeof fetch>().mockImplementation(async (url, init) => {
+      if (String(url).includes("models?")) return Response.json({ models: [{ name: `models/${lite}`, supportedGenerationMethods: ["generateContent"] }] });
+      const body = JSON.parse(String(init?.body));
+      if (body.tools?.[0]?.googleSearch) return Response.json({ error: { message: "private key and prompt" } }, { status: 403 });
+      return Response.json({ candidates: [{ content: { parts: body.tools ? [{ functionCall: { name: "record_number", args: { value: 7 } } }] : [{ text: "OK" }] } }] });
+    });
+    const evidence = await probeModels("private-key", request, { webSearch: true });
+    expect(evidence.results["Gemini 3.5 Flash-Lite"]?.webSearchReason).toBe("HTTP 403");
+    expect(JSON.stringify(evidence)).not.toContain("private");
   });
   it("checks paginated catalog, tools and image input using injected responses", async () => {
     const request = vi.fn<typeof fetch>();

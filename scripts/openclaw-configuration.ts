@@ -9,6 +9,7 @@ const probeSchema = z.object({
   modelId: z.string().regex(/^[a-zA-Z0-9._-]+$/).optional(),
   toolCalling: z.enum(["pass", "fail", "not-tested"]).optional(),
   webSearch: z.enum(["pass", "fail", "not-tested"]).optional(),
+  webSearchReason: z.string().regex(/^(?:HTTP [0-9]{3}|missing_grounded_sources|timeout|invalid_response)$/).optional(),
   imageInput: z.enum(["pass", "fail", "not-tested"]).optional(),
   contextWindow: z.number().int().positive().optional(),
   maxTokens: z.number().int().positive().optional(),

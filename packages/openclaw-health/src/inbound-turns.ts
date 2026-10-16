@@ -4,6 +4,7 @@ import { abortAgentHarnessRun } from "openclaw/plugin-sdk/agent-harness-runtime"
 import { randomUUID } from "node:crypto";
 import { isMealLogConfirmation, isNoSaveRequest, isFallbackNotice, TEMPORARY_FAILURE } from "./confirmation.js";
 import type { MediaAuthorizationContext } from "./media-resolver.js";
+import { isNutritionSourceQuestion, NUTRITION_BASIS, nutritionReply, type ReplyEstimate } from "./nutrition-reply.js";
 
 export { TEMPORARY_FAILURE } from "./confirmation.js";
 export const MEDIA_FAILURE = "I couldn't access that photo safely. Please resend it in this chat; I won't retry this image in this turn.";
@@ -27,6 +28,9 @@ export interface InboundTurn {
   fallbackSent: boolean;
   estimation?: Promise<unknown>;
   photoDraft?: Promise<unknown>;
+  replyEstimate?: ReplyEstimate;
+  mealLogged?: boolean;
+  mealPartiallyLogged?: boolean;
   dispatcher: PluginHookReplyDispatchContext["dispatcher"];
   canDeliver: boolean;
   closed?: boolean;
@@ -190,7 +194,13 @@ export class InboundTurns {
         // logging offer to turn a failed tool result into apparent success.
         return { payload: { text: turn.failure.message, isError: false } };
       }
+      if (turn.delivered && (turn.replyEstimate || isNutritionSourceQuestion(turn.text))) return { cancel: true, reason: "clawfit-nutrition-reply-already-delivered" };
       turn.delivered = true;
+      const replyTarget = event.payload.replyToId ? { replyToId: event.payload.replyToId } : {};
+      if (turn.replyEstimate) return { payload: { ...replyTarget, text: nutritionReply(turn.replyEstimate, !!turn.mealLogged, isNoSaveRequest(turn.text), !!turn.mealPartiallyLogged), isError: false } };
+      // Explain the actual estimator path instead of letting the model invent
+      // an online lookup, database access, or a rationale for assumed weights.
+      if (isNutritionSourceQuestion(turn.text)) return { payload: { ...replyTarget, text: NUTRITION_BASIS, isError: false } };
     }, { priority: 200 });
     api.on("before_agent_finalize", (_event, context) => {
       if (context.runId && (this.state.runs.get(context.runId)?.failure || this.state.rejectedRuns.has(context.runId))) return { action: "finalize", reason: "ClawFit tool failed terminally for this turn; no revision or retries." };

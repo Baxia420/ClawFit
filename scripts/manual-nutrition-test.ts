@@ -51,7 +51,7 @@ if (readyBody.estimator !== "configured") {
   process.exit(1);
 }
 
-console.log("[READINESS] Estimator readiness smoke passed: status=ready, database=ok, schema=ok, estimator=configured.");
+console.log("[READINESS] Configuration check passed: database=ok, schema=ok, estimator=configured. No nutrition generation or WhatsApp delivery has been tested.");
 
 // If this command invocation is solely for estimator readiness verification, exit cleanly now.
 if (isReadinessSmoke && promptArgs.length === 0) {

@@ -58,6 +58,7 @@ await check("Health API readiness and configured nutrition estimator", async () 
   console.info(`[clawfit-preflight] ${JSON.stringify(result)}`);
   if (result.reason !== "ready") throw new Error("Health API readiness check failed");
 });
+console.log("Nutrition readiness checks configuration only; live nutrition generation and WhatsApp delivery are not tested here.");
 if (!process.argv.includes("--before-restart")) {
   await check("Authenticated gateway RPC", () => runOpenClaw(["gateway", "status", "--require-rpc", "--json"], { capture: true }));
   await check("WhatsApp channel connected", () => {
