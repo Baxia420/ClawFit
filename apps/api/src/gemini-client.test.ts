@@ -2,6 +2,17 @@ import { expect, it, vi } from "vitest";
 import { NutritionEstimator } from "@clawfit/health-core";
 import { GeminiNutritionClient } from "./gemini-client.js";
 
+// Use controllable timers for the native signal, while the fake transport
+// observes cancellation just as fetch does. No provider traffic is made.
+function fakeTimeouts() {
+  vi.useFakeTimers();
+  vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new DOMException("Expired", "TimeoutError")), ms);
+    return controller.signal;
+  });
+}
+
 const output = { label: "Lunch", items: [], calories: { best: 300, low: 250, high: 350 }, macros: { protein_g: 10, carbs_g: 40, fat_g: 10, fiber_g: null }, confidence: "medium", uncertainty_reasons: ["Packet weight unknown"] };
 const success = () => Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify(output) }] } }], usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 50, thoughtsTokenCount: 25, totalTokenCount: 175 } });
 function clock() {
@@ -64,4 +75,38 @@ it("runs retries inside estimation without involving any write endpoint", async 
   const result = await new NutritionEstimator(new GeminiNutritionClient("secret", fetchImpl, vi.fn(), clock()), ["primary"]).estimate({ text: "lunch" });
   expect(result.estimate.calories.best).toBe(300);
   expect(fetchImpl.mock.calls.every(([url, init]) => String(url).endsWith(":generateContent") && init?.method === "POST")).toBe(true);
+});
+
+it.each([false, true])("allows a 20-second generation, after transient error=%s", async retry => {
+  fakeTimeouts();
+  try {
+    let calls = 0;
+    const transport: typeof fetch = async (_url, init) => {
+      if (retry && calls++ === 0) return Response.json({ error: { status: "UNAVAILABLE" } }, { status: 503 });
+      return new Promise<Response>((resolve, reject) => {
+        const timer = setTimeout(() => resolve(success()), 20_000);
+        init!.signal!.addEventListener("abort", () => { clearTimeout(timer); reject(init!.signal!.reason); }, { once: true });
+      });
+    };
+    const result = new GeminiNutritionClient("secret", transport).generate({ model: "test", prompt: "meal" });
+    const assertion = expect(result).resolves.toEqual(output);
+    await vi.advanceTimersByTimeAsync(21_000);
+    await assertion;
+  } finally { vi.restoreAllMocks(); vi.useRealTimers(); }
+});
+
+it("aborts a hung request at the shared deadline and reports timeouts while reading the body", async () => {
+  fakeTimeouts();
+  try {
+    const log = vi.fn();
+    const transport: typeof fetch = async (_url, init) => ({ ok: true, status: 200, json: () => new Promise((_resolve, reject) => {
+      init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
+    }) }) as Response;
+    const result = new GeminiNutritionClient("secret", transport, log).generate({ model: "test", prompt: "meal", deadline: Date.now() + 5_000 });
+    const assertion = expect(result).rejects.toThrow("timed out");
+    await vi.advanceTimersByTimeAsync(5_000);
+    await assertion;
+    expect(log).toHaveBeenCalledWith(expect.objectContaining({ reason: "timeout", durationMs: 5_000 }));
+    expect(log).not.toHaveBeenCalledWith(expect.objectContaining({ reason: "success" }));
+  } finally { vi.restoreAllMocks(); vi.useRealTimers(); }
 });

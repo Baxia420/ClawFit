@@ -5,6 +5,7 @@
     entries: {
       "clawfit-health": {
         enabled: true,
+        hooks: { allowConversationAccess: true },
         config: { apiUrl: "http://127.0.0.1:4000" },
       },
     },

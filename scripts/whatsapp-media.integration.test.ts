@@ -55,7 +55,7 @@ function harness(replaceRegistryBeforePrompt = false) {
   const emit = async (name: string, event: unknown, context: unknown = {}) => {
     let result: unknown;
     for (const handler of hooks.get(name) ?? []) result = await handler(event, context) ?? result;
-    return result as { params?: unknown; block?: boolean; cancel?: boolean; blockReason?: string; payload?: { text?: string; isError?: boolean } } | undefined;
+    return result as { handled?: boolean; params?: unknown; block?: boolean; cancel?: boolean; blockReason?: string; payload?: { text?: string; isError?: boolean } } | undefined;
   };
   async function inbound(options: { id: string; runId: string; paths?: string[]; text?: string; senderId?: string; suppress?: boolean; dispatchRunId?: boolean; mediaUrl?: string; hasPhoto?: boolean; inboundAccount?: string | null; factoryAccount?: string | null; originatingAccount?: string; skipPrompt?: boolean }) {
     const senderId = options.senderId ?? sender;
@@ -77,7 +77,7 @@ function harness(replaceRegistryBeforePrompt = false) {
       reply: { to: "+60333333333", originatingTo: group },
       message: { body: text, rawBody: text, commandBody: text },
     });
-    await emit("reply_dispatch", {
+    const dispatch = await emit("reply_dispatch", {
       ctx,
       ...(options.dispatchRunId ? { runId: options.runId } : {}), sessionKey,
       ...(options.originatingAccount ? { originatingAccountId: options.originatingAccount } : {}),
@@ -104,7 +104,7 @@ function harness(replaceRegistryBeforePrompt = false) {
       const tool = (Object.keys(override).length ? factories.map(factory => factory({ ...toolContext, ...override })) : preparedTools).find(tool => tool?.name === name)!;
       return (await tool.execute(callId, grantedParams)).details;
     };
-    return { execute, replies, run, toolContext, dispatcher, ctx, grants };
+    return { execute, replies, run, toolContext, dispatcher, ctx, grants, dispatch };
   }
   return { inbound, emit, factories, diagnostics, terminal: async (runId: string, phase: string, error = "") => {
     for (const handle of subscriptions) await handle({ runId, sessionKey, stream: "lifecycle", data: { phase, error } });
@@ -122,6 +122,34 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
     await writeFile(photo, bytes);
   });
   afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); await rm(directory, { recursive: true, force: true }); });
+
+  it("uses only the current trusted text when the model supplies an earlier meal", async () => {
+    const request = vi.fn().mockImplementation(async () => Response.json({ estimate }));
+    vi.stubGlobal("fetch", request);
+    const h = harness();
+    const old = await h.inbound({ id: randomUUID(), runId: randomUUID(), paths: [photo], text: "Estimate an egg sandwich" });
+    await old.execute("estimate_nutrition", "old", { text: "egg sandwich" });
+    await h.terminal(old.run.runId, "end");
+    const current = await h.inbound({ id: randomUUID(), runId: randomUUID(), text: "Estimate one banana, don't save" });
+    await current.execute("estimate_nutrition", "new", { text: "egg sandwich from the earlier message" });
+    const body = JSON.parse(request.mock.calls[1]![1].body);
+    expect(body.text).toBe("Estimate one banana, don't save");
+    expect(body.image).toBeUndefined();
+    expect(body.images).toBeUndefined();
+  });
+
+  it("answers a check-in after a failed meal without making another API request", async () => {
+    const request = vi.fn().mockImplementation(async () => Response.json({ error: { code: "NUTRITION_UNAVAILABLE" } }, { status: 503 }));
+    vi.stubGlobal("fetch", request);
+    const h = harness();
+    const old = await h.inbound({ id: randomUUID(), runId: randomUUID(), paths: [photo] });
+    await old.execute("estimate_nutrition", "old", { text: "sandwich" });
+    await h.terminal(old.run.runId, "end");
+    const current = await h.inbound({ id: randomUUID(), runId: randomUUID(), text: "@Clawfit are you okay?" });
+    expect(current.replies).toEqual([{ text: expect.stringContaining("receiving your messages") }]);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(current.dispatch?.handled).toBe(true);
+  });
 
   it.each([
     { actor: sender, target: "Cici", owner: "00000000-0000-4000-8000-000000000002" },

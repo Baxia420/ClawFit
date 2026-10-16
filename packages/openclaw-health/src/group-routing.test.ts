@@ -476,7 +476,8 @@ describe("OpenClaw group routing and multi-user isolation", () => {
       const data = JSON.parse((res as any).content[0].text);
       expect(data.model).toBe("gemini-3.8-flash");
       expect(capturedRequestBody).toBeDefined();
-      expect(capturedRequestBody.text).toContain("Healthy protein bowl with chicken and greens");
+      expect(capturedRequestBody.text).toBe("Estimate this photo");
+      expect(capturedRequestBody.text).not.toContain("Healthy protein bowl with chicken and greens");
       expect(capturedRequestBody.image).toBeDefined();
       expect(capturedRequestBody.image.mimeType).toBe("image/jpeg");
       expect(capturedRequestBody.image.base64).toBe(jpegBuffer.toString("base64"));

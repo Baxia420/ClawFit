@@ -1,4 +1,5 @@
 import type { NutritionModelClient, NutritionModelRequest } from "@clawfit/health-core";
+import { NUTRITION_TOTAL_TIMEOUT_MS, NUTRITION_ATTEMPT_TIMEOUT_MS } from "@clawfit/health-core";
 
 type AttemptDiagnostic = {
   model: string; attempt: number; durationMs: number; status?: number;
@@ -35,8 +36,8 @@ export class GeminiNutritionClient implements NutritionModelClient {
       parts.push({ inlineData: { mimeType: request.image.mimeType, data: request.image.base64 } });
     }
     // All models/fallbacks share one deadline passed by the estimator. Keep
-    // recovery within the Gateway's 30-second request budget; never retry writes.
-    const deadline = Math.min(request.deadline ?? Infinity, this.runtime.now() + 22_000);
+    // recovery within the Gateway's 75-second nutrition budget; never retry writes.
+    const deadline = Math.min(request.deadline ?? Infinity, this.runtime.now() + NUTRITION_TOTAL_TIMEOUT_MS);
     for (let attempt = 1; attempt <= 2; attempt++) {
       const started = this.runtime.now();
       const remaining = deadline - started;
@@ -56,7 +57,7 @@ export class GeminiNutritionClient implements NutritionModelClient {
                 responseJsonSchema: nutritionJsonSchema,
               },
             }),
-            signal: AbortSignal.timeout(Math.min(12_000, remaining)),
+            signal: AbortSignal.timeout(Math.min(NUTRITION_ATTEMPT_TIMEOUT_MS, remaining)),
           },
         );
       } catch (error) {
@@ -90,11 +91,16 @@ export class GeminiNutritionClient implements NutritionModelClient {
         };
         const usage = payload.usageMetadata;
         const counts = Object.fromEntries(Object.entries({ inputTokens: usage?.promptTokenCount, outputTokens: usage?.candidatesTokenCount, thinkingTokens: usage?.thoughtsTokenCount, totalTokens: usage?.totalTokenCount }).filter(([, value]) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0));
-        this.report({ model: request.model, attempt, status: response.status, durationMs: this.runtime.now() - started, reason: "success", ...counts });
         const text = payload.candidates?.[0]?.content?.parts?.find((part) => part.text)?.text;
         if (!text) throw new Error(payload.promptFeedback?.blockReason ? "Gemini blocked request" : "Gemini returned no JSON text");
-        return JSON.parse(text) as unknown;
+        const result: unknown = JSON.parse(text);
+        this.report({ model: request.model, attempt, status: response.status, durationMs: this.runtime.now() - started, reason: "success", ...counts });
+        return result;
       } catch (error) {
+        if (error instanceof Error && /TimeoutError|AbortError/.test(error.name)) {
+          this.report({ model: request.model, attempt, status: response.status, durationMs: this.runtime.now() - started, reason: "timeout" });
+          throw new Error("Gemini request timed out");
+        }
         this.report({ model: request.model, attempt, status: response.status, durationMs: this.runtime.now() - started, reason: "invalid_response" });
         // Do not retry malformed/blocked generation; never retain raw text in errors.
         throw new Error(error instanceof Error && error.message === "Gemini blocked request" ? error.message : "Gemini returned invalid JSON output");

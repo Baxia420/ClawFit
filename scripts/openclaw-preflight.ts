@@ -23,6 +23,9 @@ await check("Service-user state directory ownership and write access", () => ens
 await check("Built health plugin validates", () => runOpenClaw(["plugins", "validate", "--root", resolve("packages/openclaw-health"), "--entry", "dist/index.js"], { capture: true }));
 await check("OpenClaw configuration validates", () => runOpenClaw(["config", "validate"], { capture: true }));
 const config = await readGatewayConfig();
+await check("Health plugin conversation hooks permitted", () => {
+  z.object({ plugins: z.object({ entries: z.object({ "clawfit-health": z.object({ hooks: z.object({ allowConversationAccess: z.literal(true) }) }) }) }) }).parse(config);
+});
 await check("Google-native transport and registered primary/fallbacks", () => {
   const parsed = z.object({
     models: z.object({ providers: z.object({ google: z.object({ api: z.literal(GOOGLE_API), baseUrl: z.literal(GOOGLE_BASE_URL),

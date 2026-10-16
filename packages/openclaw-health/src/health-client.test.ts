@@ -5,6 +5,38 @@ describe("OpenClaw Health API client", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it.each(["/v1/nutrition/estimate", "/v1/settings"])("keeps the deadline with a caller signal: %s", async path => {
+    vi.stubEnv("HEALTH_API_OPENCLAW_TOKEN", "test-token");
+    vi.useFakeTimers();
+    vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), ms);
+      return controller.signal;
+    });
+    const caller = new AbortController();
+    const fetchImpl: typeof fetch = async (_url, init) => new Promise((_resolve, reject) => {
+      init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
+    });
+    const request = healthFetch({}, path, { signal: caller.signal, fetchImpl });
+    const assertion = expect(request).rejects.toBeInstanceOf(HealthApiNetworkError);
+    await vi.advanceTimersByTimeAsync(path.includes("estimate") ? 75_000 : 30_000);
+    await assertion;
+    expect(caller.signal.aborted).toBe(false);
+  });
+
+  it("honors caller cancellation before the nutrition deadline", async () => {
+    vi.stubEnv("HEALTH_API_OPENCLAW_TOKEN", "test-token");
+    const caller = new AbortController();
+    const fetchImpl: typeof fetch = async (_url, init) => new Promise((_resolve, reject) => {
+      init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
+    });
+    const request = healthFetch({}, "/v1/nutrition/estimate", { signal: caller.signal, fetchImpl });
+    const assertion = expect(request).rejects.toBeInstanceOf(HealthApiNetworkError);
+    caller.abort();
+    await assertion;
   });
 
   it("derives a stable, non-identifying scope from the trusted peer identity", () => {

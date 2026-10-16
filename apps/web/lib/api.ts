@@ -99,6 +99,7 @@ export async function healthApiRequest<T>(path: string, init: HealthApiOptions =
 
   let response: Response;
   try {
+    const timeout = AbortSignal.timeout(path === "/v1/nutrition/estimate" ? 75_000 : 50_000);
     response = await fetch(new URL(path, apiUrl), {
       ...init,
       headers: {
@@ -107,7 +108,7 @@ export async function healthApiRequest<T>(path: string, init: HealthApiOptions =
         ...init.headers,
       },
       cache: "no-store",
-      signal: init.signal ?? AbortSignal.timeout(50_000),
+      signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout,
     });
   } catch (error) {
     logNetworkFailure(path, error);

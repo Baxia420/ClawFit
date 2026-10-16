@@ -1,5 +1,8 @@
 import { nutritionEstimateSchema, type NutritionEstimate } from "./schemas.js";
 
+export const NUTRITION_TOTAL_TIMEOUT_MS = 60_000;
+export const NUTRITION_ATTEMPT_TIMEOUT_MS = 45_000;
+
 export type NutritionModelRequest = {
   model: string;
   deadline?: number;
@@ -65,7 +68,7 @@ export class NutritionEstimator {
     fallbackUsed: boolean;
   }> {
     const attempts: { model: string; reason: string }[] = [];
-    const deadline = Date.now() + 22_000;
+    const deadline = Date.now() + NUTRITION_TOTAL_TIMEOUT_MS;
     for (const [index, model] of this.models.entries()) {
       if (Date.now() >= deadline) break;
       try {

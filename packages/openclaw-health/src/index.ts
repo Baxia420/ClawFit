@@ -202,13 +202,13 @@ const plugin = defineToolPlugin({
       name: "estimate_nutrition",
       description: "Estimate all food in the current message once via the dedicated nutrition model. All current authorized photos are supplied automatically; never supply image paths, URIs or image bytes. This does not save anything.",
       parameters: Type.Object({
-        text: Type.String({ maxLength: 4_000, description: "Meal description and all visual details available from attached photo(s). Current inbound image bytes are supplied automatically." }),
+        text: Type.String({ maxLength: 4_000, description: "Brief description of the current meal only. The original message and photos are supplied automatically." }),
       }, { additionalProperties: false }),
-      execute: async (params, { config, sender, toolContext, turn, turns, signal }) => {
+      execute: async (_params, { config, sender, toolContext, turn, turns, signal }) => {
         const authContext = turns.authorization(turn, toolContext);
-        // The current user's quantities/captions take priority over the
-        // general agent's potentially incomplete description of an album.
-        const text = (turn?.text ? `${turn.text}\nAssistant description: ${params.text}` : params.text).slice(0, 4_000);
+        // The estimator already receives the original images. Model-written
+        // descriptions can replay an old meal even on an unrelated new turn.
+        const text = (turn?.text ?? "").slice(0, 4_000);
         let resolved: { images?: ResolvedImage[]; image?: ResolvedImage };
         try {
           if (!turn) throw new MediaResolutionError("unauthorized_media", "Missing trusted current-message attachment context.");
