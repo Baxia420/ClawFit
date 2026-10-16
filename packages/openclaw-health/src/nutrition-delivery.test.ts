@@ -19,7 +19,8 @@ async function inbound(text: string) {
 it("replaces misleading model prose with canonical nutrition evidence at dispatch", async () => {
   const { turn, final } = await inbound("Estimate only, don't save this meal");
   turn.replyEstimate = readReplyEstimate({ label: "Biscuits", calories: { best: 210, low: 180, high: 250 }, macros: { proteinG: 2.5, carbsG: 30, fatG: 9, fiberG: 1 }, confidence: "low", uncertaintyReasons: ["Unknown packet weight"] })!;
-  const result = final({ text: "Verified online: exactly 9999 kcal and 42 g. Logged!", mediaUrl: "/untrusted/model/image.png" });
+  const result = final({ text: "Verified online: exactly 9999 kcal and 42 g. Logged!", mediaUrl: "/untrusted/model/image.png", replyToId: "original-message" });
+  expect(result.payload.replyToId).toBe("original-message");
   expect(result.payload.text).toContain("210 kcal (180–250)");
   expect(result.payload.text).toContain("Confidence: low");
   expect(result.payload.text).toContain("Unknown packet weight");

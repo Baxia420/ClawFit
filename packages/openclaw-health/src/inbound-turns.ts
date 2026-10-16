@@ -196,10 +196,11 @@ export class InboundTurns {
       }
       if (turn.delivered && (turn.replyEstimate || isNutritionSourceQuestion(turn.text))) return { cancel: true, reason: "clawfit-nutrition-reply-already-delivered" };
       turn.delivered = true;
-      if (turn.replyEstimate) return { payload: { text: nutritionReply(turn.replyEstimate, !!turn.mealLogged, isNoSaveRequest(turn.text), !!turn.mealPartiallyLogged), isError: false } };
+      const replyTarget = event.payload.replyToId ? { replyToId: event.payload.replyToId } : {};
+      if (turn.replyEstimate) return { payload: { ...replyTarget, text: nutritionReply(turn.replyEstimate, !!turn.mealLogged, isNoSaveRequest(turn.text), !!turn.mealPartiallyLogged), isError: false } };
       // Explain the actual estimator path instead of letting the model invent
       // an online lookup, database access, or a rationale for assumed weights.
-      if (isNutritionSourceQuestion(turn.text)) return { payload: { text: NUTRITION_BASIS, isError: false } };
+      if (isNutritionSourceQuestion(turn.text)) return { payload: { ...replyTarget, text: NUTRITION_BASIS, isError: false } };
     }, { priority: 200 });
     api.on("before_agent_finalize", (_event, context) => {
       if (context.runId && (this.state.runs.get(context.runId)?.failure || this.state.rejectedRuns.has(context.runId))) return { action: "finalize", reason: "ClawFit tool failed terminally for this turn; no revision or retries." };
