@@ -134,7 +134,16 @@ try {
   const replies = [];
   const ctx = await buildChannelInboundEventContext({ channel: "whatsapp", finalize: finalizeInboundContext, media: toInboundMediaFacts((collection ? [photo, secondPhoto] : [photo]).map(file => ({ path: file, url: file, contentType: "image/png" }))), messageId: "photo-a", from: group, sender: { id: sender }, conversation: { kind: "group", id: group }, route: { agentId: "main", accountId: "default", routeSessionKey: sessionKey }, reply: { to: "+60333333333", originatingTo: group }, message: { rawBody: "Estimate only. Do not save anything." }, extra: { CommandAuthorized: true } });
   const secondCtx = await buildChannelInboundEventContext({ channel: "whatsapp", finalize: finalizeInboundContext, media: toInboundMediaFacts([{ path: secondPhoto, url: secondPhoto, contentType: "image/png" }]), messageId: "photo-b", from: group, sender: { id: mixedSender ? "+60222222222" : sender }, conversation: { kind: "group", id: group }, route: { agentId: "main", accountId: "default", routeSessionKey: sessionKey }, reply: { to: "+60333333333", originatingTo: group }, message: { rawBody: album ? "" : "Estimate only. Do not save anything." }, extra: { CommandAuthorized: true } });
-  const deliver = async payload => { replies.push(payload); return { visibleReplySent: true }; };
+  // Match the published @openclaw/whatsapp 2026.7.1 delivery boundary:
+  // dist/monitor-DD8bXohk.js resolveWhatsAppDeliverablePayload rejects isError,
+  // isReasoning and isCompactionNotice before sending. The outbound adapter in
+  // dist/channel-BWp7h1uY.js independently drops isError too. A raw collector
+  // missed this rule and falsely treated queued technical errors as delivered.
+  const deliver = async payload => {
+    if (payload.isError === true || payload.isReasoning === true || payload.isCompactionNotice === true) return { visibleReplySent: false };
+    replies.push(payload);
+    return { visibleReplySent: true };
+  };
   const firstRun = dispatchReplyWithBufferedBlockDispatcher({ ctx, cfg: config, dispatcherOptions: { deliver } });
   if (!simultaneous && !album && !unboundWrite) await firstApiStarted;
   const secondRun = collection ? Promise.resolve(null) : dispatchReplyWithBufferedBlockDispatcher({ ctx: secondCtx, cfg: config, dispatcherOptions: { deliver } });

@@ -544,7 +544,7 @@ describe("pinned OpenClaw WhatsApp photo handoff", () => {
     // The SDK queues its own terminal failure after lifecycle/error. Only one
     // user-facing reply is allowed even if that core error would also be sent.
     expect(await h.emit("reply_payload_sending", { runId: "failed-estimator-run", kind: "final", payload: { text: "HTTP 503", isError: true } })).toMatchObject({ cancel: true });
-    expect(await h.emit("reply_payload_sending", { runId: "failed-estimator-run", kind: "final", payload: { text: TEMPORARY_FAILURE, channelData: { clawfitTerminalReply: "failed-estimator-run" } } })).toMatchObject({ payload: { text: TEMPORARY_FAILURE, isError: true } });
+    expect(await h.emit("reply_payload_sending", { runId: "failed-estimator-run", kind: "final", payload: { text: TEMPORARY_FAILURE, channelData: { clawfitTerminalReply: "failed-estimator-run" } } })).toMatchObject({ payload: { text: TEMPORARY_FAILURE, isError: false } });
     expect(await h.emit("reply_payload_sending", { runId: "failed-estimator-run", kind: "final", payload: { text: TEMPORARY_FAILURE, channelData: { clawfitTerminalReply: "failed-estimator-run" } } })).toMatchObject({ cancel: true });
     await app.close();
   });
