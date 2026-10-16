@@ -89,11 +89,14 @@ export async function healthFetch<T = unknown>(config: HealthPluginConfig, path:
     ? path.replace("/v1/", "/v1/household/") : path;
 
   try {
+    // Cancellation must not replace the request deadline. Nutrition includes
+    // bounded model recovery; allow upload/response overhead beyond its 60s budget.
+    const timeout = AbortSignal.timeout(operation === "nutrition_estimate" ? 75_000 : 30_000);
     response = await (options.fetchImpl ?? fetch)(new URL(requestPath, apiUrl), {
       method: options.method ?? "GET",
       headers,
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-      signal: options.signal ?? AbortSignal.timeout(30_000),
+      signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
     });
   } catch {
     diagnostic("network_error");

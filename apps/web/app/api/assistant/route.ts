@@ -29,6 +29,8 @@ const actionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("edit"), pendingId: z.string().uuid(), patch: mealPatchSchema }),
 ]);
 
+export const maxDuration = 90;
+
 export async function POST(request: Request) {
   if (!isSameOrigin(request)) return NextResponse.json({ error: "Cross-origin requests are not allowed" }, { status: 403 });
 

@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { isMealLogConfirmation, isNoSaveRequest, isFallbackNotice, TEMPORARY_FAILURE } from "./confirmation.js";
 import type { MediaAuthorizationContext } from "./media-resolver.js";
 import { isNutritionSourceQuestion, NUTRITION_BASIS, nutritionReply, type ReplyEstimate } from "./nutrition-reply.js";
+import { isCheckIn, CHECK_IN_REPLY, currentMessageContext } from "./current-message.js";
 
 export { TEMPORARY_FAILURE } from "./confirmation.js";
 export const MEDIA_FAILURE = "I couldn't access that photo safely. Please resend it in this chat; I won't retry this image in this turn.";
@@ -83,7 +84,7 @@ export class InboundTurns {
       const turn: InboundTurn = {
         sessionKey, senderId, conversationId, messageId,
         accountId,
-        text: msg.BodyForCommands ?? msg.RawBody ?? "",
+        text: msg.RawBody ?? msg.BodyForCommands ?? "",
         paths,
         hasImageAttachment: paths.length > 0 || Boolean(event.images?.length)
           || Boolean(msg.MediaType?.startsWith("image/"))
@@ -96,17 +97,31 @@ export class InboundTurns {
       this.state.turns.push(turn);
       this.diagnostic("turn_captured", turn, { hasDispatchRun: Boolean(event.runId), canDeliver: turn.canDeliver, sendAllowed: event.sendPolicy === "allow", suppressed: Boolean(event.suppressUserDelivery), routed: Boolean(event.shouldRouteToOriginating) });
       if (event.runId) this.bind(event.runId, turn);
+      if (!turn.hasImageAttachment && isCheckIn(turn.text) && turn.canDeliver) {
+        const queued = context.dispatcher.sendFinalReply({ text: CHECK_IN_REPLY, isError: false });
+        if (queued) {
+          turn.delivered = true;
+          turn.closed = true;
+          context.recordProcessed?.("completed", { reason: "clawfit-check-in" });
+          context.markIdle?.("clawfit-check-in");
+          return { handled: true, queuedFinal: true, counts: { tool: 0, block: 0, final: 1 } };
+        }
+      }
     });
     api.on("before_prompt_build", (_event, context) => {
       this.prune();
       // Memory flushes reuse the user session/sender but are separate runs with
       // filesystem-only tools. They must never consume a pending user grant.
       if (context.trigger && context.trigger !== "user") return;
-      if (!context.runId || this.state.runs.has(context.runId) || this.state.rejectedRuns.has(context.runId)) return; // retain across model failover
-      const candidates = this.state.turns.filter(t => !t.closed && !t.runId && t.sessionKey === context.sessionKey
-        && t.senderId === context.senderId && t.conversationId === (context.chatId ?? context.channelId));
-      if (candidates.length === 1 && candidates[0]) this.bind(context.runId, candidates[0]);
-      else this.diagnostic("run_unbound", undefined, { candidateCount: candidates.length, hasSession: Boolean(context.sessionKey), hasSender: Boolean(context.senderId), hasConversation: Boolean(context.chatId ?? context.channelId) });
+      if (!context.runId || this.state.rejectedRuns.has(context.runId)) return;
+      if (!this.state.runs.has(context.runId)) {
+        const candidates = this.state.turns.filter(t => !t.closed && !t.runId && t.sessionKey === context.sessionKey
+          && t.senderId === context.senderId && t.conversationId === (context.chatId ?? context.channelId));
+        if (candidates.length === 1 && candidates[0]) this.bind(context.runId, candidates[0]);
+        else this.diagnostic("run_unbound", undefined, { candidateCount: candidates.length, hasSession: Boolean(context.sessionKey), hasSender: Boolean(context.senderId), hasConversation: Boolean(context.chatId ?? context.channelId) });
+      }
+      const turn = this.state.runs.get(context.runId);
+      if (turn && !turn.closed) return { appendContext: currentMessageContext(turn.text, turn.paths.length) };
     }, { priority: 200 });
     api.on("before_tool_call", async (event, context) => {
       this.prune();

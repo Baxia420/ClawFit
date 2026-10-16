@@ -8,8 +8,8 @@ pairing change, or new external media source is required by this release.
 
 The read-only Google nutrition request can retry once for HTTP 408, 429, 500,
 502, 503 or 504, a network TypeError, or a timeout. Retries wait 500–999 ms with
-jitter, respect Retry-After up to two seconds, and share a 22-second deadline
-across configured models. Each HTTP attempt has at most 12 seconds. Long quota
+jitter, respect Retry-After up to two seconds, and share a 60-second deadline
+across configured models. Each HTTP attempt has at most 45 seconds. Long quota
 cooldowns, credential/client errors, and malformed or blocked generation are not
 retried on the same model. Existing configured fallbacks may still be tried
 within the shared deadline. Meal writes are never part of this retry loop.

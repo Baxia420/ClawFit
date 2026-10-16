@@ -31,7 +31,7 @@ it("replays the pinned host loader, real inbound finalizer and tool wrapper acro
   const result = JSON.parse(line!.slice("CLAWFIT_REPLAY_RESULT=".length));
   expect(result).toMatchObject({ runtimeVersion: "2026.7.1-2", storedInInboundCache: true, distinctRegistrations: true, factoryHasMedia: false, factoryHasRun: false, dispatchHasRun: false, requestCount: 1, exactBytes: true, blocked: true, directWrite: { error: "meal_write_blocked", retryable: false }, stale: { error: "unauthorized_media", retryable: false }, safeDiagnostics: true });
   expect(result.results).toMatchObject([{ estimate: { label: "Original photo estimate" } }, { estimate: { label: "Original photo estimate" } }]);
-  expect(result.hooks).toEqual(expect.arrayContaining(["reply_dispatch", "before_prompt_build", "before_tool_call", "reply_payload_sending"]));
+  expect(result.hooks).toEqual(expect.arrayContaining(["reply_dispatch", "before_prompt_build", "before_tool_call", "reply_payload_sending", "before_agent_finalize"]));
 });
 
 it.each([

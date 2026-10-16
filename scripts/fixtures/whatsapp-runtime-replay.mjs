@@ -35,7 +35,7 @@ const { saveMediaStream } = await import(pathToFileURL(require.resolve("openclaw
 const group = "120363000000000000@g.us", sender = "+60111111111";
 const sessionKey = `agent:main:whatsapp:group:${group}`;
 const pluginRoot = path.resolve(import.meta.dirname, "../../packages/openclaw-health");
-const config = { plugins: { allow: ["clawfit-health"], slots: { memory: "none" }, load: { paths: [pluginRoot] }, entries: { "clawfit-health": { enabled: true, config: { allowedGroupIds: [group] } } } } };
+const config = { plugins: { allow: ["clawfit-health"], slots: { memory: "none" }, load: { paths: [pluginRoot] }, entries: { "clawfit-health": { enabled: true, hooks: { allowConversationAccess: true }, config: { allowedGroupIds: [group] } } } } };
 const logs = [];
 const logger = { info: value => logs.push(value), warn: value => logs.push(value), error: value => logs.push(value), debug: () => {} };
 const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jF9sAAAAASUVORK5CYII=", "base64");
@@ -94,6 +94,9 @@ try {
     await entry.subscription.handle({ runId, stream: "lifecycle", data: { phase: "end" } });
   }
   const stale = await tool.execute("collection-call-1", grants.get("collection-call-1"));
+  const checkInReplies = [];
+  const checkIn = await hooks.runReplyDispatch({ ctx: { ...ctx, MessageSid: "check-in", MessageSidFull: "check-in", RawBody: "@Clawfit are you okay?", BodyForCommands: "@Clawfit are you okay?", MediaPath: undefined, MediaPaths: [], MediaUrl: undefined, MediaUrls: [], MediaType: undefined, MediaTypes: [] }, sessionKey, inboundAudio: false, sendPolicy: "allow", shouldRouteToOriginating: false, shouldSendToolSummaries: false }, { cfg: config, dispatcher: { sendFinalReply: payload => { checkInReplies.push(payload); return true; } } });
+  if (!checkIn?.handled || checkInReplies.length !== 1 || !checkInReplies[0].text.includes("receiving your messages")) throw new Error("Check-in reached the model path");
   const mediaLogs = logs.filter(value => String(value).includes("[clawfit-media]"));
   const output = {
     runtimeVersion: JSON.parse(await readFile(path.join(dist, "../package.json"), "utf8")).version,

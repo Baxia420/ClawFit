@@ -55,6 +55,7 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(process.cwd(), "scri
   await writeFile(path.join(fixture, "openclaw/policy.json"), JSON.stringify(policy));
   await writeFile(path.join(fixture, "state/.env"), `HEALTH_API_URL=${endpoint}\nHEALTH_API_OPENCLAW_TOKEN=${token}\nOPENCLAW_GATEWAY_TOKEN=${token}\nCLAWFIT_WHATSAPP_ALLOW_FROM=+60123456789\n`);
   await writeFile(path.join(fixture, "state/openclaw.json"), JSON.stringify({
+    plugins: { entries: { "clawfit-health": { hooks: { allowConversationAccess: true } } } },
     models: { providers: { google: { api: "google-generative-ai", baseUrl: "https://generativelanguage.googleapis.com/v1beta", models: [{ id: "fake-model", api: "google-generative-ai", baseUrl: "https://generativelanguage.googleapis.com/v1beta" }] } } },
     agents: { defaults: { compaction: { memoryFlush: { enabled: false } }, model: { primary: "google/fake-model", fallbacks: [] } } },
     gateway: { mode: "local", bind: "loopback", auth: { mode: "token", token: "${OPENCLAW_GATEWAY_TOKEN}" }, remote: { token: "${OPENCLAW_GATEWAY_TOKEN}" } },

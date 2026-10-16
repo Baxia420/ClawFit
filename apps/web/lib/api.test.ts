@@ -9,6 +9,23 @@ vi.mock("../auth", () => ({
 }));
 
 describe("web Health API client", () => {
+  it("retains the nutrition deadline when the caller supplies cancellation", async () => {
+    vi.stubEnv("HEALTH_API_WEB_TOKEN", "test-machine-token");
+    const deadline = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+    const caller = new AbortController();
+    let outgoing: AbortSignal | null | undefined;
+    vi.stubGlobal("fetch", async (_url: unknown, init: RequestInit) => {
+      outgoing = init.signal;
+      return Response.json({ status: "ok" });
+    });
+    await healthApiRequest("/v1/nutrition/estimate", { useMachineToken: true, signal: caller.signal });
+    expect(timeout).toHaveBeenCalledWith(75_000);
+    expect(outgoing?.aborted).toBe(false);
+    deadline.abort();
+    expect(outgoing?.aborted).toBe(true);
+    expect(caller.signal.aborted).toBe(false);
+  });
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
