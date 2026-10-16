@@ -155,7 +155,11 @@ function createSenderTool<TParams extends TSchema>(
                 toolContext, turns, ...(turn ? { turn } : {}),
                 ...(signal ? { signal } : {}),
               });
-              if (turn && (options.name === "log_meal" || options.name === "confirm_pending_meal") && result && typeof result === "object" && !("error" in result)) turn.mealLogged = true;
+              if (turn && (options.name === "log_meal" || options.name === "confirm_pending_meal") && result && typeof result === "object" && !("error" in result)) {
+                const outcome = result as { id?: unknown; status?: unknown; confirmedMeals?: unknown[] };
+                turn.mealPartiallyLogged = outcome.status === "partial_success";
+                turn.mealLogged = !turn.mealPartiallyLogged && (typeof outcome.id === "string" || (outcome.status === "confirmed" && !!outcome.confirmedMeals?.length));
+              }
               return result;
             } catch (err) {
               if (err instanceof HealthApiResponseError || err instanceof HealthApiNetworkError || options.name === "estimate_nutrition") {

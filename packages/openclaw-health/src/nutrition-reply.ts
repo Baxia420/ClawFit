@@ -21,12 +21,13 @@ export function readReplyEstimate(value: unknown): ReplyEstimate | undefined {
 export const NUTRITION_BASIS = "Estimated from the supplied photos and description; no online lookup or manufacturer verification was performed. Unstated serving weights are assumptions.";
 
 export function isNutritionSourceQuestion(text: string): boolean {
-  return /\b(nutrition(?:al)?|calori(?:e|es)|macros?|values?|numbers?|estimat\w*|calculat\w*)\b/i.test(text)
+  return /\b(?:did|have)\s+you\b|\bwhere\b.*\bfrom|\bhow\b.*\bcalculat|\b(?:source|basis)\s+(?:for|of)\b/i.test(text)
+    && /\b(nutrition(?:al)?|calori(?:e|es)|macros?|values?|numbers?|estimat\w*|calculat\w*)\b/i.test(text)
     && /\b(online|sources?|databases?)\b|look(?:ed)?\s*up|where\b.*\bfrom|how\b.*\bcalculat/i.test(text)
     && !/\b(log|save|delete|remove|correct|change|update)\b/i.test(text);
 }
 
-export function nutritionReply(estimate: ReplyEstimate, logged: boolean, noSave: boolean): string {
+export function nutritionReply(estimate: ReplyEstimate, logged: boolean, noSave: boolean, partiallyLogged = false): string {
   const { calories, macros } = estimate;
   return [
     estimate.label,
@@ -35,6 +36,6 @@ export function nutritionReply(estimate: ReplyEstimate, logged: boolean, noSave:
     `Confidence: ${estimate.confidence}.`,
     ...estimate.uncertaintyReasons.map(reason => `Uncertainty: ${reason}`),
     "Photo/text estimate; not verified against an online product source.",
-    logged ? "Logged." : noSave ? "Not logged." : "Not logged. Reply yes to log it.",
+    partiallyLogged ? "Some meals were logged; others remain pending. Check your meals before retrying." : logged ? "Logged." : noSave ? "Not logged." : "Not logged. Reply yes to log it.",
   ].join("\n");
 }

@@ -14,6 +14,7 @@ it("uses only API values and always preserves range, confidence, assumptions and
   expect(nutritionReply(estimate, false, true)).not.toContain("Reply yes");
   expect(nutritionReply(estimate, true, false)).toContain("\nLogged.");
   expect(nutritionReply(estimate, true, false)).not.toContain("Not logged");
+  expect(nutritionReply(estimate, false, false, true)).toContain("Some meals were logged; others remain pending");
 });
 
 it("validates API responses before preparing a reply", () => {
@@ -29,5 +30,6 @@ it("answers the observed source question truthfully without intercepting write r
   expect(isNutritionSourceQuestion("How did you calculate the calories?")).toBe(true);
   expect(isNutritionSourceQuestion("Save the nutrition values I found online")).toBe(false);
   expect(isNutritionSourceQuestion("Look up my workout plan")).toBe(false);
+  expect(isNutritionSourceQuestion("Can you look up nutritional values online?")).toBe(false);
   expect(NUTRITION_BASIS).toContain("no online lookup");
 });

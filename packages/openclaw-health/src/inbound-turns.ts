@@ -30,6 +30,7 @@ export interface InboundTurn {
   photoDraft?: Promise<unknown>;
   replyEstimate?: ReplyEstimate;
   mealLogged?: boolean;
+  mealPartiallyLogged?: boolean;
   dispatcher: PluginHookReplyDispatchContext["dispatcher"];
   canDeliver: boolean;
   closed?: boolean;
@@ -195,7 +196,7 @@ export class InboundTurns {
       }
       if (turn.delivered && (turn.replyEstimate || isNutritionSourceQuestion(turn.text))) return { cancel: true, reason: "clawfit-nutrition-reply-already-delivered" };
       turn.delivered = true;
-      if (turn.replyEstimate) return { payload: { text: nutritionReply(turn.replyEstimate, !!turn.mealLogged, isNoSaveRequest(turn.text)), isError: false } };
+      if (turn.replyEstimate) return { payload: { text: nutritionReply(turn.replyEstimate, !!turn.mealLogged, isNoSaveRequest(turn.text), !!turn.mealPartiallyLogged), isError: false } };
       // Explain the actual estimator path instead of letting the model invent
       // an online lookup, database access, or a rationale for assumed weights.
       if (isNutritionSourceQuestion(turn.text)) return { payload: { text: NUTRITION_BASIS, isError: false } };

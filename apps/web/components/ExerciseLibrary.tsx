@@ -30,6 +30,7 @@ export function ExerciseLibrary({ onSelect, initialQuery = "" }: { initialQuery?
     favoriteRequests.current.add(exercise.id); setSavingFavorites(new Set(favoriteRequests.current)); setActionError("");
     try {
       await request("/api/exercise-library", { action: "favorite", id: exercise.id, favorite: !exercise.favorite });
+      if (scope === "favorites" && exercise.favorite && page?.items.length === 1 && offset > 0) setOffset(Math.max(0, offset - page.limit));
       setRevision(n => n + 1);
     } catch (error) { setActionError(error instanceof Error ? error.message : "Could not update favorite."); }
     finally { favoriteRequests.current.delete(exercise.id); setSavingFavorites(new Set(favoriteRequests.current)); }
