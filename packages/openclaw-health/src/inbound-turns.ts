@@ -341,6 +341,7 @@ export class InboundTurns {
     if (!turn) return "Missing trusted current-message context; no draft or meal was changed.";
     if (turn.closed) return "This inbound turn has ended; this operation was blocked.";
     if (turn.failure) return turn.failure.message;
+    if (toolName === "delete_meal" && /\b(?:drafts?|pending|unconfirmed)\b/i.test(turn.text)) return "This request refers to a pending draft. Logged-meal deletion was blocked; please request draft cancellation.";
     if (toolName === "delete_pending_meal") return isDraftCancellationRequest(turn.text) ? undefined : "Please explicitly request cancellation of the pending meal draft first.";
     if (turn.referencedOtherSender && !explicitMealRecipient(turn.text) && ["create_pending_meal", "log_meal"].includes(toolName)) return "Please name the person this meal is for before saving a draft or logging it.";
     if (isNoSaveRequest(turn.text)) return turn.replyEstimate

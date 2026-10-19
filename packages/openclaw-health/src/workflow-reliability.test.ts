@@ -95,6 +95,14 @@ it("does not claim cancellation when only a read happened", async () => {
   expect((await h.final("I cleared it")).payload.text).toContain("couldn't verify a completed draft cancellation");
 });
 
+it("blocks the logged-meal delete tool for an explicit draft request", async () => {
+  const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
+  const h = await harness("Delete the pending draft");
+  expect(await h.call("delete_meal", { id: draftId })).toMatchObject({ block: true });
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(h.replies[0].text).toContain("Logged-meal deletion was blocked");
+});
+
 it("does not offer logging without a matching active draft receipt", async () => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(Response.json({ estimate })));
   const h = await harness("Estimate this meal"); await h.call("estimate_nutrition", { text: "Lunch" });
