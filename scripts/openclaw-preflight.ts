@@ -3,7 +3,8 @@ import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { loadClawFitEnv } from "./load-env.js";
-import { ensureGatewayDirectories, readGatewayConfig } from "./gateway-state.js";
+import { ensureGatewayDirectories, gatewayPaths, readGatewayConfig } from "./gateway-state.js";
+import { validateGoogleProfiles } from "./google-credential-profiles.js";
 import { runOpenClaw } from "./openclaw-cli.js";
 import { validateGatewaySearch, GOOGLE_API, GOOGLE_BASE_URL, OPENCLAW_VERSION, parseAllowlist } from "./openclaw-configuration.js";
 import { inspectHealthReadiness } from "./health-readiness.js";
@@ -27,10 +28,15 @@ await check("Google-native transport and registered primary/fallbacks", () => {
   const parsed = z.object({
     models: z.object({ providers: z.object({ google: z.object({ api: z.literal(GOOGLE_API), baseUrl: z.literal(GOOGLE_BASE_URL),
       models: z.array(z.object({ id: z.string(), api: z.literal(GOOGLE_API), baseUrl: z.literal(GOOGLE_BASE_URL) })) }) }) }),
-    agents: z.object({ defaults: z.object({ model: z.object({ primary: z.string(), fallbacks: z.array(z.string()).optional() }) }) }),
+    agents: z.object({ defaults: z.object({ model: z.object({ primary: z.string().regex(/^google\/gemini-/), fallbacks: z.array(z.string()).max(0) }) }) }),
   }).parse(config);
   const ids = new Set(parsed.models.providers.google.models.map(m => `google/${m.id}`));
   if (![parsed.agents.defaults.model.primary, ...(parsed.agents.defaults.model.fallbacks ?? [])].every(id => ids.has(id))) throw new Error("registry");
+  if ([...ids].some(id => /^google\/gemma-/i.test(id))) throw new Error("Gemma must not remain registered.");
+});
+await check("Google credential profiles and bounded same-model failover", async () => {
+  const count = await validateGoogleProfiles(config, resolve(gatewayPaths().stateDir, "agents/main/agent"));
+  console.log(`Google credential profiles: ${count}. Configuration checked; live quota failover is not tested here.`);
 });
 await check("Canonical gateway authentication and loopback binding", () => {
   z.object({ gateway: z.object({ mode: z.literal("local"), bind: z.literal("loopback"), auth: z.object({ mode: z.literal("token"), token: z.literal("${OPENCLAW_GATEWAY_TOKEN}") }), remote: z.object({ token: z.literal("${OPENCLAW_GATEWAY_TOKEN}") }) }) }).parse(config);

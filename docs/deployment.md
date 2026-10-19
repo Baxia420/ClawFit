@@ -273,6 +273,7 @@ Credentials are partitioned strictly by client role:
 | `DATABASE_URL` (pooled) | Yes (Neon) | **NEVER** | **NEVER** | **NEVER** |
 | `DATABASE_DIRECT_URL` (unpooled) | Operator / CI only | **NEVER** | **NEVER** | **NEVER** |
 | `GEMINI_API_KEY` | Yes | Yes (for OpenClaw agent turns) | **NEVER** | **NEVER** |
+| `GEMINI_API_KEY_1` … `GEMINI_API_KEY_8` | Optional pool | Optional pool | **NEVER** | **NEVER** |
 | `NUTRITION_MODEL_PRIMARY` | Yes | Optional | **NEVER** | **NEVER** |
 | `CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS` | Yes | Yes | **NEVER** | **NEVER** |
 
@@ -587,7 +588,7 @@ The nutrition dashboard retains strict unknown totals and shows known subtotals 
 
 The repository previously added custom Google model rows without an explicit API or base URL. The pinned OpenClaw `2026.7.1-2` configured-model fallback can select `openai-responses` when transport metadata is absent. The corrected provider and each selected row specify `google-generative-ai` and Google's `v1beta` endpoint. The regression test resolves these rows through the installed pinned OpenClaw resolver without network access.
 
-Model IDs enter runtime configuration only after an authenticated smoke report verifies the model. `models:smoke` checks text generation, function calling, and image input, including the previously unprobed candidate. Probe failures and absent catalog entries are distinguished. General fallbacks use only verified low-cost candidates; nutrition primary/fallback are distinct verified image-capable Gemini candidates. No untested model is presumed usable. The report expires after seven days.
+Model IDs enter runtime configuration only after an authenticated smoke report verifies the model. `models:smoke` checks text generation, function calling, and image input. Probe failures and absent catalog entries are distinguished. General model fallbacks are disabled; the Gateway uses native Google credential profiles to retry the same model. Gemma is excluded from probes and generated routing, including legacy smoke reports. Nutrition primary/fallback remain distinct verified image-capable Gemini candidates. No untested model is presumed usable. The report expires after seven days. See [credential failover](google-credential-failover.md) for protected slots, native retry limits, and the separate API rollout.
 
 `openclaw:setup` no longer registers models or sets nutrition-model defaults. The API requires explicit nutrition-model environment values; without a model, `/ready` reports the estimator as unconfigured. Gateway environment changes do not update Render. Check Render's existing `NUTRITION_MODEL_PRIMARY` and `NUTRITION_MODEL_FALLBACK` against `.model-smoke.json` separately; preserve existing values until evidence supports a change. API deployments for the nutrition dashboard do not justify rotating any secrets.
 
@@ -631,7 +632,7 @@ To enable search on CIA, run as the service user from `/home/clawfit/app`:
 pnpm models:smoke --web-search
 ```
 
-This explicitly makes real Google requests, including one grounding probe for an available low-cost Gemini candidate. A successful response must include text and web-source metadata. The report records grounding independently of ordinary text, tool and image support. After reviewing its result, use the existing stop/configure/restart upgrade sequence. `pnpm models:configure` adds `web_search` only when the fresh report contains a verified low-cost grounding model, and writes `plugins.entries.google.config.webSearch.model` explicitly. It preserves provider credentials. Older reports without grounding evidence leave search disabled. The generated search configuration limits timeout to 20 seconds and results to five.
+This explicitly makes real Google requests, including one grounding probe for an available low-cost Gemini candidate. A successful response must include text and web-source metadata. The report records grounding independently of ordinary text, tool and image support. After reviewing its result, use the existing stop/configure/restart upgrade sequence. `pnpm models:configure` adds `web_search` only when the fresh report contains a verified low-cost grounding model, and writes `plugins.entries.google.config.webSearch.model` explicitly. Google credentials are managed through protected environment references as described in the credential-failover guide. Older reports without grounding evidence leave search disabled. The generated search configuration limits timeout to 20 seconds and results to five. Web-search tool credential failover is separate from agent-generation failover and is not covered by the Gateway profile replay.
 
 Preflight checks that the enabled search tool, Google plugin, provider and explicit registered model agree. Automated tests fake the grounding transport and verify actual host tool availability without making model requests. After restart, ask for a current public fact with its source in WhatsApp and confirm `web_search` runs and the reply has citations. That live search acceptance remains separate from `openclaw:preflight --live`, which only tests general Gateway generation. Do not use search to reconstruct historical meals.
 

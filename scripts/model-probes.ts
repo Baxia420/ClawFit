@@ -9,8 +9,6 @@ const responseSchema = z.object({ candidates: z.array(z.object({ content: z.obje
   text: z.string().optional(), functionCall: z.object({ name: z.string(), args: z.record(z.string(), z.unknown()).optional() }).optional(),
 })).optional() }).optional(), groundingMetadata: z.object({ groundingChunks: z.array(z.object({ web: z.object({ uri: z.url() }).optional() })).optional() }).optional() })).optional() });
 export const modelProbes = [
-  { label: "Gemma 4 26B A4B", pattern: /gemma-4.*26b.*a4b/i, image: false },
-  { label: "Gemma 4 31B", pattern: /gemma-4.*31b/i, image: false },
   { label: "Gemini 3.5 Flash-Lite", pattern: /gemini-3\.5.*flash[- _]?lite/i, image: true },
   { label: "Gemini 3.6 Flash", pattern: /gemini-3\.6.*flash/i, image: true },
   { label: "Gemini 3.7 Flash", pattern: /gemini-3\.7.*flash/i, image: true },

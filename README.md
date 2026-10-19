@@ -60,9 +60,9 @@ pnpm nutrition:manual     explicit real-API nutrition test
 
 ## Google models and OpenClaw
 
-1. Put `GEMINI_API_KEY` in the root `.env`.
-2. Run `pnpm models:smoke`. It reads the authenticated Google `models.list` catalog, makes no more than one minimal request per matching candidate, tests tool calling on default-model candidates, and writes a non-secret ignored report to `.model-smoke.json`.
-3. Run `pnpm models:configure`. It refuses to change OpenClaw unless a default model with working tool calling and a strong nutrition model were verified.
+1. Put `GEMINI_API_KEY` in the protected Gateway environment (root `.env` for local development). Optional `GEMINI_API_KEY_1` through `GEMINI_API_KEY_8` add keys from distinct, operator-verified projects. Configure the Health API's credentials separately. See [credential failover and staged rollout](docs/google-credential-failover.md).
+2. Run `pnpm models:smoke` when model verification is needed. It reads the authenticated Google catalog, makes small text/tool/image probes, and writes an ignored report to `.model-smoke.json`. It does not probe Gemma. `--credential backup-1` checks that slot separately without replacing the primary report.
+3. Run `pnpm models:configure` with the Gateway stopped. It requires fresh model evidence, registers protected credential references with the pinned host, and disables general model fallbacks. Gemini nutrition candidates still need image-input evidence.
 4. Copy the reported `NUTRITION_MODEL_PRIMARY` and optional fallback IDs into `.env`.
 5. Run `pnpm openclaw:setup` to build/load the local plugin, apply the least-privilege tool policy, and synchronize the required Gateway variables to `%USERPROFILE%\.openclaw\.env` without printing their values. It is safe to rerun after plugin changes.
 6. Restart the API and run `openclaw gateway restart`.

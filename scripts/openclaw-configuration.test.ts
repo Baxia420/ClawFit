@@ -22,11 +22,11 @@ function report(): SmokeReport {
 describe("Gateway model evidence and routing", () => {
   it("registers only selected verified models with Google-native transport at both levels", () => {
     const config = buildModelConfiguration(report());
-    expect(config.fallbacks).toEqual([`google/${gemma}`]);
+    expect(config.fallbacks).toEqual([]);
     expect(config.provider.api).toBe("google-generative-ai");
     expect(config.provider.baseUrl).toBe("https://generativelanguage.googleapis.com/v1beta");
-    expect(config.provider.apiKey).toBe("${GEMINI_API_KEY}");
-    expect(config.provider.models.map(m => m.id)).toEqual([lite, gemma, strong]);
+    expect(config.provider).not.toHaveProperty("apiKey");
+    expect(config.provider.models.map(m => m.id)).toEqual([lite, strong]);
     expect(config.provider.models.every(m => m.api === config.provider.api && m.baseUrl === config.provider.baseUrl)).toBe(true);
     expect(buildModelConfiguration(report())).toEqual(config);
   });
@@ -39,13 +39,13 @@ describe("Gateway model evidence and routing", () => {
     expect(config.fallbacks).toEqual([]);
     expect(config.nutrition).toEqual([strong]);
   });
-  it("rejects stale evidence, unverified primary, heavy general fallback and untested image routing", () => {
+  it("rejects stale evidence, unverified or Gemma primary and untested image routing", () => {
     const stale = report(); stale.checkedAt = "2020-01-01T00:00:00Z";
     expect(() => buildModelConfiguration(stale)).toThrow("stale");
     const bad = report(); bad.selected.defaultModel = "unknown";
     expect(() => buildModelConfiguration(bad)).toThrow("default");
-    const heavy = report(); heavy.selected.generalFallback = strong; heavy.results["Gemini 3.6 Flash"]!.toolCalling = "pass";
-    expect(() => buildModelConfiguration(heavy)).toThrow("low-cost");
+    const unsupported = report(); unsupported.selected.defaultModel = gemma;
+    expect(() => buildModelConfiguration(unsupported)).toThrow("low-cost");
     const image = report(); image.results["Gemini 3.6 Flash"]!.imageInput = "not-tested";
     expect(() => buildModelConfiguration(image)).toThrow("image-input");
   });
