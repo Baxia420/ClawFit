@@ -5,6 +5,7 @@
     "get_pending_meal",
     "confirm_pending_meal",
     "update_pending_meal",
+    "delete_pending_meal",
     "log_meal",
     "update_meal",
     "delete_meal",

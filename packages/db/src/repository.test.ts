@@ -296,6 +296,19 @@ describe("HealthRepository", () => {
     await expect(repository.confirmPendingMeal(primaryUserId, pending.id, { scopeKey: webScope })).rejects.toThrow("cancelled");
   });
 
+  it.each([true, false])("serializes cancellation and confirmation of one draft (cancel first: %s)", async cancelFirst => {
+    const pending = await repository.createPendingMeal(primaryUserId, { ...baseMeal, scopeKey: webScope, idempotencyKey: "pending-race-test", expiresInSeconds: 3600 });
+    const cancel = () => repository.cancelPendingMeal(primaryUserId, pending.id, webScope);
+    const confirm = () => repository.confirmPendingMeal(primaryUserId, pending.id, { scopeKey: webScope });
+    const outcomes = await Promise.allSettled(cancelFirst ? [cancel(), confirm()] : [confirm(), cancel()]);
+    expect(outcomes.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter(result => result.status === "rejected")).toHaveLength(1);
+    const stored = await repository.getPendingMeal(primaryUserId, pending.id, webScope);
+    expect(Boolean(stored.cancelledAt)).not.toBe(stored.confirmed);
+    if (stored.confirmed) expect(stored.mealId).toBeTruthy();
+    else expect(stored.mealId).toBeNull();
+  });
+
   it("isolates pending meals across web and WhatsApp scopes", async () => {
     const webPending = await repository.createPendingMeal(primaryUserId, { ...baseMeal, scopeKey: webScope, idempotencyKey: "shared-request-key", expiresInSeconds: 3600 });
     const whatsappPending = await repository.createPendingMeal(primaryUserId, { ...baseMeal, scopeKey: whatsappScope, label: "WhatsApp draft", idempotencyKey: "shared-request-key", expiresInSeconds: 3600 });

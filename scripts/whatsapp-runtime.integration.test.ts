@@ -20,7 +20,7 @@ it("replays a three-photo collection through the real CLI compile-cache respawn"
   const line = stdout.split("\n").find(line => line.startsWith("CLAWFIT_CLI_RESULT="));
   expect(line, stdout).toBeDefined();
   const result = JSON.parse(line!.slice("CLAWFIT_CLI_RESULT=".length));
-  expect(result).toMatchObject({ stockCacheSeeded: true, readyCount: 2, dispatcherPatched: true, requestCount: 1, exactBytes: true, dispatchCount: 1, modelCalls: 4, writeRequestCount: 0 });
+  expect(result).toMatchObject({ stockCacheSeeded: true, readyCount: 2, dispatcherPatched: true, requestCount: 1, exactBytes: true, dispatchCount: 1, modelCalls: 2, writeRequestCount: 0 });
   expect(result.replies).toHaveLength(1);
 });
 
@@ -62,7 +62,7 @@ it.each([
   expect(result.dispatchCount).toBe(requests);
   expect(result.registryReplaced).toBe(true);
   expect(result.replies).toHaveLength(replies);
-  expect(result.modelCalls).toBe(requests * (flags.includes("--attempt-writes") ? 4 : 2));
+  expect(result.modelCalls).toBe(requests * 2);
   expect(result.writeRequestCount).toBe(0);
   for (const reply of result.replies) {
     expect(reply.text).not.toMatch(/9999|42 g|verified this online|Logged!/);

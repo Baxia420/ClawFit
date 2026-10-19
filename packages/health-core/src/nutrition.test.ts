@@ -67,7 +67,7 @@ describe("nutrition model boundary", () => {
     try {
       await expect(new NutritionEstimator({ generate }, ["primary", "fallback"]).estimate({ text: "meal" })).rejects.toBeInstanceOf(NutritionEstimationError);
       expect(generate).toHaveBeenCalledTimes(1);
-      expect(generate.mock.calls[0]?.[0]).toMatchObject({ deadline: 23_000 });
+      expect(generate.mock.calls[0]?.[0]).toMatchObject({ deadline: 12_000 });
     } finally { now.mockRestore(); }
   });
 });
@@ -85,4 +85,18 @@ it("reports only safe model failure categories, never raw provider content", () 
     { model: "invalid-model-id", category: "unknown" },
   ]);
   expect(JSON.stringify(error.diagnostics())).not.toContain("private");
+});
+
+
+it("reserves half the shared deadline for a slow primary's fallback", async () => {
+  const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+  const generate = vi.fn(async (request: { deadline?: number; model: string }) => {
+    if (request.model === "primary") { now.mockReturnValue(request.deadline!); throw new Error("timeout"); }
+    return valid;
+  });
+  try {
+    const result = await new NutritionEstimator({ generate }, ["primary", "fallback"]).estimate({ text: "meal" });
+    expect(result.fallbackUsed).toBe(true);
+    expect(generate.mock.calls.map(([request]) => request.deadline)).toEqual([12_000, 23_000]);
+  } finally { now.mockRestore(); }
 });

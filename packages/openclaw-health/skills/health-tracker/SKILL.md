@@ -27,7 +27,7 @@ Apply this skill when the user describes food, asks about nutrition, starts or l
 1. Call `find_food_preset` first for “usual”, “normal”, or named repeated foods.
 2. For food descriptions and photos needing nutrition estimation, call `estimate_nutrition` once for all foods in the current inbound message or album (all current trusted photo attachments are supplied automatically; the tool accepts no image paths, URIs or bytes) to route through the dedicated strong model. Include all visible details from photos, packages, or descriptions. If both a product package and nutrition label are provided, inspect both and prioritize printed nutrition label values. Never calculate or invent calories/macros mentally.
    Nearby captionless companion photos from the same sender can form one collection, with one estimate and one draft. Separately captioned requests, other senders and later turns remain separate. Do not count each angle of the same food as another portion; use explicit user quantities.
-3. For ordinary estimates, persist an unconfirmed draft with `create_pending_meal`, then present it and wait for confirmation. For estimate-only requests or explicit instructions not to save, do not create or modify any draft or logged meal. The tool derives the peer/session scope; do not invent or pass a scope yourself.
+3. For ordinary estimates, persist an unconfirmed draft with `create_pending_meal`, then present it and wait for confirmation. For estimate-only requests or explicit instructions not to save, do not create or update drafts or logged meals. Permit a separately explicit request to cancel a pending draft. The tool derives the peer/session scope; do not invent or pass a scope yourself.
 4. To correct an unconfirmed draft before confirmation, call `update_pending_meal`. Never call `update_meal` for unconfirmed drafts.
 5. On user confirmation (“log it”, “log both”, “yes”, “save it”), call `confirm_pending_meal` directly. Do NOT re-run `estimate_nutrition`. For a single meal, “log it” confirms the pending draft; for multiple meals, “log both” confirms the active drafts.
 6. Once confirmed, subsequent corrections to the logged meal must use `update_meal` with the canonical `confirmedMealId` returned by `confirm_pending_meal`.
@@ -36,6 +36,8 @@ Apply this skill when the user describes food, asks about nutrition, starts or l
 Confidence: high means known quantities or packaged/home-cooked food; medium means identifiable food with portion/preparation uncertainty; low means restaurant food, hidden oil/sauce, or a visually ambiguous mixed dish. Low confidence requires a meaningful calorie range.
 
 For “what have I eaten today?” and daily totals, call `get_daily_nutrition` with today's local date in Asia/Kuala_Lumpur; never add totals mentally. Use `get_recent_meals` before ambiguous corrections or deletions.
+
+Cancel an unconfirmed draft with `delete_pending_meal` and `pendingDraftId`. Never send a draft ID to `delete_meal`. Report the returned cancellation state; a read or failed call is not a cancellation. Ask for an explicit recipient before saving a quoted-photo retry when ownership is unclear.
 
 ## Workout session behavior
 

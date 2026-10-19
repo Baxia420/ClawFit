@@ -10,6 +10,7 @@ export type SenderContext = {
   senderId?: string;
   conversationId?: string;
   mealFor?: string | undefined;
+  correlationId?: string;
 };
 
 type PendingScopeContext = {
@@ -31,7 +32,7 @@ export class HealthApiNetworkError extends Error {
   override name = "HealthApiNetworkError";
 
   constructor() {
-    super("ClawFit's health service is temporarily unavailable. Nothing was changed.");
+    super("ClawFit's health service is temporarily unavailable. Check your meals and drafts before retrying a write.");
   }
 }
 
@@ -69,8 +70,10 @@ export async function healthFetch<T = unknown>(config: HealthPluginConfig, path:
   // Fixed categories only: never log URLs, query strings, raw exceptions,
   // response bodies, sender identifiers, captions, or image payloads.
   const operation = path === "/v1/nutrition/estimate" ? "nutrition_estimate" : "health_request";
-  const diagnostic = (reason: "success" | "http_error" | "network_error" | "invalid_response", status?: number) => {
-    console.info(`[clawfit-api] ${JSON.stringify({ operation, reason, ...(status === undefined ? {} : { status }), durationMs: Math.round(performance.now() - start) })}`);
+  const diagnostic = (reason: "success" | "http_error" | "network_error" | "invalid_response", status?: number, errorCode?: string) => {
+    const code = errorCode && ["FORBIDDEN", "NOT_FOUND", "CONFLICT", "UNAUTHORIZED_GROUP", "UNRESOLVED_SENDER_IDENTITY", "INACTIVE_USER", "NUTRITION_UNAVAILABLE"].includes(errorCode) ? errorCode : undefined;
+    const correlationId = options.sender?.correlationId;
+    console.info(`[clawfit-api] ${JSON.stringify({ operation, reason, ...(status === undefined ? {} : { status }), ...(code ? { errorCode: code, route: requestPath.startsWith("/v1/household/") ? "household" : "self" } : {}), ...(correlationId && /^[a-f0-9]{16}$/.test(correlationId) ? { correlationId } : {}), durationMs: Math.round(performance.now() - start) })}`);
   };
 
   const headers: Record<string, string> = {
@@ -93,7 +96,7 @@ export async function healthFetch<T = unknown>(config: HealthPluginConfig, path:
       method: options.method ?? "GET",
       headers,
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-      signal: options.signal ?? AbortSignal.timeout(30_000),
+      signal: AbortSignal.any([AbortSignal.timeout(30_000), ...(options.signal ? [options.signal] : [])]),
     });
   } catch {
     diagnostic("network_error");
@@ -108,8 +111,8 @@ export async function healthFetch<T = unknown>(config: HealthPluginConfig, path:
     throw new HealthApiNetworkError();
   }
   if (!response.ok) {
-    diagnostic("http_error", response.status);
     const apiError = payload as { error?: { code?: string; message?: string } };
+    diagnostic("http_error", response.status, apiError.error?.code);
     throw new HealthApiResponseError(response.status, apiError.error?.code ?? "HEALTH_API_ERROR", apiError.error?.message ?? `Health API returned ${response.status}`);
   }
   const recipient = response.headers.get("x-clawfit-meal-recipient");

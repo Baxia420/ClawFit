@@ -10,9 +10,10 @@ import { resolveImagePayload, MediaResolutionError, type ResolvedImage } from ".
 import { inboundTurns, InboundTurns, MEDIA_FAILURE, TEMPORARY_FAILURE, type InboundTurn } from "./inbound-turns.js";
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-runtime";
 import { explicitMealRecipient } from "./meal-recipient.js";
+import { recordMealResult } from "./meal-receipts.js";
 import { readReplyEstimate, NUTRITION_BASIS } from "./nutrition-reply.js";
 
-const RECIPIENT_TOOLS = new Set(["create_pending_meal", "get_pending_meal", "confirm_pending_meal", "update_pending_meal", "log_meal", "get_meal", "get_recent_meals", "update_meal", "delete_meal", "get_daily_nutrition"]);
+const RECIPIENT_TOOLS = new Set(["create_pending_meal", "get_pending_meal", "confirm_pending_meal", "update_pending_meal", "delete_pending_meal", "log_meal", "get_meal", "get_recent_meals", "update_meal", "delete_meal", "get_daily_nutrition"]);
 
 const ConfigSchema = Type.Object({
   apiUrl: Type.Optional(Type.String({ default: "http://127.0.0.1:4000" })),
@@ -123,15 +124,16 @@ function createSenderTool<TParams extends TSchema>(
           const requestParams = rawParams;
           const turn = turns.forCall(toolContext, _toolCallId, options.name, requestParams);
           rawParams = turns.parametersForCall(requestParams, _toolCallId, options.name);
+          if (turn?.runId) sender.correlationId = createHash("sha256").update(turn.runId).digest("hex").slice(0, 16);
           if (RECIPIENT_TOOLS.has(options.name) && turn) sender.mealFor = explicitMealRecipient(turn.text);
           if (sender.mealFor === "unresolved-recipient") {
             const failure = { error: "ambiguous_meal_recipient", message: "Please name the person this meal is for. Nothing was changed.", retryable: false as const };
             turns.fail(turn, options.name, failure);
             return jsonResult(failure);
           }
-          if (turn?.failure && turn.failedTools.has(options.name)) return jsonResult(turn.failure);
-          if (options.name === "estimate_nutrition" && !Check(options.parameters, rawParams)) {
-            const failure = { error: "invalid_estimate_request", message: "I couldn't validate that estimate request. Please describe the meal again or resend its photo.", retryable: false as const };
+          if (turn?.failure) return jsonResult(turn.failure);
+          if ((options.name === "estimate_nutrition" || options.name === "delete_pending_meal") && !Check(options.parameters, rawParams)) {
+            const failure = { error: "invalid_estimate_request", message: options.name === "estimate_nutrition" ? "I couldn't validate that estimate request. Please describe the meal again or resend its photo." : "I couldn't validate the pending draft ID. Please check the draft before retrying.", retryable: false as const };
             turns.fail(turn, options.name, failure);
             return jsonResult(failure);
           }
@@ -141,7 +143,11 @@ function createSenderTool<TParams extends TSchema>(
             return jsonResult(failure);
           }
           const writeBlock = turns.writeBlock(turn, options.name);
-          if (writeBlock) return jsonResult({ error: "meal_write_blocked", message: writeBlock, retryable: false });
+          if (writeBlock) {
+            const failure = { error: "meal_write_blocked", message: writeBlock, retryable: false as const };
+            turns.fail(turn, options.name, failure);
+            return jsonResult(failure);
+          }
           const execute = async () => {
             try {
               if (options.name === "create_pending_meal" && turn?.estimation) {
@@ -160,16 +166,32 @@ function createSenderTool<TParams extends TSchema>(
                 turn.mealPartiallyLogged = outcome.status === "partial_success";
                 turn.mealLogged = !turn.mealPartiallyLogged && (typeof outcome.id === "string" || (outcome.status === "confirmed" && !!outcome.confirmedMeals?.length));
               }
+              if (turn) recordMealResult(turn, options.name, result);
+              if (turn && result && typeof result === "object" && "error" in result && typeof result.error === "string") {
+                const failure = { error: "meal_operation_rejected", message: result.error === "ambiguous_drafts"
+                  ? "More than one pending meal draft exists. Please specify which draft you want to use."
+                  : "I couldn't complete that meal operation. Please check the current meals, pending drafts, and recipient before retrying.", retryable: false as const };
+                turns.fail(turn, options.name, failure);
+              }
               return result;
             } catch (err) {
               if (err instanceof HealthApiResponseError || err instanceof HealthApiNetworkError || options.name === "estimate_nutrition") {
                 const message = err instanceof Error ? err.message : "";
                 const identityMessage = err instanceof HealthApiResponseError && /UNRESOLVED_SENDER_IDENTITY|INACTIVE_USER|UNAUTHORIZED_GROUP|MISSING_(?:SENDER|CONVERSATION)_IDENTITY/.test(message)
                   ? sanitizeUserFacingError(message) : undefined;
+                const unknownWrite = err instanceof HealthApiNetworkError && /^(?:create_|confirm_|log_|update_|delete_)/.test(options.name);
                 const failure = {
                   error: err instanceof HealthApiResponseError ? err.code : "service_unavailable",
-                  message: identityMessage ?? (err instanceof HealthApiResponseError && err.status < 500 && err.status !== 429
-                    ? "ClawFit couldn't validate that request. Please correct it before trying again." : TEMPORARY_FAILURE),
+                  message: identityMessage ?? (unknownWrite
+                    ? "The meal operation didn't return a confirmed result. Please check your meals and pending drafts before retrying."
+                    : err instanceof HealthApiResponseError && err.status === 403 && sender.mealFor
+                    ? "I couldn't authorize that meal recipient. Please name one active household member."
+                    : err instanceof HealthApiResponseError && err.status === 404
+                      ? "That meal or draft wasn't found in the authorized scope. Please check the person and record before retrying."
+                      : err instanceof HealthApiResponseError && err.status === 409
+                        ? "That meal draft is no longer in the required state. Please check whether it was logged, cancelled, or expired."
+                        : err instanceof HealthApiResponseError && err.status < 500 && err.status !== 429
+                          ? "ClawFit couldn't validate that request. Please correct it before trying again." : TEMPORARY_FAILURE),
                   retryable: false as const,
                 };
                 turns.fail(turn, options.name, failure);
@@ -182,7 +204,7 @@ function createSenderTool<TParams extends TSchema>(
           // rejection whose Error class may belong to another plugin module.
           const result = options.name === "estimate_nutrition" && turn
             ? await turns.estimateOnce(turn, execute)
-            : options.name === "create_pending_meal" && turn?.hasImageAttachment
+            : options.name === "create_pending_meal" && turn
               ? await turns.photoDraftOnce(turn, execute)
               : await execute();
           return jsonResult(result);
@@ -208,7 +230,8 @@ const plugin = defineToolPlugin({
         const authContext = turns.authorization(turn, toolContext);
         // The current user's quantities/captions take priority over the
         // general agent's potentially incomplete description of an album.
-        const text = (turn?.text ? `${turn.text}\nAssistant description: ${params.text}` : params.text).slice(0, 4_000);
+        const currentText = turn?.sourceText ?? turn?.text;
+        const text = (currentText ? `${currentText}\nAssistant description: ${params.text}` : params.text).slice(0, 4_000);
         let resolved: { images?: ResolvedImage[]; image?: ResolvedImage };
         try {
           if (!turn) throw new MediaResolutionError("unauthorized_media", "Missing trusted current-message attachment context.");
@@ -265,7 +288,7 @@ const plugin = defineToolPlugin({
       parameters: PendingMealDraft,
       execute: (params, { config, sender, toolContext, turn, signal }) => {
         const scopeKey = derivePendingMealScope(toolContext);
-        const idempotencyKey = turn?.hasImageAttachment
+        const idempotencyKey = turn
           ? `photo-draft:${createHash("sha256").update(JSON.stringify([turn.sessionKey, turn.senderId, turn.conversationId, turn.accountId ?? "default", turn.messageId])).digest("hex")}`
           : params.idempotencyKey;
         return healthFetch(config, "/v1/meals/pending", {
@@ -291,6 +314,36 @@ const plugin = defineToolPlugin({
           latest,
           pendingMeals: list?.pending ?? [],
         };
+      },
+    }),
+    createSenderTool(tool, {
+      name: "delete_pending_meal",
+      description: "Cancel one unconfirmed meal draft, never a logged meal. Requires an explicit current-message cancellation request. Omit pendingDraftId only when exactly one authorized active draft exists.",
+      parameters: Type.Object({ pendingDraftId: Type.Optional(Id) }, { additionalProperties: false }),
+      execute: async (params, { config, sender, toolContext, signal }) => {
+        const scopeKey = derivePendingMealScope(toolContext);
+        const options = { sender, ...(signal ? { signal } : {}) };
+        let draft: { id: string; confirmed?: boolean; cancelledAt?: string | null; expiresAt?: string; recipient?: unknown };
+        if (params.pendingDraftId) {
+          try {
+            draft = await healthFetch(config, withPendingMealScope(`/v1/meals/pending/${params.pendingDraftId}`, scopeKey), options);
+          } catch (error) {
+            if (error instanceof HealthApiResponseError && error.status === 404) return { status: "not_found", pendingDraftId: params.pendingDraftId };
+            throw error;
+          }
+        } else {
+          const list = await healthFetch<{ pending?: typeof draft[] }>(config, withPendingMealScope("/v1/meals/pending", scopeKey), options);
+          if (!list.pending?.length) return { status: "not_found" };
+          if (list.pending.length !== 1) return { error: "ambiguous_drafts", message: "More than one pending draft exists. Please specify which draft to cancel." };
+          draft = list.pending[0]!;
+        }
+        const receipt = { pendingDraftId: draft.id, ...(draft.recipient ? { recipient: draft.recipient } : {}) };
+        if (draft.confirmed) return { ...receipt, status: "already_confirmed" };
+        if (draft.cancelledAt) return { ...receipt, status: "already_cancelled" };
+        if (draft.expiresAt && Date.parse(draft.expiresAt) <= Date.now()) return { ...receipt, status: "expired" };
+        const cancelled = await healthFetch<{ id: string; cancelledAt?: string | null; recipient?: unknown }>(config, withPendingMealScope(`/v1/meals/pending/${draft.id}`, scopeKey), { ...options, method: "DELETE" });
+        if (cancelled.id !== draft.id || !cancelled.cancelledAt) throw new HealthApiNetworkError();
+        return { pendingDraftId: cancelled.id, status: "cancelled", ...(cancelled.recipient ? { recipient: cancelled.recipient } : {}) };
       },
     }),
     createSenderTool(tool, {
@@ -509,8 +562,8 @@ const plugin = defineToolPlugin({
       name: "log_meal",
       description: "Persist a user-confirmed meal estimate. Never call before explicit confirmation unless the original request explicitly said to log it.",
       parameters: LoggedMeal,
-      execute: (params, { config, sender, signal }) =>
-        healthFetch(config, "/v1/meals", { method: "POST", body: params, sender, ...(signal ? { signal } : {}) }),
+      execute: (params, { config, sender, turn, signal }) =>
+        healthFetch(config, "/v1/meals", { method: "POST", body: { ...params, ...(turn ? { idempotencyKey: `meal:${createHash("sha256").update(JSON.stringify([turn.senderId, turn.conversationId, turn.accountId ?? "default", turn.messageId, sender.mealFor ?? "self"])).digest("hex")}` } : {}) }, sender, ...(signal ? { signal } : {}) }),
     }),
     createSenderTool(tool, {
       name: "get_meal",
@@ -776,12 +829,14 @@ plugin.register = (api) => {
 export default plugin;
 
 const healthTrackingGuidance = `
+Use delete_pending_meal with pendingDraftId only to cancel an unconfirmed draft; delete_meal accepts only a logged meal ID. If a quoted-photo retry has no explicit recipient, ask who it is for before saving anything. Never claim a write or cancellation without the tool receipt.
+
 ClawFit health tracking policy:
 - The Health API/database is authoritative. Use the ClawFit tools for meal/workout state, and never claim a write succeeded unless its tool call succeeded.
 - Treat clear workout phrases as actions without unnecessary clarification: "starting push" starts a Push workout; "bench 80 x 8" adds that set; "8 again" reuses the latest exercise and weight; "only got 6" adds another set unless explicitly called a correction. Resolve current state with get_active_workout when needed.
 - Corrections update the existing meal or workout-set ID after resolving it from recent/active state. Never create a replacement. Reuse a stable idempotency key when retrying a create action.
 - Perform only the action in the latest user message. Earlier unanswered or failed user messages are context, not queued actions: never replay them. A retry of the same current action must reuse its original idempotency key.
-- ALL food and meal estimation (including food photos, restaurant meals, mixed dishes, and food descriptions) MUST use estimate_nutrition. The dedicated nutrition model performs nutritional calculation; never guess or compute calories/macros mentally. Call it once for all foods and photos in the current inbound message, including an album; all trusted current attachments are supplied automatically. Never supply image paths, URIs or image bytes. Repeated calls in the same turn reuse its first result. For ordinary successful estimates, create a pending draft before presenting it. If the current user asks for estimate-only or no saving, present the successful estimate without creating or modifying any draft or meal. If estimation fails, provide only the returned error message: never supply new calories/macros from your own knowledge or a previous meal, and never offer to log a failed estimate. Never retry a tool error marked retryable=false in this turn. Do not call log_meal until the user confirms, unless their first message explicitly asks to log/save/track it.
+- ALL food and meal estimation (including food photos, restaurant meals, mixed dishes, and food descriptions) MUST use estimate_nutrition. The dedicated nutrition model performs nutritional calculation; never guess or compute calories/macros mentally. Call it once for all foods and photos in the current inbound message, including an album; all trusted current attachments are supplied automatically. Never supply image paths, URIs or image bytes. Repeated calls in the same turn reuse its first result. For ordinary successful estimates, create a pending draft before presenting it. If the current user asks for estimate-only or no saving, do not create or update drafts or logged meals. An explicit request to cancel a pending draft may still use delete_pending_meal. If estimation fails, provide only the returned error message: never supply new calories/macros from your own knowledge or a previous meal, and never offer to log a failed estimate. Never retry a tool error marked retryable=false in this turn. Do not call log_meal until the user confirms, unless their first message explicitly asks to log/save/track it.
 - When an image of a product and an image of its nutrition label are both available, inspect both; printed nutrition label values take precedence over visual estimation.
 - The nutrition estimator has no web search or food database lookup. Never say that it searched online, accessed a database, or verified manufacturer information. Explain that numbers and unstated packet weights are estimates. A separate successful web search is evidence only for the sources it actually returns; it does not retroactively verify an earlier estimate. Include the API calorie range, confidence and relevant uncertainty when presenting an estimate.
 - On user confirmation ("log it", "log both", "yes", "save it"): DO NOT re-run estimate_nutrition. Confirm the relevant draft(s) with confirm_pending_meal. For a single draft, "log it" confirms that pending meal; for multiple items, "log both" confirms the active drafts.
