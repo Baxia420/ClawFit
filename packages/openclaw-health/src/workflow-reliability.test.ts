@@ -48,6 +48,7 @@ it("stops on the first no-save veto, delivers once, and rejects subsequent calls
   expect(fetchMock).not.toHaveBeenCalled();
   expect(h.replies).toHaveLength(1);
   expect(h.logs.some(log => log.includes('"reason":"policy_veto"'))).toBe(true);
+  expect(h.logs.some(log => log.includes('"operation":"create_pending_meal"') && log.includes('"category":"no_save"'))).toBe(true);
 });
 
 it.each(["Don't log it, clear the pending draft", "Estimate only; cancel this draft"])("separates cancellation intent from no-save: %s", async text => {

@@ -143,7 +143,11 @@ export class InboundTurns {
         const block = this.writeBlock(turn, event.toolName);
         if (block && !turn.failure) {
           this.fail(turn, event.toolName, { error: "meal_write_blocked", message: block, retryable: false });
-          this.diagnostic("policy_veto", turn);
+          const category = event.toolName === "delete_meal" && /\b(?:drafts?|pending|unconfirmed)\b/i.test(turn.text) ? "draft_endpoint"
+            : event.toolName === "delete_pending_meal" ? "cancellation_required"
+              : turn.referencedOtherSender && !explicitMealRecipient(turn.text) && ["create_pending_meal", "log_meal"].includes(event.toolName) ? "recipient_required"
+                : isNoSaveRequest(turn.text) ? "no_save" : "confirmation_required";
+          this.diagnostic("policy_veto", turn, {}, event.toolName, category);
         }
       }
       let grantedParams: { params: Record<string, unknown> } | undefined;
@@ -408,9 +412,10 @@ export class InboundTurns {
     return turn.photoDraft ??= Promise.resolve().then(execute);
   }
 
-  diagnostic(reason: DiagnosticReason, turn?: InboundTurn, metadata: Record<string, boolean | number> = {}) {
+  diagnostic(reason: DiagnosticReason, turn?: InboundTurn, metadata: Record<string, boolean | number> = {}, toolName?: string, category?: "draft_endpoint" | "cancellation_required" | "recipient_required" | "no_save" | "confirmation_required") {
     // Fixed codes, counts and a hashed run reference only; no raw IDs, paths, captions or errors.
-    this.api.logger?.info(`[clawfit-media] ${JSON.stringify({ reason, ...(turn?.runId ? { correlationId: createHash("sha256").update(turn.runId).digest("hex").slice(0, 16) } : {}), attachmentCount: turn?.paths.length ?? 0, bound: Boolean(turn?.runId), hasTrustedMetadata: Boolean(turn), hasInboundAccount: Boolean(turn?.accountId), activeRegistration: this.api.registrationMode === "full", ...metadata })}`);
+    const operation = toolName && MEAL_WRITES.has(toolName) ? toolName : undefined;
+    this.api.logger?.info(`[clawfit-media] ${JSON.stringify({ reason, ...(operation ? { operation } : {}), ...(category ? { category } : {}), ...(turn?.runId ? { correlationId: createHash("sha256").update(turn.runId).digest("hex").slice(0, 16) } : {}), attachmentCount: turn?.paths.length ?? 0, bound: Boolean(turn?.runId), hasTrustedMetadata: Boolean(turn), hasInboundAccount: Boolean(turn?.accountId), activeRegistration: this.api.registrationMode === "full", ...metadata })}`);
   }
 
   private bind(runId: string, turn: InboundTurn) { turn.runId = runId; this.state.runs.set(runId, turn); this.diagnostic("run_bound", turn); }
