@@ -369,16 +369,21 @@ export class HealthRepository {
   }
 
   async cancelPendingMeal(userId: string, id: string, scopeKey: string): Promise<typeof pendingMealEstimates.$inferSelect> {
-    const current = await this.getPendingMeal(userId, id, scopeKey);
-    if (current.confirmed) throw new ConflictError("A confirmed meal draft cannot be cancelled");
-    if (current.cancelledAt) return current;
-    const [cancelled] = await this.db
-      .update(pendingMealEstimates)
-      .set({ cancelledAt: new Date(), updatedAt: new Date() })
-      .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, scopeKey), eq(pendingMealEstimates.userId, userId)))
-      .returning();
-    if (!cancelled) throw new NotFoundError("Pending meal estimate not found");
-    return cancelled;
+    return this.db.transaction(async tx => {
+      // Confirmation takes the same row lock. Exactly one transition can win.
+      const [current] = await tx.select().from(pendingMealEstimates)
+        .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, scopeKey), eq(pendingMealEstimates.userId, userId))).for("update");
+      if (!current) throw new NotFoundError("Pending meal estimate not found");
+      if (current.confirmed) throw new ConflictError("A confirmed meal draft cannot be cancelled");
+      if (current.cancelledAt) return current;
+      const [cancelled] = await tx
+        .update(pendingMealEstimates)
+        .set({ cancelledAt: new Date(), updatedAt: new Date() })
+        .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, scopeKey), eq(pendingMealEstimates.userId, userId)))
+        .returning();
+      if (!cancelled) throw new NotFoundError("Pending meal estimate not found");
+      return cancelled;
+    });
   }
 
   async confirmPendingMeal(
@@ -388,9 +393,8 @@ export class HealthRepository {
     now: Date = new Date(),
   ): Promise<HydratedMeal> {
     return this.db.transaction(async (tx) => {
-      const pending = await tx.query.pendingMealEstimates.findFirst({
-        where: and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, options.scopeKey), eq(pendingMealEstimates.userId, userId)),
-      });
+      const [pending] = await tx.select().from(pendingMealEstimates)
+        .where(and(eq(pendingMealEstimates.id, id), eq(pendingMealEstimates.scopeKey, options.scopeKey), eq(pendingMealEstimates.userId, userId))).for("update");
       if (!pending) throw new NotFoundError("Pending meal estimate not found");
       if (pending.cancelledAt) throw new ConflictError("A cancelled meal draft cannot be confirmed");
       if (pending.confirmed && pending.mealId) {

@@ -73,3 +73,14 @@ describe("explicit estimate-only requests", () => {
   it.each(["Log it", "Please save this meal", "How many calories?"])("does not prohibit saving for %s", text => expect(isNoSaveRequest(text)).toBe(false));
   it("sanitizes a terminal 503 even without Google-specific text", () => expect(sanitizeUserFacingError("HTTP 503 SERVICE_UNAVAILABLE")).toBe(TEMPORARY_FAILURE));
 });
+
+
+it.each(["yes please", "yes, please", "please yes", "okay, please", "go ahead please"])("accepts ordinary confirmation: %s", text => expect(isMealLogConfirmation(text)).toBe(true));
+it.each(["yes?", 'She said "yes"', '> yes', '"log it"', "maybe log it", "did you log it?", "should I log this?", "I didn't say log it", "yes @Cici"])("does not turn quoted, uncertain or historical words into consent: %s", text => expect(isMealLogConfirmation(text)).toBe(false));
+it("requires channel verification before accepting a bot mention", () => {
+  expect(isMealLogConfirmation("yes @Clawfit")).toBe(false);
+  expect(isMealLogConfirmation("yes @Clawfit", true)).toBe(true);
+});
+
+
+it.each(["not now, log it later", "I did not ask you to log this", "remind me to log it", "the word log appears here"])("does not infer a command from an action word: %s", text => expect(isMealLogConfirmation(text)).toBe(false));

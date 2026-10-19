@@ -27,7 +27,7 @@ export function isNutritionSourceQuestion(text: string): boolean {
     && !/\b(log|save|delete|remove|correct|change|update)\b/i.test(text);
 }
 
-export function nutritionReply(estimate: ReplyEstimate, logged: boolean, noSave: boolean, partiallyLogged = false): string {
+export function nutritionReply(estimate: ReplyEstimate, logged: boolean, noSave: boolean, partiallyLogged = false, hasMatchingDraft = false): string {
   const { calories, macros } = estimate;
   return [
     estimate.label,
@@ -36,6 +36,6 @@ export function nutritionReply(estimate: ReplyEstimate, logged: boolean, noSave:
     `Confidence: ${estimate.confidence}.`,
     ...estimate.uncertaintyReasons.map(reason => `Uncertainty: ${reason}`),
     "Photo/text estimate; not verified against an online product source.",
-    partiallyLogged ? "Some meals were logged; others remain pending. Check your meals before retrying." : logged ? "Logged." : noSave ? "Not logged." : "Not logged. Reply yes to log it.",
+    partiallyLogged ? "Some meals were logged. Check your meals and remaining drafts before retrying." : logged ? "Logged." : noSave || !hasMatchingDraft ? "Not logged." : "Not logged. Reply yes to log it.",
   ].join("\n");
 }

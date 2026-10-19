@@ -69,9 +69,13 @@ export class NutritionEstimator {
     for (const [index, model] of this.models.entries()) {
       if (Date.now() >= deadline) break;
       try {
+        // A slow primary must not spend the fallback's entire budget. Fast
+        // failures leave their unused time available to later candidates.
+        const remainingModels = this.models.length - index;
+        const modelDeadline = Date.now() + Math.floor((deadline - Date.now()) / remainingModels);
         const raw = await this.client.generate({
           model,
-          deadline,
+          deadline: modelDeadline,
           prompt: nutritionPrompt(input.text),
           ...(input.images && input.images.length > 0
             ? { images: input.images }

@@ -18,6 +18,11 @@ it.each([
  ["Log it for me and Cici", "unresolved-recipient"],
  ["Log for both of us", "unresolved-recipient"],
  ["Yes", undefined],
+ ["Cici", "Cici"],
+ ["for Jobayer", "Jobayer"],
+ ["Try this photo again for Cici", "Cici"],
+ ["It is not Jobayer", "unresolved-recipient"],
+ ['She said "log it for Cici"', undefined],
  ["My favourite food is Cici's rice, log it", undefined],
 ])("extracts an explicit current-message recipient: %s", (text, recipient) => expect(explicitMealRecipient(text)).toBe(recipient));
 

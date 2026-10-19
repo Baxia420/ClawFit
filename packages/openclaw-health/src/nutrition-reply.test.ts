@@ -4,17 +4,18 @@ import { isNutritionSourceQuestion, NUTRITION_BASIS, nutritionReply, readReplyEs
 const estimate = { label: "Biscuits", calories: { best: 210, low: 180, high: 250 }, macros: { proteinG: 2.5, carbsG: 30, fatG: 9, fiberG: null }, confidence: "low" as const, uncertaintyReasons: ["Packet weight assumed; label not supplied"] };
 
 it("uses only API values and always preserves range, confidence, assumptions and logging state", () => {
-  const reply = nutritionReply(estimate, false, false);
+  const reply = nutritionReply(estimate, false, false, false, true);
   expect(reply).toContain("210 kcal (180–250)");
   expect(reply).toContain("Confidence: low");
   expect(reply).toContain("Packet weight assumed");
   expect(reply).toContain("not verified against an online product source");
   expect(reply).toContain("Reply yes to log it");
   expect(reply).not.toContain("Fiber:");
+  expect(nutritionReply(estimate, false, false)).not.toContain("Reply yes");
   expect(nutritionReply(estimate, false, true)).not.toContain("Reply yes");
   expect(nutritionReply(estimate, true, false)).toContain("\nLogged.");
   expect(nutritionReply(estimate, true, false)).not.toContain("Not logged");
-  expect(nutritionReply(estimate, false, false, true)).toContain("Some meals were logged; others remain pending");
+  expect(nutritionReply(estimate, false, false, true)).toContain("Some meals were logged. Check your meals");
 });
 
 it("validates API responses before preparing a reply", () => {
