@@ -18,6 +18,8 @@ The OpenClaw plugin exposes only health-domain tools. It does not expose SQL, sh
 
 For the production-shaped v1 topology—Render API, Neon PostgreSQL, Vercel web, and the OpenClaw cutover—use [the deployment runbook](docs/deployment.md). The Fastify API is intentionally not deployed to Vercel. For details on the two-user identity architecture, household model, and external identity mapping, see [the identity and multi-user documentation](docs/identity-and-multi-user.md).
 
+For the October 19 pre-fix token usage, model cost research, and repeatable post-fix comparison procedure, see [ChatGPT chat history before deletion on D19th](docs/chatgpt-chat-history-before-deletion-d19th.md).
+
 ## Prerequisites
 
 - Node.js 24.15+
