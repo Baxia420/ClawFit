@@ -138,6 +138,11 @@ it("does not guess a meal owner from model prose", async () => {
   expect((await h.final("It belongs to Mahin")).payload.text).toContain("haven't verified");
 });
 
+it("does not intercept an unrelated ownership question", async () => {
+  const h = await harness("Who owns this company?");
+  expect(await h.final("The company belongs to its shareholders.")).toBeUndefined();
+});
+
 it.each(["I cleared the draft.", "Deleted!", "This meal belongs to Mahin."])("suppresses unsupported claims even without an explicit action request: %s", async claim => {
   const h = await harness("Don't log this");
   expect((await h.final(claim)).payload.text).toContain("couldn't verify a completed meal action");

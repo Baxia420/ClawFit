@@ -267,7 +267,9 @@ export class InboundTurns {
         return { payload: { ...replyTarget, text: [text, isDraftCancellationRequest(turn.text) ? actionReply : undefined, turn.verifiedRecipient ? `Meal recipient: ${turn.verifiedRecipient.displayName}.` : undefined].filter(Boolean).join("\n"), isError: false } };
       }
       if (actionReply) return { payload: { ...replyTarget, text: actionReply, isError: false } };
-      if ((!turn.otherActionCompleted || /\b(?:meal|draft)\b/i.test(event.payload.text ?? "")) && hasMealActionClaim(event.payload.text ?? "")) return { payload: { ...replyTarget, text: "I couldn't verify a completed meal action or its recipient in this request. Please check your meals and pending drafts.", isError: false } };
+      const mealContext = turn.pendingDrafts !== undefined || turn.verifiedRecipient || isNoSaveRequest(turn.text)
+        || /\b(?:meals?|food|drafts?|nutrition|calories|photos?|images?|estimates?)\b/i.test(turn.text);
+      if (mealContext && (!turn.otherActionCompleted || /\b(?:meal|draft)\b/i.test(event.payload.text ?? "")) && hasMealActionClaim(event.payload.text ?? "")) return { payload: { ...replyTarget, text: "I couldn't verify a completed meal action or its recipient in this request. Please check your meals and pending drafts.", isError: false } };
       // Explain the actual estimator path instead of letting the model invent
       // an online lookup, database access, or a rationale for assumed weights.
       if (isNutritionSourceQuestion(turn.text)) return { payload: { ...replyTarget, text: NUTRITION_BASIS, isError: false } };

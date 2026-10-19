@@ -65,7 +65,9 @@ export function hasMatchingDraft(state: MealEvidence, estimate: ReplyEstimate): 
 }
 
 export function isMealOwnershipQuestion(text: string): boolean {
-  return /\b(?:whose|who\b.*\b(?:for|belongs?|owns?|meal|food|draft|photo)|which\s+(?:person|profile))\b/i.test(currentMessageText(text));
+  const current = currentMessageText(text);
+  return (/\b(?:meals?|food|drafts?|photos?|estimates?)\b/i.test(current) && /\b(?:whose|who|which\s+(?:person|profile))\b/i.test(current))
+    || /^\s*who\s+(?:is|was)\s+(?:this|that|it)\s+(?:for|assigned to)\s*[?!.]*$/i.test(current);
 }
 
 export function hasMealActionClaim(text: string): boolean {
