@@ -7,6 +7,7 @@ import JSON5 from "json5";
 import { parse } from "dotenv";
 import { z } from "zod";
 import { parseAllowlist } from "./openclaw-configuration.js";
+import { GOOGLE_KEY_ENV_NAMES, readGoogleCredentials } from "../packages/health-core/src/google-credentials.js";
 
 export function gatewayPaths(env = process.env) {
   const stateDir = resolve(env.OPENCLAW_STATE_DIR ?? resolve(homedir(), ".openclaw"));
@@ -58,7 +59,7 @@ export async function syncGatewayEnvironment(env = process.env): Promise<void> {
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const values = parse(original);
   const required = ["GEMINI_API_KEY", "HEALTH_API_OPENCLAW_TOKEN", "HEALTH_API_URL"];
-  const names = [...required, "CLAWFIT_WHATSAPP_ALLOW_FROM", "CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS", "APP_TIMEZONE"];
+  const names = [...new Set([...required, ...GOOGLE_KEY_ENV_NAMES, "CLAWFIT_WHATSAPP_ALLOW_FROM", "CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS", "APP_TIMEZONE"])];
   for (const name of names) {
     if (!values[name]?.trim() && env[name]?.trim()) values[name] = env[name]!;
   }
@@ -66,6 +67,7 @@ export async function syncGatewayEnvironment(env = process.env): Promise<void> {
   parseAllowlist(values.CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS, "groups");
   const missing = required.filter(name => !values[name]?.trim());
   if (missing.length) throw new Error(`Missing protected Gateway variables: ${missing.join(", ")}`);
+  readGoogleCredentials(values);
   values.OPENCLAW_GATEWAY_TOKEN = reconcileGatewayToken(config, values, env);
   const lines = original.replace(/\r\n/g, "\n").split("\n");
   for (const name of [...names, "OPENCLAW_GATEWAY_TOKEN"]) {

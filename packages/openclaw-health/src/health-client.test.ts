@@ -89,3 +89,16 @@ it("uses an explicit household URL and returns the API's verified recipient", as
     expect(result).toMatchObject({ recipient: { displayName: "Cici" } });
   } finally { vi.unstubAllEnvs(); }
 });
+
+it("distinguishes a denied household recipient without exposing its name or API message", async () => {
+  vi.stubEnv("HEALTH_API_OPENCLAW_TOKEN", "private-token");
+  const log = vi.spyOn(console, "info").mockImplementation(() => undefined);
+  try {
+    await expect(healthFetch({}, "/v1/meals/pending", {
+      sender: { mealFor: "private-recipient" },
+      fetchImpl: async () => Response.json({ error: { code: "UNAUTHORIZED_MEAL_RECIPIENT", message: "private details" } }, { status: 403 }),
+    })).rejects.toMatchObject({ status: 403 });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('"errorCode":"UNAUTHORIZED_MEAL_RECIPIENT","route":"household"'));
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(/private/);
+  } finally { vi.unstubAllEnvs(); log.mockRestore(); }
+});

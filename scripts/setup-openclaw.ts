@@ -30,6 +30,8 @@ if (whatsapp.status === 0) enabledPlugins.push("whatsapp");
 
 run("config", "set", "plugins.load.paths", JSON.stringify(loadPaths), "--strict-json");
 run("config", "set", "plugins.entries.clawfit-health.enabled", "true", "--strict-json");
+// Required by the pinned host for terminal finalization and numeric usage hooks.
+run("config", "set", "plugins.entries.clawfit-health.hooks.allowConversationAccess", "true", "--strict-json");
 run("config", "set", "plugins.allow", JSON.stringify(enabledPlugins), "--strict-json");
 run("config", "set", "plugins.entries.clawfit-health.config", JSON.stringify({ apiUrl: process.env.HEALTH_API_URL ?? "http://127.0.0.1:4000" }), "--strict-json");
 run("config", "set", "tools.profile", "minimal");

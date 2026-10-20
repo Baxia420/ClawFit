@@ -71,7 +71,7 @@ export async function healthFetch<T = unknown>(config: HealthPluginConfig, path:
   // response bodies, sender identifiers, captions, or image payloads.
   const operation = path === "/v1/nutrition/estimate" ? "nutrition_estimate" : "health_request";
   const diagnostic = (reason: "success" | "http_error" | "network_error" | "invalid_response", status?: number, errorCode?: string) => {
-    const code = errorCode && ["FORBIDDEN", "NOT_FOUND", "CONFLICT", "UNAUTHORIZED_GROUP", "UNRESOLVED_SENDER_IDENTITY", "INACTIVE_USER", "NUTRITION_UNAVAILABLE"].includes(errorCode) ? errorCode : undefined;
+    const code = errorCode && ["FORBIDDEN", "NOT_FOUND", "CONFLICT", "UNAUTHORIZED_GROUP", "UNRESOLVED_SENDER_IDENTITY", "INACTIVE_USER", "NUTRITION_UNAVAILABLE", "UNAUTHORIZED_MEAL_RECIPIENT", "INVALID_MEAL_RECIPIENT"].includes(errorCode) ? errorCode : undefined;
     const correlationId = options.sender?.correlationId;
     console.info(`[clawfit-api] ${JSON.stringify({ operation, reason, ...(status === undefined ? {} : { status }), ...(code ? { errorCode: code, route: requestPath.startsWith("/v1/household/") ? "household" : "self" } : {}), ...(correlationId && /^[a-f0-9]{16}$/.test(correlationId) ? { correlationId } : {}), durationMs: Math.round(performance.now() - start) })}`);
   };

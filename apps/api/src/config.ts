@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { readGoogleCredentials } from "@clawfit/health-core";
 
 export const configSchema = z
   .object({
@@ -7,6 +8,14 @@ export const configSchema = z
     HEALTH_API_OPENCLAW_TOKEN: z.string().min(24),
     CLAWFIT_WHATSAPP_ALLOWED_GROUP_IDS: z.string().default(""),
     GEMINI_API_KEY: z.string().min(1).optional(),
+    GEMINI_API_KEY_1: z.string().optional(),
+    GEMINI_API_KEY_2: z.string().optional(),
+    GEMINI_API_KEY_3: z.string().optional(),
+    GEMINI_API_KEY_4: z.string().optional(),
+    GEMINI_API_KEY_5: z.string().optional(),
+    GEMINI_API_KEY_6: z.string().optional(),
+    GEMINI_API_KEY_7: z.string().optional(),
+    GEMINI_API_KEY_8: z.string().optional(),
     NUTRITION_MODEL_PRIMARY: z.string().min(1).optional(),
     NUTRITION_MODEL_FALLBACK: z.string().min(1).optional(),
     APP_TIMEZONE: z.string().min(1).default("Asia/Kuala_Lumpur"),
@@ -17,6 +26,10 @@ export const configSchema = z
     WEB_ASSERTION_SIGNING_SECRET: z.string().min(32).optional(),
     HEALTH_API_AUTH_SECRET: z.string().min(32).optional(),
     AUTH_SECRET: z.string().min(32).optional(),
+  })
+  .superRefine((cfg, ctx) => {
+    try { readGoogleCredentials(cfg); }
+    catch { ctx.addIssue({ code: "custom", message: "Invalid Google credential pool configuration; values are hidden." }); }
   })
   .refine(
     (cfg) => cfg.HEALTH_API_WEB_TOKEN !== cfg.HEALTH_API_OPENCLAW_TOKEN,

@@ -196,6 +196,16 @@ export class InboundTurns {
       if (!bindingValid) return { block: true, blockReason: "Missing trusted current-message context. Do not save a draft or meal; ask the user to resend their request." };
       return grantedParams;
     }, { priority: 200 });
+    // Tool failures are terminal before another model request begins. Waiting
+    // for a final response wasted up to the remaining turn budget in production.
+    api.on("after_tool_call", async (event, context) => {
+      const runId = context.runId ?? event.runId;
+      const turn = runId ? this.state.runs.get(runId) : undefined;
+      if (turn?.failure && context.sessionKey === turn.sessionKey
+        && (!event.runId || !context.runId || event.runId === context.runId)) {
+        await this.stop(turn, context.sessionId);
+      }
+    }, { priority: 200 });
     api.on("model_call_started", async (event, context) => {
       const turn = this.state.runs.get(event.runId);
       if (event.sessionId && (turn || this.activeSessions.has(event.sessionId))) this.activeSessions.set(event.sessionId, event.runId);

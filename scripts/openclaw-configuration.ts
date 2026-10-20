@@ -36,14 +36,13 @@ export function buildModelConfiguration(input: unknown, now = Date.now()) {
   const primary = verified.find(p => p.modelId === report.selected.defaultModel && p.toolCalling === "pass");
   if (!primary?.modelId) throw new Error("No smoke-verified default model with working tool calling.");
   if (!isLowCostAgentModel(primary.modelId)) throw new Error("Default agent selection must be a verified low-cost model.");
-  // Only the explicitly tested low-cost candidates may be general-chat fallbacks.
-  const fallback = verified.find(p => p.modelId === report.selected.generalFallback && p.toolCalling === "pass");
-  if (fallback && !isLowCostAgentModel(fallback.modelId!)) throw new Error("General fallback must be a verified low-cost model.");
-  const generalFallbacks = fallback?.modelId && fallback.modelId !== primary.modelId ? [`google/${fallback.modelId}`] : [];
+  // Same-model credential failover replaces general model fallback. Ignore
+  // legacy reports selecting Gemma, so upgrades cannot silently re-enable it.
+  const generalFallbacks: string[] = [];
   const selectedIds = new Set([primary.modelId, ...generalFallbacks.map(id => id.slice(7))]);
   const nutrition: string[] = [];
   for (const id of [report.selected.nutritionPrimary, report.selected.nutritionFallback]) {
-    if (!id || nutrition.includes(id)) continue;
+    if (!id || /^gemma-/i.test(id) || nutrition.includes(id)) continue;
     const probe = verified.find(p => p.modelId === id && p.imageInput === "pass");
     if (!probe) throw new Error("Nutrition selection lacks a successful image-input smoke test. Run pnpm models:smoke.");
     nutrition.push(id);
@@ -62,7 +61,7 @@ export function buildModelConfiguration(input: unknown, now = Date.now()) {
     };
   });
   return {
-    provider: { api: GOOGLE_API, baseUrl: GOOGLE_BASE_URL, apiKey: "${GEMINI_API_KEY}", models },
+    provider: { api: GOOGLE_API, baseUrl: GOOGLE_BASE_URL, models },
     primary: `google/${primary.modelId}`,
     fallbacks: generalFallbacks,
     allowedModels: Object.fromEntries([`google/${primary.modelId}`, ...generalFallbacks].map(id => [id, {}])),
@@ -72,14 +71,13 @@ export function buildModelConfiguration(input: unknown, now = Date.now()) {
 }
 
 export function isLowCostAgentModel(id: string): boolean {
-  return /flash[-_.]?lite/i.test(id) || /^gemma-.*26b.*a4b/i.test(id);
+  return /^gemini-.*flash[-_.]?lite/i.test(id);
 }
 
 export function selectSmokeModels(results: SmokeReport["results"]): SmokeReport["selected"] {
   const available = Object.values(results).filter(p => p.status === "available" && p.modelId);
   const agents = available.filter(p => p.toolCalling === "pass" && isLowCostAgentModel(p.modelId!));
   const defaultModel = agents.find(p => /flash[-_.]?lite/i.test(p.modelId!))?.modelId ?? agents[0]?.modelId;
-  const generalFallback = agents.find(p => p.modelId !== defaultModel)?.modelId;
   const nutrition = available.filter(p => p.imageInput === "pass" && /^gemini-/i.test(p.modelId!) && !/lite/i.test(p.modelId!));
   // Preference is explicit; no unavailable or untested model enters runtime config.
   nutrition.sort((a,b) => b.modelId!.localeCompare(a.modelId!, undefined, { numeric: true }));
@@ -87,7 +85,6 @@ export function selectSmokeModels(results: SmokeReport["results"]): SmokeReport[
   return {
     ...(webSearch ? { webSearch } : {}),
     ...(defaultModel ? { defaultModel } : {}),
-    ...(generalFallback ? { generalFallback } : {}),
     ...(nutrition[0]?.modelId ? { nutritionPrimary: nutrition[0].modelId } : {}),
     ...(nutrition[1]?.modelId ? { nutritionFallback: nutrition[1].modelId } : {}),
   };
@@ -114,4 +111,14 @@ export function validateGatewaySearch(input: unknown): string[] {
   }).parse(input);
   if (!parsed.models.providers.google.models.some(model => model.id === parsed.plugins.entries.google.config.webSearch.model)) throw new Error("Search model is not registered.");
   return ["web_search"];
+}
+
+// A manifest validation alone does not prove these gated runtime hooks load.
+export function validateHealthHookPolicy(input: unknown): void {
+  z.object({ plugins: z.object({
+    allow: z.array(z.string()).refine(ids => ids.includes("clawfit-health")),
+    entries: z.object({ "clawfit-health": z.object({
+      enabled: z.literal(true), hooks: z.object({ allowConversationAccess: z.literal(true) }),
+    }).passthrough() }),
+  }).passthrough() }).passthrough().parse(input);
 }

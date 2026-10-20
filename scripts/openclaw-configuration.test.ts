@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { buildModelConfiguration, validateGatewaySearch, parseAllowlist, selectSmokeModels, type SmokeReport } from "./openclaw-configuration.js";
+import { buildModelConfiguration, validateHealthHookPolicy, validateGatewaySearch, parseAllowlist, selectSmokeModels, type SmokeReport } from "./openclaw-configuration.js";
 import { reconcileGatewayToken } from "./gateway-state.js";
 import { probeModels } from "./model-probes.js";
 
@@ -22,11 +22,11 @@ function report(): SmokeReport {
 describe("Gateway model evidence and routing", () => {
   it("registers only selected verified models with Google-native transport at both levels", () => {
     const config = buildModelConfiguration(report());
-    expect(config.fallbacks).toEqual([`google/${gemma}`]);
+    expect(config.fallbacks).toEqual([]);
     expect(config.provider.api).toBe("google-generative-ai");
     expect(config.provider.baseUrl).toBe("https://generativelanguage.googleapis.com/v1beta");
-    expect(config.provider.apiKey).toBe("${GEMINI_API_KEY}");
-    expect(config.provider.models.map(m => m.id)).toEqual([lite, gemma, strong]);
+    expect(config.provider).not.toHaveProperty("apiKey");
+    expect(config.provider.models.map(m => m.id)).toEqual([lite, strong]);
     expect(config.provider.models.every(m => m.api === config.provider.api && m.baseUrl === config.provider.baseUrl)).toBe(true);
     expect(buildModelConfiguration(report())).toEqual(config);
   });
@@ -39,13 +39,13 @@ describe("Gateway model evidence and routing", () => {
     expect(config.fallbacks).toEqual([]);
     expect(config.nutrition).toEqual([strong]);
   });
-  it("rejects stale evidence, unverified primary, heavy general fallback and untested image routing", () => {
+  it("rejects stale evidence, unverified or Gemma primary and untested image routing", () => {
     const stale = report(); stale.checkedAt = "2020-01-01T00:00:00Z";
     expect(() => buildModelConfiguration(stale)).toThrow("stale");
     const bad = report(); bad.selected.defaultModel = "unknown";
     expect(() => buildModelConfiguration(bad)).toThrow("default");
-    const heavy = report(); heavy.selected.generalFallback = strong; heavy.results["Gemini 3.6 Flash"]!.toolCalling = "pass";
-    expect(() => buildModelConfiguration(heavy)).toThrow("low-cost");
+    const unsupported = report(); unsupported.selected.defaultModel = gemma;
+    expect(() => buildModelConfiguration(unsupported)).toThrow("low-cost");
     const image = report(); image.results["Gemini 3.6 Flash"]!.imageInput = "not-tested";
     expect(() => buildModelConfiguration(image)).toThrow("image-input");
   });
@@ -152,4 +152,14 @@ describe("Gateway credentials and allowlists", () => {
     expect(() => parseAllowlist("*", "groups")).toThrow();
     expect(() => parseAllowlist("*", "senders")).toThrow();
   });
+});
+
+it("fails preflight when the host would silently block required health hooks", () => {
+  const entry = { enabled: true, hooks: { allowConversationAccess: true } };
+  const config = (value: unknown) => ({ plugins: { allow: ["clawfit-health"], entries: { "clawfit-health": value } } });
+  expect(() => validateHealthHookPolicy(config(entry))).not.toThrow();
+  for (const hooks of [undefined, {}, { allowConversationAccess: false }]) {
+    expect(() => validateHealthHookPolicy(config({ ...entry, hooks }))).toThrow();
+  }
+  expect(() => validateHealthHookPolicy(config({ ...entry, enabled: false }))).toThrow();
 });

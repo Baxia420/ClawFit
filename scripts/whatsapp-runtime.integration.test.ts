@@ -29,9 +29,9 @@ it("replays the pinned host loader, real inbound finalizer and tool wrapper acro
   const line = stdout.split("\n").find(line => line.startsWith("CLAWFIT_REPLAY_RESULT="));
   expect(line, stdout).toBeDefined();
   const result = JSON.parse(line!.slice("CLAWFIT_REPLAY_RESULT=".length));
-  expect(result).toMatchObject({ runtimeVersion: "2026.7.1-2", storedInInboundCache: true, distinctRegistrations: true, factoryHasMedia: false, factoryHasRun: false, dispatchHasRun: false, requestCount: 1, exactBytes: true, blocked: true, directWrite: { error: "meal_write_blocked", retryable: false }, stale: { error: "unauthorized_media", retryable: false }, safeDiagnostics: true });
+  expect(result).toMatchObject({ runtimeVersion: "2026.7.1-2", storedInInboundCache: true, distinctRegistrations: true, factoryHasMedia: false, factoryHasRun: false, dispatchHasRun: false, requestCount: 1, exactBytes: true, blocked: true, directWrite: { error: "meal_write_blocked", retryable: false }, stale: { error: "unauthorized_media", retryable: false }, safeDiagnostics: true, finalization: "finalize", usageRecorded: true, blockedHooks: false });
   expect(result.results).toMatchObject([{ estimate: { label: "Original photo estimate" } }, { estimate: { label: "Original photo estimate" } }]);
-  expect(result.hooks).toEqual(expect.arrayContaining(["reply_dispatch", "before_prompt_build", "before_tool_call", "reply_payload_sending"]));
+  expect(result.hooks).toEqual(expect.arrayContaining(["reply_dispatch", "before_prompt_build", "before_tool_call", "reply_payload_sending", "llm_output", "before_agent_finalize"]));
 });
 
 it.each([
@@ -62,7 +62,7 @@ it.each([
   expect(result.dispatchCount).toBe(requests);
   expect(result.registryReplaced).toBe(true);
   expect(result.replies).toHaveLength(replies);
-  expect(result.modelCalls).toBe(requests * 2);
+  expect(result.modelCalls).toBe(requests * 2 - (flags.includes("--fail-first") ? 1 : 0));
   expect(result.writeRequestCount).toBe(0);
   for (const reply of result.replies) {
     expect(reply.text).not.toMatch(/9999|42 g|verified this online|Logged!/);
@@ -90,9 +90,9 @@ it.each([
 // The fake model deliberately ignores every rejection and keeps calling tools.
 // The host must stop it; a compliant fake final response cannot prove this.
 it.each([
-  { flags: ["--compat", "--collection", "--fail-first", "--retry-failure"], calls: 2, requests: 1 },
+  { flags: ["--compat", "--collection", "--fail-first", "--retry-failure"], calls: 1, requests: 1 },
   { flags: ["--compat", "--collection", "--unbound-write"], calls: 1, requests: 0 },
-  { flags: ["--compat", "--fail-first", "--retry-failure"], calls: 4, requests: 2 },
+  { flags: ["--compat", "--fail-first", "--retry-failure"], calls: 3, requests: 2 },
 ])("terminates an unrecoverable tool rejection: $flags", async ({ flags, calls, requests }) => {
   const { stdout } = await execute(process.execPath, [fileURLToPath(new URL("fixtures/whatsapp-burst-replay.mjs", import.meta.url)), ...flags], { cwd: root, timeout: 55_000, maxBuffer: 2 * 1024 * 1024 });
   const line = stdout.split("\n").find(line => line.startsWith("CLAWFIT_BURST_RESULT="));
