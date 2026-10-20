@@ -6,7 +6,7 @@ import { loadClawFitEnv } from "./load-env.js";
 import { ensureGatewayDirectories, gatewayPaths, readGatewayConfig } from "./gateway-state.js";
 import { validateGoogleProfiles } from "./google-credential-profiles.js";
 import { runOpenClaw } from "./openclaw-cli.js";
-import { validateGatewaySearch, GOOGLE_API, GOOGLE_BASE_URL, OPENCLAW_VERSION, parseAllowlist } from "./openclaw-configuration.js";
+import { validateHealthHookPolicy, validateGatewaySearch, GOOGLE_API, GOOGLE_BASE_URL, OPENCLAW_VERSION, parseAllowlist } from "./openclaw-configuration.js";
 import { inspectHealthReadiness } from "./health-readiness.js";
 
 loadClawFitEnv();
@@ -24,6 +24,7 @@ await check("Service-user state directory ownership and write access", () => ens
 await check("Built health plugin validates", () => runOpenClaw(["plugins", "validate", "--root", resolve("packages/openclaw-health"), "--entry", "dist/index.js"], { capture: true }));
 await check("OpenClaw configuration validates", () => runOpenClaw(["config", "validate"], { capture: true }));
 const config = await readGatewayConfig();
+await check("Health plugin finalization and usage hook access", () => validateHealthHookPolicy(config));
 await check("Google-native transport and registered primary/fallbacks", () => {
   const parsed = z.object({
     models: z.object({ providers: z.object({ google: z.object({ api: z.literal(GOOGLE_API), baseUrl: z.literal(GOOGLE_BASE_URL),

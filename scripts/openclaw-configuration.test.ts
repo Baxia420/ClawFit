@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { buildModelConfiguration, validateGatewaySearch, parseAllowlist, selectSmokeModels, type SmokeReport } from "./openclaw-configuration.js";
+import { buildModelConfiguration, validateHealthHookPolicy, validateGatewaySearch, parseAllowlist, selectSmokeModels, type SmokeReport } from "./openclaw-configuration.js";
 import { reconcileGatewayToken } from "./gateway-state.js";
 import { probeModels } from "./model-probes.js";
 
@@ -152,4 +152,14 @@ describe("Gateway credentials and allowlists", () => {
     expect(() => parseAllowlist("*", "groups")).toThrow();
     expect(() => parseAllowlist("*", "senders")).toThrow();
   });
+});
+
+it("fails preflight when the host would silently block required health hooks", () => {
+  const entry = { enabled: true, hooks: { allowConversationAccess: true } };
+  const config = (value: unknown) => ({ plugins: { allow: ["clawfit-health"], entries: { "clawfit-health": value } } });
+  expect(() => validateHealthHookPolicy(config(entry))).not.toThrow();
+  for (const hooks of [undefined, {}, { allowConversationAccess: false }]) {
+    expect(() => validateHealthHookPolicy(config({ ...entry, hooks }))).toThrow();
+  }
+  expect(() => validateHealthHookPolicy(config({ ...entry, enabled: false }))).toThrow();
 });

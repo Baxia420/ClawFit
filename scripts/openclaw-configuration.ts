@@ -112,3 +112,13 @@ export function validateGatewaySearch(input: unknown): string[] {
   if (!parsed.models.providers.google.models.some(model => model.id === parsed.plugins.entries.google.config.webSearch.model)) throw new Error("Search model is not registered.");
   return ["web_search"];
 }
+
+// A manifest validation alone does not prove these gated runtime hooks load.
+export function validateHealthHookPolicy(input: unknown): void {
+  z.object({ plugins: z.object({
+    allow: z.array(z.string()).refine(ids => ids.includes("clawfit-health")),
+    entries: z.object({ "clawfit-health": z.object({
+      enabled: z.literal(true), hooks: z.object({ allowConversationAccess: z.literal(true) }),
+    }).passthrough() }),
+  }).passthrough() }).passthrough().parse(input);
+}

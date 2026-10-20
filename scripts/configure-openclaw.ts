@@ -31,6 +31,7 @@ const policy = z.object({ healthTools: z.array(z.string()) }).parse(JSON.parse(a
 runOpenClaw(["config", "set", "tools.alsoAllow", JSON.stringify([...policy.healthTools, ...(config.webSearchModel ? ["web_search"] : [])]), "--strict-json"]);
 runOpenClaw(["config", "set", "tools.web.search", JSON.stringify({ enabled: Boolean(config.webSearchModel), provider: "gemini", timeoutSeconds: 20, maxResults: 5 }), "--strict-json"]);
 if (config.webSearchModel) runOpenClaw(["config", "set", "plugins.entries.google.config.webSearch.model", config.webSearchModel]);
+runOpenClaw(["config", "set", "plugins.entries.clawfit-health.hooks.allowConversationAccess", "true", "--strict-json"]);
 runOpenClaw(["config", "validate"]);
 console.log(`Configured Google-native routing for ${config.primary}; ${credentials.length} credential profile(s); native credential failover within the existing turn limits. General model fallbacks disabled.`);
 console.log(`Verified nutrition candidates: ${config.nutrition.join(", ") || "none verified"}.`);

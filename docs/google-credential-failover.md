@@ -113,3 +113,49 @@ Compare normal use after activation against the existing October 19 baseline:
 same-model recovery count, final failures, turn latency, model calls and tokens,
 and actual meal/draft outcomes. Keep the earlier revision and protected config
 backup for rollback. An application rollback never undoes completed meal writes.
+
+## October 20 observation follow-up
+
+The supplied Gateway journal covers October 20 through approximately 23:27 MYT
+and includes the previous process before the 01:47 restart. It is evidence from
+the running release, not from this unmerged branch. Do not commit the raw journal:
+it contains peer and message identifiers.
+
+Confirmed findings and prepared fixes:
+
+- At startup, the pinned host blocked `llm_output` and
+  `before_agent_finalize` because the external health plugin had no explicit
+  `hooks.allowConversationAccess` permission. Setup and model configuration now
+  enable that permission only for `clawfit-health`. Preflight rejects its absence.
+  The real-loader replay asserts both hooks are registered and verifies numeric
+  usage logging and terminal finalization without logging model text.
+- systemd ignored `StartLimitIntervalSec` under `[Service]`. Both restart-limit
+  directives now live under `[Unit]`; the next approved redeploy installs the unit.
+- Terminal nutrition failures sometimes led to another model request after the
+  curated failure reply. The plugin now drains that reply and stops the exact run
+  from `after_tool_call`, preserving all existing consent and write guards.
+- One API 403 lacked a recognized diagnostic code. Recipient-denial codes now
+  have a fixed allowlist entry; raw names and API error text remain excluded.
+
+Five of twelve nutrition estimates returned `NUTRITION_UNAVAILABLE` after about
+22.3 seconds. This matches the API deadline, but Gateway logs cannot identify
+whether the underlying cause was provider overload, timeout, quota, or another
+provider error. Correlate API-side attempt logs for hashed run references
+`2986eadf25e12766`, `01d587a06ac4a2ad`, `fe7a6805dd1c79be`,
+`c838689e8910feab`, and `97063029c0857f72` before declaring these resolved.
+The existing deadline must not simply be increased to hide the failures.
+
+At 23:17 the Gateway provider reported Gemini 503/high demand followed by a
+Gemma 500/internal error. The journal contains no 429. Gemma removal is already
+prepared here; multiple project keys do not guarantee recovery from shared model
+overload. Three `confirmation_required` vetoes prevented unauthorized logging;
+without the original captions they are not evidence that the consent rule is
+wrong. A workout turn reached its 60-second guard after three history reads and
+a successful workout start; its eventual failure is not proof the write failed,
+and records must be checked before any retry. No historical replay is authorized.
+
+WhatsApp disconnects and idle-watchdog restarts recovered in the journal.
+`AbortError: Reply operation aborted by user` immediately after a
+`terminal_stop` is the host's wording for the plugin-requested cancellation,
+not evidence that a person pressed Stop. Image resizing messages and the minimal
+tool policy's removal messages are informational.

@@ -3,6 +3,8 @@ Description=ClawFit OpenClaw WhatsApp Gateway
 Documentation=https://github.com/Baxia420/ClawFit
 After=network.target network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -20,8 +22,6 @@ RestartSec=5s
 RestartPreventExitStatus=78
 SuccessExitStatus=0 143
 KillMode=control-group
-StartLimitIntervalSec=60s
-StartLimitBurst=5
 TimeoutStartSec=90
 TimeoutStopSec=30
 StandardOutput=journal

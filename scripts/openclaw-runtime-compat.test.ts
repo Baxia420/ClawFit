@@ -73,6 +73,11 @@ else {
 it("wires both the first upgrade and a later rollback to the checked-out service unit", async () => {
   const read = (name: string) => readFile(new URL(`../deploy/openclaw/${name}`, import.meta.url), "utf8");
   const [unit, repair, redeploy] = await Promise.all([read("clawfit-openclaw.service"), read("repair-state.sh"), read("redeploy.sh")]);
+  const unitSection = unit.split("[Unit]")[1]!.split("[Service]")[0]!;
+  const serviceSection = unit.split("[Service]")[1]!;
+  expect(unitSection).toContain("StartLimitIntervalSec=60s");
+  expect(unitSection).toContain("StartLimitBurst=5");
+  expect(serviceSection).not.toMatch(/^StartLimit/m);
   expect(unit).toContain("ExecStart=/usr/bin/env node /home/clawfit/app/scripts/openclaw-gateway.mjs gateway run");
   for (const script of [repair, redeploy]) {
     expect(script).toContain('install -m 644 "$APP_DIR/deploy/openclaw/clawfit-openclaw.service" /etc/systemd/system/clawfit-openclaw.service');

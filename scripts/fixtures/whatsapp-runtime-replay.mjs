@@ -35,7 +35,7 @@ const { saveMediaStream } = await import(pathToFileURL(require.resolve("openclaw
 const group = "120363000000000000@g.us", sender = "+60111111111";
 const sessionKey = `agent:main:whatsapp:group:${group}`;
 const pluginRoot = path.resolve(import.meta.dirname, "../../packages/openclaw-health");
-const config = { plugins: { allow: ["clawfit-health"], slots: { memory: "none" }, load: { paths: [pluginRoot] }, entries: { "clawfit-health": { enabled: true, config: { allowedGroupIds: [group] } } } } };
+const config = { plugins: { allow: ["clawfit-health"], slots: { memory: "none" }, load: { paths: [pluginRoot] }, entries: { "clawfit-health": { enabled: true, hooks: { allowConversationAccess: true }, config: { allowedGroupIds: [group] } } } } };
 const logs = [];
 const logger = { info: value => logs.push(value), warn: value => logs.push(value), error: value => logs.push(value), debug: () => {} };
 const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jF9sAAAAASUVORK5CYII=", "base64");
@@ -89,6 +89,8 @@ try {
   const write = discovery.tools.find(tool => tool.names.includes("create_pending_meal")).factory(toolContext);
   const blocked = await hooks.runBeforeToolCall({ toolName: "create_pending_meal", toolCallId: "write-call", params: {}, runId }, { sessionKey, runId, toolName: "create_pending_meal", channelId: group });
   const directWrite = await write.execute("write-call", {});
+  await hooks.runLlmOutput({ runId, usage: { input: 10, output: 20, total: 30 }, assistantTexts: ["private model text"] }, { runId, sessionKey });
+  const finalization = await hooks.runBeforeAgentFinalize({ runId }, { runId, sessionKey });
   // Also check that the registered terminal stream revokes call receipts.
   for (const entry of active.agentEventSubscriptions ?? []) {
     await entry.subscription.handle({ runId, stream: "lifecycle", data: { phase: "end" } });
@@ -100,6 +102,9 @@ try {
     storedInInboundCache: [photo, second].every(filePath => filePath.startsWith(path.join(directory, "media", "inbound") + path.sep)),
     distinctRegistrations: activeEntry.factory !== entry.factory,
     hooks: active.typedHooks.map(hook => hook.hookName),
+    finalization: finalization?.action,
+    usageRecorded: mediaLogs.some(value => String(value).includes('"reason":"model_usage"')),
+    blockedHooks: logs.some(value => String(value).includes("blocked because")),
     factoryHasMedia: "MediaPaths" in toolContext || "authorizedMediaPaths" in toolContext,
     factoryHasRun: "runId" in toolContext,
     dispatchHasRun: false,
@@ -109,7 +114,7 @@ try {
     blocked: blocked?.block === true,
     directWrite: directWrite.details,
     stale: stale.details,
-    safeDiagnostics: mediaLogs.length > 0 && mediaLogs.every(value => !String(value).includes(sender) && !String(value).includes(group) && !String(value).includes(directory) && !String(value).includes(bytes.toString("base64")) && !String(value).includes("Estimate only")),
+    safeDiagnostics: mediaLogs.length > 0 && mediaLogs.every(value => !String(value).includes(sender) && !String(value).includes(group) && !String(value).includes(directory) && !String(value).includes(bytes.toString("base64")) && !String(value).includes("Estimate only") && !String(value).includes("private model text")),
   };
   console.log(`CLAWFIT_REPLAY_RESULT=${JSON.stringify(output)}`);
 } finally {

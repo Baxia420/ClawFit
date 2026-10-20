@@ -209,3 +209,17 @@ it("keeps direct meal idempotency independent of model-supplied keys", async () 
   const keys = fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body).idempotencyKey);
   expect(keys[0]).toMatch(/^meal:[a-f0-9]{64}$/); expect(keys[1]).toBe(keys[0]);
 });
+
+it("stops a terminal API failure after the tool without waiting for another model", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ error: { code: "NUTRITION_UNAVAILABLE" } }, { status: 503 })));
+  const h = await harness("Estimate lunch");
+  await h.emit("model_call_started", { ...h.context, callId: "first" });
+  await h.call("estimate_nutrition", { text: "Lunch" });
+  expect(abort).not.toHaveBeenCalled();
+  await h.emit("after_tool_call", { runId: h.context.runId, toolName: "estimate_nutrition", params: {} }, { ...h.context, sessionKey: "unrelated-session" });
+  expect(abort).not.toHaveBeenCalled();
+  await h.emit("after_tool_call", { runId: h.context.runId, toolName: "estimate_nutrition", params: {} });
+  expect(abort).toHaveBeenCalledExactlyOnceWith(h.context.sessionId);
+  expect(h.replies).toHaveLength(1);
+  expect(await h.call("create_pending_meal")).toMatchObject({ block: true });
+});
