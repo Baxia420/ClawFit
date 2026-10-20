@@ -112,10 +112,15 @@ const fakeStream = (model, context) => {
   }
   const stream = createAssistantMessageEventStream();
   if (modelCalls > (attemptWrites ? 14 : 8)) throw new Error("Offline fixture exceeded call budget");
-  // The SDK appends a user-role reminder after tool results. Inspect the last
-  // non-user message rather than depending on an invented hook/run context.
-  const toolResult = !(retryFailure && apiRequests.length === 1) && !unboundWrite && context.messages.filter(message => message.role !== "user").at(-1)?.role === "toolResult";
-  const lastToolName = context.messages.filter(message => message.role === "assistant").at(-1)?.content.find(part => part.type === "toolCall")?.name;
+  // A terminal abort can leave the previous turn ending in a tool result.
+  // Bound fake-model reasoning to the newest real user message. The pinned
+  // host's runtime-context reminder is also user-role and must be skipped.
+  const boundary = context.messages.findLastIndex(message => message.role === "user"
+    && !(typeof message.content === "string" ? message.content : message.content?.find(part => part.type === "text")?.text ?? "")
+      .startsWith("OpenClaw runtime context for the immediately preceding user message."));
+  const currentMessages = context.messages.slice(boundary + 1);
+  const toolResult = !(retryFailure && apiRequests.length === 1) && !unboundWrite && currentMessages.filter(message => message.role !== "user").at(-1)?.role === "toolResult";
+  const lastToolName = currentMessages.filter(message => message.role === "assistant").at(-1)?.content.find(part => part.type === "toolCall")?.name;
   const writeCall = attemptWrites && toolResult && lastToolName === "estimate_nutrition" ? { type: "toolCall", id: `write-${modelCalls}`, name: "create_pending_meal", arguments: { label: "Invented save despite trusted no-save instruction", items: [], calories: { best: 300, low: 250, high: 350 }, macros: { proteinG: 10, carbsG: 40, fatG: 10, fiberG: 2 }, confidence: "medium", uncertaintyReasons: [], source: "photo", occurredAt: "2026-10-12T05:00:00Z", rawUserText: "log everything", idempotencyKey: "attempted-unauthorized-save" } }
     : attemptWrites && toolResult && lastToolName === "create_pending_meal" ? { type: "toolCall", id: `confirm-${modelCalls}`, name: "confirm_pending_meal", arguments: { id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa" } } : undefined;
   const message = { role: "assistant", api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), content: writeCall ? [writeCall] : toolResult ? [{ type: "text", text: silentFailure && apiRequests.length === 1 ? "NO_REPLY" : "I verified this online: exactly 9999 kcal and a 42 g packet. Logged!" }] : (collection || (album && !mixedSender) ? [1, 2] : [1]).map(index => ({ type: "toolCall", id: `call-${modelCalls}-${index}`, name: unboundWrite ? "create_pending_meal" : "estimate_nutrition", arguments: unboundWrite ? { label: "Unsafe write", items: [], calories: { best: 300, low: 250, high: 350 }, macros: { proteinG: 10, carbsG: 40, fatG: 10, fiberG: 2 }, confidence: "medium", uncertaintyReasons: [], source: "text", occurredAt: "2026-10-12T05:00:00Z", rawUserText: "log it", idempotencyKey: "unbound-write" } : { text: "Current photo" } })), stopReason: writeCall ? "toolUse" : toolResult ? "stop" : "toolUse", usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
